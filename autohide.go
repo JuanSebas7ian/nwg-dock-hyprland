@@ -19,21 +19,63 @@ app picker or a drag), which left the dock on screen.
 const (
 	dockHideDelay   = 500 * time.Millisecond // after the pointer left the dock
 	dockIdleTimeout = 5 * time.Second        // without pointer activity, even over the dock
+	menuLeaveDelay  = 800 * time.Millisecond // after the pointer left an open menu and the dock
+	menuIdleTimeout = 8 * time.Second        // without pointer activity over an open menu
+	menuMinVisible  = 2 * time.Second        // an open menu is never closed sooner
 	idleCheckPeriod = 200                    // ms
 )
 
 var (
 	pointerInDock    bool
+	pointerInMenu    bool
+	menuShownAt      time.Time
 	lastDockActivity = time.Now()
 	openMenus        []*gtk.Menu
 )
 
-// Registers a dock menu, so that the dock stays visible while it's shown
+/*
+Registers a dock menu or submenu. While it's shown and in use the dock stays visible; once the
+pointer stays away from it and from the dock, it's closed and the dock hides.
+*/
 func trackMenu(menu *gtk.Menu) {
 	if !*dnd {
 		return
 	}
 	openMenus = append(openMenus, menu)
+	menu.AddEvents(int(gdk.PointerMotionMask))
+	menu.Connect("enter-notify-event", func() bool {
+		pointerInMenu = true
+		markDockActivity()
+		return false
+	})
+	menu.Connect("leave-notify-event", func(_ *gtk.Menu, e *gdk.Event) bool {
+		if e.AsCrossing().Detail() != gdk.NotifyInferior {
+			pointerInMenu = false
+			markDockActivity()
+		}
+		return false
+	})
+	menu.Connect("motion-notify-event", func() bool {
+		markDockActivity()
+		return false
+	})
+	menu.Connect("show", func() {
+		menuShownAt = time.Now()
+		markDockActivity()
+	})
+	menu.Connect("hide", func() {
+		pointerInMenu = false
+		markDockActivity()
+	})
+}
+
+func popdownMenus() {
+	for _, m := range openMenus {
+		if m.IsVisible() {
+			m.Popdown()
+		}
+	}
+	pointerInMenu = false
 }
 
 // Whether any dock menu is shown; forgets the ones that aren't
@@ -69,6 +111,22 @@ func shouldHideDock(idle time.Duration, pointerOver, held bool) bool {
 	return idle >= dockHideDelay
 }
 
+/*
+Whether an open menu should be closed (and the dock hidden): it's been `idle` since the last
+pointer activity and `shown` since it opened, and the pointer is over the menu or the dock
+(`pointerOver`). GTK may report the pointer as gone when a menu opens, so a menu always gets
+menuMinVisible to be noticed.
+*/
+func shouldCloseMenu(idle, shown time.Duration, pointerOver bool) bool {
+	if shown < menuMinVisible {
+		return false
+	}
+	if pointerOver {
+		return idle >= menuIdleTimeout
+	}
+	return idle >= menuLeaveDelay
+}
+
 func setupIdleHide() {
 	win.AddEvents(int(gdk.PointerMotionMask))
 	win.Connect("show", markDockActivity)
@@ -94,19 +152,31 @@ func setupIdleHide() {
 		if !win.IsVisible() {
 			return true
 		}
-		held := dockHeld() || menuShown()
-		if held {
+		if dndDragging() || pickerOpen() {
 			// count the idle time from when the dock is released
 			markDockActivity()
 			return true
 		}
-		if shouldHideDock(time.Since(lastDockActivity), pointerInDock || mouseInsideHotspot, held) {
+		idle := time.Since(lastDockActivity)
+		if menuShown() {
+			if shouldCloseMenu(idle, time.Since(menuShownAt), pointerInDock || pointerInMenu) {
+				log.Debug("Menu unused, closing it and hiding the dock")
+				popdownMenus()
+				hideIdleDock()
+			}
+			return true
+		}
+		if shouldHideDock(idle, pointerInDock || mouseInsideHotspot, false) {
 			log.Debug("Idle, hiding the dock")
-			cancelClose()
-			pointerInDock = false
-			mouseInsideDock = false
-			win.Hide()
+			hideIdleDock()
 		}
 		return true
 	})
+}
+
+func hideIdleDock() {
+	cancelClose()
+	pointerInDock = false
+	mouseInsideDock = false
+	win.Hide()
 }

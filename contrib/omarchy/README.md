@@ -10,8 +10,9 @@ Esta rama (`feat/dnd-reorder`) agrega al dock, detrás de la opción `-dnd`:
   un clic ancla o desancla. Se cierra con Esc, con ✕ o al sacar el mouse de la lista 1,5 s.
   Si no hay lanzador instalado (`nwg-drawer`), el clic izquierdo del botón del lanzador también abre la lista.
 - **Auto-ocultado ágil (con `-d`):** el dock se oculta medio segundo después de que el mouse sale,
-  o a los 5 s si el mouse queda quieto encima. Mientras haya un menú abierto, el selector abierto
-  o un arrastre en curso, se queda visible. Es una verificación periódica, porque en Wayland el
+  o a los 5 s si el mouse queda quieto encima. Un menú de clic derecho que no usas se cierra solo
+  (0,8 s después de que el mouse se va, nunca antes de 2 s) y el dock se oculta con él; el selector
+  se cierra a los 4 s si nunca le pasas el mouse. Mientras arrastras, el dock se queda visible. Es una verificación periódica, porque en Wayland el
   evento de salida a veces no llega (tras un menú o el selector) y el dock se quedaba visible.
 - **Vigilante anti-cuelgue:** si el dock deja de responder 10 s, se cierra solo (código 2) para que
   `launch-dock.sh` lo relance.

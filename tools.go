@@ -407,6 +407,7 @@ func clientMenuContext(class string, instances []client) gtk.Menu {
 		menuItem.Add(hbox)
 		menu.Append(menuItem)
 		submenu := gtk.NewMenu()
+		trackMenu(submenu)
 
 		a := instance.Address
 

@@ -287,6 +287,13 @@ func openPicker() {
 
 	w.ShowAll()
 	search.GrabFocus()
+	// if the pointer never reaches the picker, it's not wanted: close it after a while
+	cancelPickerClose()
+	pickerCloseSrc = glib.TimeoutAdd(uint(4000), func() bool {
+		pickerCloseSrc = 0
+		closePicker()
+		return false
+	})
 	log.Debugf("Picker opened with %d apps", len(apps))
 }
 
