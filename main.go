@@ -69,6 +69,7 @@ var alignment = flag.String("a", "center", "Alignment in full width/height: \"st
 var autohide = flag.Bool("d", false, "auto-hiDe: show dock when hotspot hovered, close when left or a button clicked")
 var cssFileName = flag.String("s", "style.css", "Styling: css file name")
 var debug = flag.Bool("debug", false, "turn on debug messages")
+var dnd = flag.Bool("dnd", false, "enable Drag aNd Drop reordering of pinned items, the \"Add app…\" picker and the hang watchdog")
 var displayVersion = flag.Bool("v", false, "display Version information")
 var exclusive = flag.Bool("x", false, "set eXclusive zone: move other windows aside; overrides the \"-l\" argument")
 var full = flag.Bool("f", false, "take Full screen width/height")
@@ -100,6 +101,7 @@ func buildMainBox() {
 		mainBox.Destroy()
 	}
 	mainBox = gtk.NewBox(innerOrientation, 0)
+	dndItems = nil
 
 	if *alignment == "start" {
 		alignmentBox.PackStart(mainBox, false, true, 0)
@@ -163,12 +165,13 @@ func buildMainBox() {
 			mainBox.PackStart(button, false, false, 0)
 		}
 	}
+	dndBase = len(mainBox.Children())
 
 	var alreadyAdded []string
-	for _, pin := range pinned {
+	for i, pin := range pinned {
 		if !inTasks(pin) {
 			if !isIn(classesToIgnore, pin) {
-				button := pinnedButton(pin, position)
+				button := pinnedButton(pin, i, position)
 				mainBox.PackStart(button, false, false, 0)
 			} else {
 				log.Debugf("Ignoring pin '%s'", pin)
@@ -178,7 +181,7 @@ func buildMainBox() {
 			c := instances[0]
 			if !isIn(classesToIgnore, c.Class) {
 				if len(instances) == 1 {
-					button := taskButton(c, instances, position)
+					button := taskButton(c, instances, i, position)
 					mainBox.PackStart(button, false, false, 0)
 					if c.Class == activeClient.Class && !*autohide {
 						button.SetObjectProperty("name", "active")
@@ -186,7 +189,7 @@ func buildMainBox() {
 						button.SetObjectProperty("name", "")
 					}
 				} else if !isIn(alreadyAdded, c.Class) {
-					button := taskButton(c, instances, position)
+					button := taskButton(c, instances, i, position)
 					mainBox.PackStart(button, false, false, 0)
 					if c.Class == activeClient.Class && !*autohide {
 						button.SetObjectProperty("name", "active")
@@ -212,7 +215,7 @@ func buildMainBox() {
 			instances := taskInstances(t.Class)
 			if !isIn(classesToIgnore, t.Class) {
 				if len(instances) == 1 {
-					button := taskButton(t, instances, position)
+					button := taskButton(t, instances, -1, position)
 					mainBox.PackStart(button, false, false, 0)
 					if t.Class == activeClient.Class && !*autohide {
 						button.SetObjectProperty("name", "active")
@@ -220,7 +223,7 @@ func buildMainBox() {
 						button.SetObjectProperty("name", "")
 					}
 				} else if !isIn(alreadyAdded, t.Class) {
-					button := taskButton(t, instances, position)
+					button := taskButton(t, instances, -1, position)
 					mainBox.PackStart(button, false, false, 0)
 					if t.Class == activeClient.Class && !*autohide {
 						button.SetObjectProperty("name", "active")
@@ -287,6 +290,10 @@ func setupHotSpot(monitor gdk.Monitor, dockWindow *gtk.Window) gtk.Window {
 	}
 
 	hotspotBox.Connect("enter-notify-event", func() {
+		// Hiding and re-showing the dock would cancel an ongoing drag
+		if dndDragging() {
+			return
+		}
 		hotspotEnteredAt := time.Now().UnixNano() / 1000000
 		delay := hotspotEnteredAt - detectorEnteredAt
 		gtklayershell.SetMonitor(dockWindow, &monitor)
@@ -335,7 +342,7 @@ func setupHotSpot(monitor gdk.Monitor, dockWindow *gtk.Window) gtk.Window {
 		win.Connect("leave-notify-event", func() {
 			mouseInsideHotspot = false
 			glib.TimeoutAdd(1000, func() bool {
-				if !mouseInsideDock && !mouseInsideHotspot {
+				if !mouseInsideDock && !mouseInsideHotspot && !dockHeld() {
 					dockWindow.Hide()
 				}
 				return false
@@ -655,13 +662,8 @@ func main() {
 
 	// Close the window on leave, but not immediately, to avoid accidental closes
 	win.Connect("leave-notify-event", func() {
-		if *autohide {
-			src = glib.TimeoutAdd(uint(1000), func() bool {
-				mouseInsideDock = false
-				win.Hide()
-				src = 0
-				return false
-			})
+		if *autohide && !dockHeld() {
+			scheduleClose()
 		}
 	})
 
@@ -684,6 +686,10 @@ func main() {
 	refreshMainBox := func(forceRefresh bool) {
 		if forceRefresh || (len(clients) != len(oldClients)) {
 			glib.TimeoutAdd(0, func() bool {
+				// Rebuilding would destroy the widget being dragged; dndDragEnd runs it later
+				if dndDeferRefresh() {
+					return false
+				}
 				buildMainBox()
 				oldClients = clients
 				return false
@@ -696,6 +702,9 @@ func main() {
 		log.Fatalf("Couldn't list clients: %s", err)
 	}
 	buildMainBox()
+	if *dnd {
+		startHangWatchdog()
+	}
 
 	win.ShowAll()
 
@@ -752,6 +761,10 @@ func main() {
 					win.ShowAll()
 				}
 				if windowState == WindowHide && win != nil && win.IsVisible() {
+					// Hiding would cancel an ongoing drag; dndDragEnd hides it later
+					if dndDeferHide() {
+						return false
+					}
 					win.Hide()
 				}
 

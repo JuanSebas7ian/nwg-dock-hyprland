@@ -1,0 +1,32 @@
+/* Dock tipo cristal: fondo claro semitransparente, borde fino y brillo superior.
+   El desenfoque del fondo lo pone Hyprland (regla de capa "nwg-dock" en looknfeel.lua). */
+
+window {
+    background: transparent;
+}
+
+#box {
+    background: linear-gradient(to bottom, rgba(255, 255, 255, 0.20), rgba(255, 255, 255, 0.08));
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 22px;
+    padding: 6px 12px;
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.35);
+}
+
+button {
+    background: transparent;
+    border-radius: 14px;
+    padding: 6px;
+    margin: 0 4px;
+    border: none;
+    box-shadow: none;
+    transition: background 150ms ease-in-out;
+}
+
+button:hover {
+    background: rgba(255, 255, 255, 0.22);
+}
+
+#active {
+    border-bottom: 2px solid rgba(255, 255, 255, 0.55);
+}

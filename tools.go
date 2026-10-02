@@ -9,7 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/diamondburned/gotk4/pkg/gdk/v3"
 	"github.com/diamondburned/gotk4/pkg/gdkpixbuf/v2"
@@ -28,7 +31,7 @@ func taskInstances(ID string) []client {
 	return found
 }
 
-func pinnedButton(ID string, position *string) *gtk.Box {
+func pinnedButton(ID string, pinIdx int, position *string) *gtk.Box {
 	vertical = *position == "left" || *position == "right"
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
@@ -37,6 +40,7 @@ func pinnedButton(ID string, position *string) *gtk.Box {
 	}
 
 	button := gtk.NewButton()
+	setupPinnedDnd(box, button, ID, pinIdx)
 
 	image, err := createImage(ID, imgSizeScaled)
 	if err != nil || image == nil {
@@ -55,10 +59,16 @@ func pinnedButton(ID string, position *string) *gtk.Box {
 	button.SetTooltipText(getName(ID))
 
 	button.Connect("clicked", func() {
+		if dndBlocksClick() {
+			return
+		}
 		launch(ID)
 	})
 
 	button.Connect("button-release-event", func(btn *gtk.Button, e *gdk.Event) bool {
+		if dndBlocksClick() {
+			return true
+		}
 		btnEvent := e.AsButton()
 		if btnEvent.Button() == 1 || btnEvent.Button() == 2 {
 			launch(ID)
@@ -103,6 +113,7 @@ func pinnedMenuContext(taskID string) gtk.Menu {
 		unpinTask(taskID)
 	})
 	menu.Append(menuItem)
+	addAppMenuItem(menu)
 
 	menu.ShowAll()
 	return *menu
@@ -131,6 +142,10 @@ func launcherButton(position *string) *gtk.Box {
 			button.SetAlwaysShowImage(true)
 
 			button.Connect("clicked", func() {
+				if *dnd && !isCommand(strings.Fields(*launcherCmd)[0]) {
+					openPicker()
+					return
+				}
 				elements := strings.Split(*launcherCmd, " ")
 				cmd := exec.Command(elements[0], elements[1:]...)
 
@@ -146,6 +161,19 @@ func launcherButton(position *string) *gtk.Box {
 				}
 			})
 			button.Connect("enter-notify-event", cancelClose)
+			if *dnd {
+				button.SetTooltipText("Right click: add app")
+				button.Connect("button-release-event", func(btn *gtk.Button, e *gdk.Event) bool {
+					if e.AsButton().Button() != 3 {
+						return false
+					}
+					menu := gtk.NewMenu()
+					addAppMenuItem(menu)
+					menu.ShowAll()
+					menu.PopupAtWidget(button, widgetAnchor, menuAnchor, nil)
+					return true
+				})
+			}
 
 			if !vertical {
 				pixbuf, e = gdkpixbuf.NewPixbufFromFileAtSize(filepath.Join(dataHome, "nwg-dock-hyprland/images/task-empty.svg"),
@@ -184,7 +212,18 @@ func cancelClose() {
 	}
 }
 
-func taskButton(t client, instances []client, position *string) *gtk.Box {
+// Close the window after a while, unless cancelClose is called in the meantime
+func scheduleClose() {
+	src = glib.TimeoutAdd(uint(1000), func() bool {
+		mouseInsideDock = false
+		win.Hide()
+		src = 0
+		return false
+	})
+}
+
+// pinIdx is the client's index in the pinned list, or -1 if it's not pinned
+func taskButton(t client, instances []client, pinIdx int, position *string) *gtk.Box {
 	vertical = *position == "left" || *position == "right"
 
 	box := gtk.NewBox(gtk.OrientationVertical, 0)
@@ -193,6 +232,9 @@ func taskButton(t client, instances []client, position *string) *gtk.Box {
 	}
 
 	button := gtk.NewButton()
+	if pinIdx >= 0 {
+		setupPinnedDnd(box, button, t.Class, pinIdx)
+	}
 
 	image, _ := createImage(t.Class, imgSizeScaled)
 	if image == nil {
@@ -260,6 +302,9 @@ func taskButton(t client, instances []client, position *string) *gtk.Box {
 		button.Connect("event", func(btn *gtk.Button, e *gdk.Event) bool {
 			btnEvent := e.AsButton()
 			if btnEvent.Type() == gdk.ButtonReleaseType || btnEvent.Type() == gdk.TouchEndType {
+				if dndBlocksClick() {
+					return true
+				}
 				if btnEvent.Button() == 1 || btnEvent.Type() == gdk.TouchEndType {
 					focusWindow(t.Address)
 					return true
@@ -276,6 +321,9 @@ func taskButton(t client, instances []client, position *string) *gtk.Box {
 		})
 	} else {
 		button.Connect("button-release-event", func(btn *gtk.Button, e *gdk.Event) bool {
+			if dndBlocksClick() {
+				return true
+			}
 			btnEvent := e.AsButton()
 			if btnEvent.Button() == 1 {
 				menu := clientMenu(t.Class, instances)
@@ -411,6 +459,10 @@ func clientMenuContext(class string, instances []client) gtk.Menu {
 		pinItem.Connect("activate", func() {
 			log.Infof("pin %s", class)
 			pinTask(class)
+			if *dnd {
+				// move it to the pinned items right away
+				rebuildWhenIdle()
+			}
 		})
 	} else {
 		pinItem.SetLabel("Unpin")
@@ -420,6 +472,7 @@ func clientMenuContext(class string, instances []client) gtk.Menu {
 		})
 	}
 	menu.Append(pinItem)
+	addAppMenuItem(menu)
 
 	menu.ShowAll()
 	return *menu
@@ -872,6 +925,362 @@ func savePinned() {
 			}
 		}
 	}
+}
+
+/*
+Reordering of pinned items by dragging them, enabled with the -dnd flag.
+It's built on plain pointer events, not on GTK/Wayland drag and drop: the compositor
+never enters a drag session, so no drag can get stuck there and freeze the desktop.
+While dragging, the other pinned items make room live; releasing outside the dock cancels.
+All the state below is only touched on the GTK main thread.
+*/
+
+type dndItem struct {
+	box    *gtk.Box
+	id     string
+	pinIdx int // index in `pinned`
+}
+
+var (
+	dndItems          []*dndItem // displayed pinned items, in display order; reset by buildMainBox
+	dndBase           int        // mainBox position of the first pinned item
+	dndPressed        *dndItem   // item under a left button press, which may turn into a drag
+	dndPressX         int
+	dndPressY         int
+	dndDragged        *dndItem
+	dndSlots          []int // centers of the pinned item slots when the drag started
+	dndDragActive     bool  // a pinned item is being dragged
+	dndDragJustEnded  bool  // swallow clicks that may follow a drag
+	dndRefreshPending bool  // rebuild the dock once the drag ends
+	dndHidePending    bool  // hide the dock once the drag ends
+	dndBackupDone     bool  // the pinned file has been backed up in this session
+)
+
+func dndDragging() bool {
+	return *dnd && dndDragActive
+}
+
+func dndBlocksClick() bool {
+	return *dnd && (dndDragActive || dndDragJustEnded)
+}
+
+func dndDeferRefresh() bool {
+	if dndDragging() {
+		dndRefreshPending = true
+		return true
+	}
+	return false
+}
+
+func dndDeferHide() bool {
+	if dockHeld() {
+		dndHidePending = true
+		return true
+	}
+	return false
+}
+
+/*
+Makes the pinned item `ID`, at index `pinIdx` of `pinned` and displayed in `box`, draggable.
+Must be called before connecting the button's own handlers, so that the release ending a drag
+never reaches them.
+*/
+func setupPinnedDnd(box *gtk.Box, button *gtk.Button, ID string, pinIdx int) {
+	if !*dnd {
+		return
+	}
+	item := &dndItem{box: box, id: ID, pinIdx: pinIdx}
+	dndItems = append(dndItems, item)
+
+	button.AddEvents(int(gdk.ButtonMotionMask))
+	button.Connect("event", func(btn *gtk.Button, e *gdk.Event) bool {
+		switch e.AsType() {
+		case gdk.ButtonPressType:
+			if e.AsButton().Button() == 1 && dndDragged == nil {
+				dndPressed = item
+				dndPressX, dndPressY = win.Pointer()
+			}
+		case gdk.MotionNotifyType:
+			if dndDragged == nil && dndPressed == item {
+				x, y := win.Pointer()
+				if win.DragCheckThreshold(dndPressX, dndPressY, x, y) {
+					dndDragStart(item)
+				}
+			}
+			if dndDragged == item {
+				dndDragMotion()
+				return true
+			}
+		case gdk.ButtonReleaseType:
+			dndPressed = nil
+			if dndDragged == item {
+				dndDragFinish(true)
+				return true
+			}
+		case gdk.GrabBrokenType:
+			dndPressed = nil
+			if dndDragged == item {
+				dndDragFinish(false)
+			}
+		}
+		return false
+	})
+}
+
+func dndDragStart(item *dndItem) {
+	dndDragged = item
+	dndDragActive = true
+	cancelClose()
+
+	dndSlots = nil
+	for _, it := range dndItems {
+		a := it.box.Allocation()
+		if vertical {
+			dndSlots = append(dndSlots, a.Y()+a.Height()/2)
+		} else {
+			dndSlots = append(dndSlots, a.X()+a.Width()/2)
+		}
+	}
+
+	item.box.SetOpacity(0.5)
+	if w := win.Window(); w != nil {
+		if cursor := gdk.NewCursorFromName(win.Display(), "grabbing"); cursor != nil {
+			gdk.BaseWindow(w).SetCursor(cursor)
+		}
+	}
+	log.Debugf("Drag start: '%s' at %d", item.id, item.pinIdx)
+}
+
+// Moves the dragged item to the slot nearest to the pointer, shifting the others
+func dndDragMotion() {
+	x, y := win.Pointer()
+	pos := x
+	if vertical {
+		pos = y
+	}
+	items, moved := moveItem(dndItems, dndDragged, nearestSlot(dndSlots, pos))
+	if !moved {
+		return
+	}
+	dndItems = items
+	for i, it := range dndItems {
+		mainBox.ReorderChild(it.box, dndBase+i)
+	}
+}
+
+// Index of the slot whose center is nearest to `pos`, or -1 if there are no slots
+func nearestSlot(slots []int, pos int) int {
+	nearest := -1
+	for i, center := range slots {
+		if nearest < 0 || abs(center-pos) < abs(slots[nearest]-pos) {
+			nearest = i
+		}
+	}
+	return nearest
+}
+
+// Returns `items` with `item` moved to index `target`, and whether anything moved
+func moveItem(items []*dndItem, item *dndItem, target int) ([]*dndItem, bool) {
+	current := slices.Index(items, item)
+	if current < 0 || target < 0 || target >= len(items) || target == current {
+		return items, false
+	}
+	moved := slices.Clone(items)
+	moved = slices.Delete(moved, current, current+1)
+	moved = slices.Insert(moved, target, item)
+	return moved, true
+}
+
+// Ends the drag; the new order is saved if `commit` is set and the pointer is still over the dock
+func dndDragFinish(commit bool) {
+	inside := pointerInsideDock()
+
+	dndDragged.box.SetOpacity(1)
+	if w := win.Window(); w != nil {
+		gdk.BaseWindow(w).SetCursor(nil)
+	}
+	log.Debugf("Drag end: '%s', commit: %v, inside: %v", dndDragged.id, commit, inside)
+	dndDragged = nil
+	dndDragActive = false
+	dndDragJustEnded = true
+	glib.TimeoutAdd(uint(250), func() bool {
+		dndDragJustEnded = false
+		return false
+	})
+
+	if commit && inside {
+		dndSaveDisplayedOrder()
+	}
+
+	// Rebuild in any case: it restores the order after a cancel, and runs any deferred refresh
+	dndRefreshPending = false
+	rebuildWhenIdle()
+
+	if pickerOpen() {
+		return
+	}
+	if dndHidePending {
+		dndHidePending = false
+		win.Hide()
+	} else if *autohide && !inside {
+		// The pointer left the dock during the drag, while closing was suppressed
+		cancelClose()
+		scheduleClose()
+	}
+}
+
+// Saves `pinned` with the displayed pinned items in their new order
+func dndSaveDisplayedOrder() {
+	onDisk, err := loadTextFile(pinnedFile)
+	if err != nil || !slices.Equal(onDisk, pinned) {
+		log.Warn("Pinned file changed outside the dock, reordering aborted")
+		return
+	}
+
+	order, err := reorderedPinned(pinned, dndItems)
+	if err != nil {
+		log.Warnf("%s, reordering aborted", err)
+		return
+	}
+	if slices.Equal(order, pinned) {
+		return
+	}
+
+	err = savePinnedOrder(order)
+	if err != nil {
+		log.Errorf("Error saving pinned order: %s", err)
+		return
+	}
+	pinned = order
+	log.Infof("Pinned order saved: %s", strings.Join(order, ", "))
+}
+
+/*
+Returns a copy of `pinned` with the displayed `items` written, in their display order, into the
+slots they occupied. Pinned items that aren't displayed (ignored ones, duplicates) keep their place.
+*/
+func reorderedPinned(pinned []string, items []*dndItem) ([]string, error) {
+	var slots []int
+	for _, it := range items {
+		if it.pinIdx < 0 || it.pinIdx >= len(pinned) || pinned[it.pinIdx] != it.id {
+			return nil, errors.New("pinned items moved since the dock was built")
+		}
+		if slices.Contains(slots, it.pinIdx) {
+			return nil, errors.New("pinned item displayed twice")
+		}
+		slots = append(slots, it.pinIdx)
+	}
+	slices.Sort(slots)
+
+	order := slices.Clone(pinned)
+	for i, it := range items {
+		order[slots[i]] = it.id
+	}
+	return order, nil
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+/*
+Exits if the GTK main loop stops responding, so that the launcher script restarts the dock
+instead of leaving a frozen one on the screen.
+*/
+func startHangWatchdog() {
+	const limit = 10 * time.Second
+	var beat atomic.Int64
+	beat.Store(time.Now().UnixNano())
+	glib.TimeoutAdd(uint(1000), func() bool {
+		beat.Store(time.Now().UnixNano())
+		return true
+	})
+
+	go func() {
+		last := time.Now()
+		for {
+			time.Sleep(2 * time.Second)
+			now := time.Now()
+			stalled, hung := mainLoopHung(now, last, time.Unix(0, beat.Load()), limit)
+			last = now
+			if hung {
+				log.Errorf("Main loop unresponsive for %s, exiting so that the dock gets restarted", stalled.Round(time.Second))
+				os.Exit(2)
+			}
+		}
+	}()
+}
+
+/*
+Tells how long the main loop has been stalled, judging by its `lastBeat`, and whether it's hung.
+A watchdog check (`now`) much later than the previous one (`lastCheck`) means the system was
+suspended: both clocks jumped, so the main loop gets a chance to catch up.
+*/
+func mainLoopHung(now, lastCheck, lastBeat time.Time, limit time.Duration) (time.Duration, bool) {
+	stalled := now.Sub(lastBeat)
+	if now.Sub(lastCheck) > 5*time.Second {
+		return stalled, false
+	}
+	return stalled, stalled > limit
+}
+
+/*
+Atomically replaces the pinned file with `order`, backing up the original file once per session.
+Unlike savePinned, it never leaves a truncated file behind.
+*/
+func savePinnedOrder(order []string) error {
+	if len(order) == 0 {
+		return errors.New("refusing to save an empty pinned list")
+	}
+	info, err := os.Stat(pinnedFile)
+	if err != nil {
+		return err
+	}
+
+	if !dndBackupDone {
+		err = copyFile(pinnedFile, pinnedFile+".dnd.bak")
+		if err != nil {
+			return fmt.Errorf("backing up %s: %w", pinnedFile, err)
+		}
+		dndBackupDone = true
+	}
+
+	dir := filepath.Dir(pinnedFile)
+	tmp, err := os.CreateTemp(dir, ".nwg-dock-pinned-*")
+	if err != nil {
+		return err
+	}
+	// a no-op once the file has been renamed
+	defer os.Remove(tmp.Name())
+
+	_, err = tmp.WriteString(strings.Join(order, "\n") + "\n")
+	if err == nil {
+		err = tmp.Chmod(info.Mode().Perm())
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+
+	err = os.Rename(tmp.Name(), pinnedFile)
+	if err != nil {
+		return err
+	}
+
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func launch(ID string) {
