@@ -24,6 +24,8 @@ PATHS=(
   .local/bin/nwg-dock-hyprland-dnd
   .cache/nwg-dock-pinned
   .bashrc .bash_profile .profile
+  # contexto, skill y agente de Claude para este equipo
+  .claude/CLAUDE.md .claude/omarchy.md .claude/skills/omarchy-hardware .claude/agents
 )
 
 cd "$HOME"
