@@ -108,6 +108,7 @@ func pinnedButton(ID string, pinIdx int, position *string) *gtk.Box {
 
 func pinnedMenuContext(taskID string) gtk.Menu {
 	menu := gtk.NewMenu()
+	trackMenu(menu)
 	menuItem := gtk.NewMenuItemWithLabel("Unpin")
 	menuItem.Connect("activate", func() {
 		unpinTask(taskID)
@@ -168,6 +169,7 @@ func launcherButton(position *string) *gtk.Box {
 						return false
 					}
 					menu := gtk.NewMenu()
+					trackMenu(menu)
 					addAppMenuItem(menu)
 					menu.ShowAll()
 					menu.PopupAtWidget(button, widgetAnchor, menuAnchor, nil)
@@ -206,6 +208,7 @@ Furthermore - hovering a button triggers window on-leave-notify event, and the t
 needs to be cleared as well.
 */
 func cancelClose() {
+	markDockActivity()
 	if src > 0 {
 		glib.SourceRemove(src)
 		src = 0
@@ -215,6 +218,10 @@ func cancelClose() {
 // Close the window after a while, unless cancelClose is called in the meantime
 func scheduleClose() {
 	src = glib.TimeoutAdd(uint(1000), func() bool {
+		if dockHeld() {
+			src = 0
+			return false
+		}
 		mouseInsideDock = false
 		win.Hide()
 		src = 0
@@ -346,6 +353,7 @@ func taskButton(t client, instances []client, pinIdx int, position *string) *gtk
 
 func clientMenu(class string, instances []client) gtk.Menu {
 	menu := gtk.NewMenu()
+	trackMenu(menu)
 
 	iconName, err := getIcon(class)
 	if err != nil {
@@ -377,6 +385,7 @@ func clientMenu(class string, instances []client) gtk.Menu {
 
 func clientMenuContext(class string, instances []client) gtk.Menu {
 	menu := gtk.NewMenu()
+	trackMenu(menu)
 
 	iconName, err := getIcon(class)
 	if err != nil {

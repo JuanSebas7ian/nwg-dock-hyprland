@@ -40,9 +40,9 @@ func pickerOpen() bool {
 	return pickerWin != nil
 }
 
-// The dock must stay visible while an item is being dragged or the picker is open
+// The dock must stay visible while an item is being dragged, or the picker or a menu is open
 func dockHeld() bool {
-	return dndDragging() || (*dnd && pickerOpen())
+	return dndDragging() || (*dnd && (pickerOpen() || menuShown()))
 }
 
 /*

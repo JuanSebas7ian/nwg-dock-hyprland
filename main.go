@@ -704,6 +704,9 @@ func main() {
 	buildMainBox()
 	if *dnd {
 		startHangWatchdog()
+		if *autohide {
+			setupIdleHide()
+		}
 	}
 
 	win.ShowAll()
