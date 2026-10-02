@@ -28,7 +28,13 @@ type desktopApp struct {
 	icon string
 }
 
-var pickerWin *gtk.Window
+var (
+	pickerWin       *gtk.Window
+	pickerCloseSrc  glib.SourceHandle // pending close after the pointer left the picker
+	pickerWidth     = 420
+	pickerMaxHeight = 640
+	pickerMinHeight = 200
+)
 
 func pickerOpen() bool {
 	return pickerWin != nil
@@ -192,8 +198,9 @@ func openPicker() {
 	if vertical {
 		dockSize = win.AllocatedWidth()
 	}
-	gtklayershell.SetMargin(w, edge, dockSize+*marginBottom+8)
-	w.SetDefaultSize(420, 480)
+	gap := dockSize + *marginBottom + 8
+	gtklayershell.SetMargin(w, edge, gap)
+	height := pickerHeight(monitorHeight(), gap, vertical)
 	w.SetObjectProperty("name", "picker")
 
 	vbox := gtk.NewBox(gtk.OrientationVertical, 6)
@@ -249,6 +256,8 @@ func openPicker() {
 
 	scrolled := gtk.NewScrolledWindow(nil, nil)
 	scrolled.SetPolicy(gtk.PolicyNever, gtk.PolicyAutomatic)
+	// layer-shell windows ignore the default size: the size request sets it
+	scrolled.SetSizeRequest(pickerWidth, height-50)
 	scrolled.Add(list)
 	vbox.PackStart(scrolled, true, true, 0)
 
@@ -259,19 +268,20 @@ func openPicker() {
 		}
 		return false
 	})
-	// Clicking anywhere else takes the keyboard away from the picker: close it then
-	focused := false
-	w.ConnectFocusInEvent(func(event *gdk.EventFocus) bool {
-		focused = true
+	/*
+		Don't close on focus out: with follow_mouse (Omarchy's default), the keyboard focus moves to
+		any window the pointer crosses on its way to the picker. Close when the pointer stays away
+		from the picker instead, as the dock does.
+	*/
+	w.Connect("leave-notify-event", func(_ *gtk.Window, e *gdk.Event) bool {
+		// crossing into a child widget's window isn't leaving the picker
+		if e.AsCrossing().Detail() != gdk.NotifyInferior {
+			schedulePickerClose()
+		}
 		return false
 	})
-	w.ConnectFocusOutEvent(func(event *gdk.EventFocus) bool {
-		if focused {
-			glib.IdleAdd(func() bool {
-				closePicker()
-				return false
-			})
-		}
+	w.Connect("enter-notify-event", func() bool {
+		cancelPickerClose()
 		return false
 	})
 
@@ -318,10 +328,56 @@ func updateMark(mark *gtk.Label, id string) {
 	}
 }
 
+// Height of the monitor showing the dock, or 0 if unknown
+func monitorHeight() int {
+	gw := win.Window()
+	if gw == nil {
+		return 0
+	}
+	monitor := win.Display().MonitorAtWindow(gw)
+	if monitor == nil {
+		return 0
+	}
+	return monitor.Geometry().Height()
+}
+
+/*
+Height of the picker: as tall as it fits on a monitor `monitorH` pixels high, between
+pickerMinHeight and pickerMaxHeight. `gap` is the space the dock takes at the edge the picker
+grows from; a vertical dock sits beside the picker, so it takes none.
+*/
+func pickerHeight(monitorH, gap int, vertical bool) int {
+	if monitorH <= 0 {
+		return 480
+	}
+	if vertical {
+		gap = 0
+	}
+	h := monitorH - gap - 40
+	return max(pickerMinHeight, min(pickerMaxHeight, h))
+}
+
+func schedulePickerClose() {
+	cancelPickerClose()
+	pickerCloseSrc = glib.TimeoutAdd(uint(1500), func() bool {
+		pickerCloseSrc = 0
+		closePicker()
+		return false
+	})
+}
+
+func cancelPickerClose() {
+	if pickerCloseSrc > 0 {
+		glib.SourceRemove(pickerCloseSrc)
+		pickerCloseSrc = 0
+	}
+}
+
 func closePicker() {
 	if !pickerOpen() {
 		return
 	}
+	cancelPickerClose()
 	pickerWin.Destroy()
 	pickerWin = nil
 	log.Debug("Picker closed")

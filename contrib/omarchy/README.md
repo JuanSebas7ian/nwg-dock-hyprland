@@ -6,7 +6,8 @@ Esta rama (`feat/dnd-reorder`) agrega al dock, detrás de la opción `-dnd`:
   del dock se guarda el orden; si sueltas fuera, se cancela. Usa eventos simples del mouse, no el
   protocolo de arrastre de Wayland, que con Hyprland congelaba todo el escritorio.
 - **"Add app…" (agregar app):** en el clic derecho de cualquier ícono, o en el botón del lanzador.
-  Abre una lista buscable de las apps instaladas: un clic ancla o desancla. Esc o un clic fuera la cierra.
+  Abre una lista buscable de las apps instaladas, que crece hacia arriba según el espacio del monitor:
+  un clic ancla o desancla. Se cierra con Esc, con ✕ o al sacar el mouse de la lista 1,5 s.
   Si no hay lanzador instalado (`nwg-drawer`), el clic izquierdo del botón del lanzador también abre la lista.
 - **Vigilante anti-cuelgue:** si el dock deja de responder 10 s, se cierra solo (código 2) para que
   `launch-dock.sh` lo relance.

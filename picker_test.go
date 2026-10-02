@@ -111,3 +111,23 @@ func TestUserLanguage(t *testing.T) {
 		}
 	}
 }
+
+func TestPickerHeight(t *testing.T) {
+	cases := []struct {
+		name          string
+		monitorH, gap int
+		vertical      bool
+		want          int
+	}{
+		{"large monitor, capped", 1440, 88, false, pickerMaxHeight},
+		{"laptop: fills the space above the dock", 720, 88, false, 720 - 88 - 40},
+		{"tiny monitor: minimum", 300, 88, false, pickerMinHeight},
+		{"vertical dock takes no height", 640, 300, true, 640 - 40},
+		{"unknown monitor", 0, 88, false, 480},
+	}
+	for _, c := range cases {
+		if got := pickerHeight(c.monitorH, c.gap, c.vertical); got != c.want {
+			t.Errorf("%s: got %d, want %d", c.name, got, c.want)
+		}
+	}
+}
