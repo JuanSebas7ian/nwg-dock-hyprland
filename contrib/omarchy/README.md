@@ -96,6 +96,20 @@ cp -a /tmp/omarchy-<fecha>/home/. ~/       # copia la configuración
 hyprctl reload && hyprctl configerrors
 ```
 
+## Validador de drivers y actualizaciones (omarchy-hwcheck)
+
+`hwcheck/` contiene un validador determinista de solo lectura. Escanea el hardware, revisa los drivers
+y el firmware, valida las actualizaciones (DKMS/NVIDIA antes de reiniciar) y detecta conflictos
+(`pacman -Dk`, `.pacnew`, opciones de módulo contradictorias o sin efecto). Se engancha a `omarchy update`
+y al arranque.
+
+```bash
+contrib/omarchy/hwcheck/install.sh         # instala ~/.local/bin/omarchy-hwcheck y los hooks
+omarchy-hwcheck                            # validación completa
+```
+
+Detalle de cada comprobación: [`hwcheck/README.md`](hwcheck/README.md).
+
 ## Diagnóstico
 
 ```bash

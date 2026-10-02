@@ -1,0 +1,65 @@
+#!/bin/bash
+# Hook de Omarchy para omarchy-hwcheck. El mismo archivo va en dos carpetas y sabe en cuál está:
+#
+# - post-update.d: corre dentro de `omarchy update`, después de los paquetes y ANTES de ofrecer el
+#   reinicio. Muestra el informe en la terminal de la actualización y avisa si hay un fallo (por ejemplo,
+#   NVIDIA sin compilar para el kernel nuevo: reiniciar así daría pantalla negra).
+# - post-boot.d: corre al arrancar el escritorio. Compara con la línea base (el último arranque sano),
+#   avisa solo si hay fallos o regresiones y, si todo está igual o mejor, la renueva.
+#
+# Informes: ~/.local/state/omarchy-hwcheck/last-<evento>.txt. Nunca hace fallar al evento que lo llama.
+
+bin=$HOME/.local/bin/omarchy-hwcheck
+[[ -x $bin ]] || exit 0
+
+event=$(basename "$(dirname "$0")" .d) # se instala como copia en cada carpeta, no como enlace
+dir=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-hwcheck
+report=$dir/last-$event.txt
+mkdir -p "$dir"
+
+notify() {
+  local urgency=$1 title=$2 body=$3
+  if command -v omarchy-notification-send > /dev/null; then
+    omarchy-notification-send -u "$urgency" -g 󰾲 "$title" "$body" --exec xdg-terminal-exec less -R "$report" || true
+  else
+    notify-send -u "$urgency" "$title" "$body" || true
+  fi
+}
+
+case $event in
+  post-update)
+    echo -e "\e[32m\nValidate drivers (omarchy-hwcheck)\e[0m"
+    "$bin" scan | tee "$report"
+    scan_rc=${PIPESTATUS[0]}
+    "$bin" diff | tee -a "$report"
+    diff_rc=${PIPESTATUS[0]}
+    if ((scan_rc == 2 || diff_rc == 2)); then
+      echo -e "\e[31momarchy-hwcheck encontró fallos: resuélvelos ANTES de reiniciar ($report)\e[0m"
+      notify critical "Drivers: revisa antes de reiniciar" "omarchy-hwcheck encontró fallos tras la actualización."
+    elif ((scan_rc == 1)); then
+      notify normal "Drivers: avisos tras la actualización" "omarchy-hwcheck dejó avisos; clic para verlos."
+    fi
+    ;;
+  post-boot)
+    {
+      "$bin" scan
+      scan_rc=$?
+      "$bin" diff
+      diff_rc=$?
+      echo "scan=$scan_rc diff=$diff_rc"
+    } > "$report" 2>&1
+    scan_rc=$(sed -n 's/^scan=\([0-9]*\) diff=.*/\1/p' "$report")
+    diff_rc=$(sed -n 's/^scan=[0-9]* diff=\([0-9]*\)$/\1/p' "$report")
+    if [[ $diff_rc == 3 ]]; then
+      "$bin" baseline >> "$report" 2>&1 # primera vez: no había línea base
+    elif [[ $scan_rc == 2 || $diff_rc == 2 ]]; then
+      notify critical "Drivers: algo falla en este arranque" "omarchy-hwcheck encontró fallos o regresiones."
+    elif [[ $diff_rc == 1 ]]; then
+      notify normal "Drivers: cambió un driver" \
+        "Si es esperado: omarchy-hwcheck baseline --force. Clic para ver el informe."
+    else
+      "$bin" baseline --force > /dev/null 2>&1 # mismo hardware o mejor: este arranque es la nueva referencia
+    fi
+    ;;
+esac
+exit 0
