@@ -35,36 +35,32 @@ Sin `-dnd`, el dock se comporta igual que la versión oficial 0.4.11.
 ## Instalar en Omarchy
 
 ```bash
+omarchy pkg add go nwg-dock-hyprland gtk-layer-shell   # requisitos (nwg-dock-hyprland aporta los íconos y queda de respaldo)
 git clone -b feat/dnd-reorder https://github.com/JuanSebas7ian/nwg-dock-hyprland.git
 cd nwg-dock-hyprland
-go test ./...                       # pruebas unitarias
-go build -o ~/.local/bin/nwg-dock-hyprland-dnd .
-
-# el paquete oficial aporta los íconos y queda como respaldo
-omarchy pkg add nwg-dock-hyprland
-
-mkdir -p ~/.config/hypr/scripts ~/.config/nwg-dock-hyprland
-cp contrib/omarchy/launch-dock.sh ~/.config/hypr/scripts/
-cp contrib/omarchy/style.css ~/.config/nwg-dock-hyprland/style.css
+contrib/omarchy/install.sh --start
 ```
 
-Después agrega los tres bloques de `contrib/omarchy/hypr-snippets.lua` al final de `autostart.lua`,
-`looknfeel.lua` y `bindings.lua` (en `~/.config/hypr/`), valida con
-`hyprctl reload && hyprctl configerrors` y cierra sesión y vuelve a entrar,
-o lanza el dock ya mismo con:
+El instalador:
 
-```bash
-hyprctl dispatch 'hl.exec_cmd("uwsm-app -- '"$HOME"'/.config/hypr/scripts/launch-dock.sh")'
-```
+1. verifica los requisitos y que la configuración de Hyprland sea la de Omarchy, en Lua;
+2. corre las pruebas unitarias y compila el dock en `~/.local/bin/nwg-dock-hyprland-dnd`;
+3. instala `launch-dock.sh` en `~/.config/hypr/scripts/` y el estilo cristal en `~/.config/nwg-dock-hyprland/`;
+4. agrega a `autostart.lua`, `looknfeel.lua` y `bindings.lua` las líneas de `hypr-snippets.lua`, solo si no están;
+5. recarga Hyprland y se detiene si `hyprctl configerrors` reporta algo;
+6. con `--start`, lanza el dock ya mismo; sin esa opción, arranca en el próximo inicio de sesión.
 
-(El mensaje "expected a dispatcher" es normal; el comando sí se ejecuta.)
+Todo archivo que reemplaza o modifica queda respaldado como `<archivo>.bak.<fecha>`. Se puede ejecutar
+cuantas veces quieras: para actualizar, `git pull` y de nuevo `contrib/omarchy/install.sh --start`.
 
 Importante: Omarchy configura Hyprland en Lua y **no lee** `hyprland.conf` ni `autostart.conf`;
-el dock debe arrancarse desde `autostart.lua`.
+el dock debe arrancarse desde `autostart.lua`, que es lo que hace el instalador.
 
 ## Actualizar el dock tras cambiar el código
 
 ```bash
+contrib/omarchy/install.sh --start
+# o, solo el binario:
 go test ./... && go build -o ~/.local/bin/nwg-dock-hyprland-dnd .
 pkill -x nwg-dock-hyprla            # launch-dock.sh lo relanza con el binario nuevo
 ```
