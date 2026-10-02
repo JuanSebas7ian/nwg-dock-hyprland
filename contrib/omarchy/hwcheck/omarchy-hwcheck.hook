@@ -41,23 +41,37 @@ case $event in
     fi
     ;;
   post-boot)
+    # Se separa del arranque (no retrasa los demás hooks) y espera a que los dispositivos se asienten:
+    # bt-guardian puede tardar hasta ~2 min en recuperar el Bluetooth, y compararlo antes daría una falsa regresión.
+    if [[ -z ${HWCHECK_DETACHED:-} ]]; then
+      HWCHECK_DETACHED=1 setsid -f bash "$0" > /dev/null 2>&1
+      exit 0
+    fi
+    sleep "${HWCHECK_SETTLE:-30}"
+    baseline=$dir/baseline.json
+    want_bt=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("bluetooth", [])))' \
+      "$baseline" 2> /dev/null || echo 0)
+    for ((i = 0; i < ${HWCHECK_BT_WAIT:-150} && want_bt > 0; i += 5)); do
+      compgen -G '/sys/class/bluetooth/hci*' > /dev/null && break
+      sleep 5
+    done
     {
       "$bin" scan
-      scan_rc=$?
+      echo "scan=$?"
       "$bin" diff
-      diff_rc=$?
-      echo "scan=$scan_rc diff=$diff_rc"
+      echo "diff=$?"
     } > "$report" 2>&1
-    scan_rc=$(sed -n 's/^scan=\([0-9]*\) diff=.*/\1/p' "$report")
-    diff_rc=$(sed -n 's/^scan=[0-9]* diff=\([0-9]*\)$/\1/p' "$report")
-    if [[ $diff_rc == 3 ]]; then
-      "$bin" baseline >> "$report" 2>&1 # primera vez: no había línea base
-    elif [[ $scan_rc == 2 || $diff_rc == 2 ]]; then
+    scan_rc=$(sed -n 's/^scan=\([0-9]*\)$/\1/p' "$report")
+    diff_rc=$(sed -n 's/^diff=\([0-9]*\)$/\1/p' "$report")
+    if [[ $scan_rc == 2 || $diff_rc == 2 ]]; then
       notify critical "Drivers: algo falla en este arranque" "omarchy-hwcheck encontró fallos o regresiones."
     elif [[ $diff_rc == 1 ]]; then
       notify normal "Drivers: cambió un driver" \
         "Si es esperado: omarchy-hwcheck baseline --force. Clic para ver el informe."
-    else
+    fi
+    if [[ $diff_rc == 3 ]]; then
+      "$bin" baseline >> "$report" 2>&1 # primera vez: no había línea base
+    elif [[ $diff_rc == 0 && $scan_rc != 2 ]]; then
       "$bin" baseline --force > /dev/null 2>&1 # mismo hardware o mejor: este arranque es la nueva referencia
     fi
     ;;

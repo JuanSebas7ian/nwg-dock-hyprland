@@ -169,15 +169,18 @@ def cmdline_params(tokens):
     return params
 
 
-_KCMD_RE = re.compile(r'^\s*KERNEL_CMDLINE\[[^\]]*\]\s*\+?=\s*"([^"]*)"')
+_KCMD_RE = re.compile(r'^\s*KERNEL_CMDLINE\[default\]\s*(\+?=)\s*"([^"]*)"')
 
 
-def parse_limine_cmdline(text):
-    tokens = []
+def parse_limine_cmdline(text, tokens=None):
+    """Tokens de KERNEL_CMDLINE[default]: `+=` agrega, `=` reemplaza lo anterior (como en bash)."""
+    tokens = list(tokens or [])  # lo que ya traían los archivos anteriores
     for line in (text or "").splitlines():
         m = _KCMD_RE.match(line)
         if m:
-            tokens.extend(m.group(1).split())
+            if m.group(1) == "=":
+                tokens = []
+            tokens.extend(m.group(2).split())
     return tokens
 
 
@@ -222,7 +225,8 @@ def parse_lspci_mm(text):
     return names
 
 
-_USB_KEY_RE = re.compile(r"^usb (?:usb(\d+)-port(\d+)|(\d+-[\d.]+)):")
+# "usb 6-11:" (dispositivo), "usb usb6-port11:" (puerto raíz) y "usb 3-2-port4:" (puerto de un hub) → "6-11"/"3-2.4"
+_USB_KEY_RE = re.compile(r"^usb (?:usb(\d+)-port(\d+)|(\d+-[\d.]+)-port(\d+)|(\d+-[\d.]+)):")
 _USB_ERR_RE = re.compile(
     r"Timeout while waiting for setup device|device descriptor read|unable to enumerate|"
     r"device not accepting address|Cannot enable\. Maybe the USB cable is bad|error -(71|110|62)\b"
@@ -235,7 +239,12 @@ def usb_enum_errors(kernel_log):
     for line in kernel_log.splitlines():
         m = _USB_KEY_RE.match(line)
         if m and _USB_ERR_RE.search(line):
-            key = m.group(3) or f"{m.group(1)}-{m.group(2)}"
+            if m.group(5):
+                key = m.group(5)
+            elif m.group(3):
+                key = f"{m.group(3)}.{m.group(4)}"
+            else:
+                key = f"{m.group(1)}-{m.group(2)}"
             counts[key] = counts.get(key, 0) + 1
     return dict(sorted(counts.items()))
 
@@ -243,12 +252,19 @@ def usb_enum_errors(kernel_log):
 _FW_RE = re.compile(r"Direct firmware load for (\S+) failed|failed to load firmware[: ]+(\S+)?", re.I)
 
 
+# Fallos que no indican un problema: la base regulatoria (cfg80211 usa la integrada) y los drivers que
+# prueban varias versiones de firmware hasta encontrar una (iwlwifi).
+_FW_IGNORED_RE = re.compile(r"^regulatory\.db|^iwlwifi-.*\.ucode$")
+
+
 def firmware_failures(kernel_log):
     files = set()
     for line in kernel_log.splitlines():
         m = _FW_RE.search(line)
         if m:
-            files.add(m.group(1) or m.group(2) or line.strip())
+            name = m.group(1) or m.group(2) or line.strip()
+            if not _FW_IGNORED_RE.search(name):
+                files.add(name)
     return sorted(files)
 
 
@@ -389,8 +405,14 @@ class Facts:
         files += [f"{LIMINE_DROPIN_DIR}/{f}" for f in self.sys.listdir(LIMINE_DROPIN_DIR) if f.endswith(".conf")]
         tokens = {}
         for path in files:
-            for t in parse_limine_cmdline(self.sys.read(path)):
-                tokens.setdefault(t, path)
+            for line in (self.sys.read(path) or "").splitlines():
+                m = _KCMD_RE.match(line)
+                if not m:
+                    continue
+                if m.group(1) == "=":  # `=` reemplaza todo lo anterior
+                    tokens = {}
+                for t in m.group(2).split():
+                    tokens.setdefault(t, path)
         return dict(sorted(tokens.items()))
 
 
@@ -423,7 +445,7 @@ def check_usb_errors(f):
     errors = usb_enum_errors(f.kernel_log)
     if errors:
         return Finding("HW02", "hw", WARN, f"{len(errors)} dispositivo(s) USB no lograron conectarse en este arranque",
-                       [f"usb {k}: {n} error(es)" for k, n in errors.items()],
+                       [f"usb {k}" for k in errors],  # sin conteo: crece con el tiempo y rompería la comparación
                        "Un dispositivo que no responde retrasa el arranque y no tiene driver que lo arregle: "
                        "revisa el cable/puerto, o corte total de energía si es interno (Bluetooth 6-11).")
     return Finding("HW02", "hw", OK, "Sin errores de enumeración USB en este arranque")
@@ -459,14 +481,31 @@ def _provided(f, pkg):
     return rc == 0
 
 
+def nvidia_versions(f):
+    """(cargado, nvidia-utils, {kernel instalado: versión del módulo en disco})."""
+    loaded = (f.sys.read("/sys/module/nvidia/version") or "").strip()
+    utils = upstream_version(f.packages["nvidia-utils"]) if "nvidia-utils" in f.packages else ""
+    on_disk = {}
+    for rel in sorted(f.kernels):
+        rc, out = f.sys.run("modinfo", "-k", rel, "-F", "version", "nvidia")
+        on_disk[rel] = out.strip() if rc == 0 else ""
+    return loaded, utils, on_disk
+
+
 def check_nvidia_firmware(f):
     if "nvidia" not in f.loaded:
         return None
-    version = (f.sys.read("/sys/module/nvidia/version") or "").strip()
+    loaded, utils, _ = nvidia_versions(f)
+    # El firmware lo instala nvidia-utils: tras actualizarlo, la carpeta de la versión cargada desaparece y la
+    # que importa es la de la versión nueva, que se usará al reiniciar.
+    version = utils or loaded
     path = f"/usr/lib/firmware/nvidia/{version}"
     if version and not f.sys.exists(path):
         return Finding("HW05", "hw", FAIL, f"Falta el firmware GSP de NVIDIA {version}", [path],
                        "Lo instala nvidia-utils: reinstálalo con la misma versión del módulo.")
+    if utils and loaded and utils != loaded:
+        return Finding("HW05", "hw", WARN, f"Firmware GSP de NVIDIA {utils} listo; el módulo cargado es {loaded}",
+                       [path], "NVIDIA se actualizó: reinicia para usarlo.")
     return Finding("HW05", "hw", OK, f"Firmware GSP de NVIDIA {version} presente")
 
 
@@ -483,7 +522,7 @@ def check_bluetooth(f):
         stuck = [k for k in usb_enum_errors(f.kernel_log)]
         return Finding("HW06", "hw", WARN, "No hay adaptador Bluetooth (bluetooth.service habilitado)",
                        [f"btusb cargado: {'sí' if 'btusb' in f.loaded else 'no'}",
-                        f"USB que no enumeran: {', '.join(stuck) or 'ninguno'}"],
+                        f"USB que no enumeran (uno puede ser el chip Bluetooth): {', '.join(stuck) or 'ninguno'}"],
                        f"Si el chip no enumera no es un driver: corte total de energía. Ver {BT_REFERENCE}")
     return Finding("HW06", "hw", INFO, "Sin Bluetooth (ni adaptador ni servicio habilitado)")
 
@@ -541,11 +580,9 @@ def check_dkms(f):
 def check_nvidia_version(f):
     if "nvidia" not in f.loaded or "nvidia-utils" not in f.packages:
         return None
-    loaded = (f.sys.read("/sys/module/nvidia/version") or "").strip()
-    utils = upstream_version(f.packages["nvidia-utils"])
-    rc, out = f.sys.run("modinfo", "-k", f.release, "-F", "version", "nvidia")
-    on_disk = out.strip() if rc == 0 else ""
-    details = [f"cargado {loaded}, en disco {on_disk or '?'}, nvidia-utils {utils}"]
+    loaded, utils, on_disk = nvidia_versions(f)
+    details = [f"cargado {loaded}, nvidia-utils {utils}"]
+    details += [f"en disco para {rel}: {v or 'no está'}" for rel, v in on_disk.items()]
     lib32 = f.packages.get("lib32-nvidia-utils")
     if lib32 and upstream_version(lib32) != utils:
         return Finding("UP04", "updates", WARN, "lib32-nvidia-utils no coincide con nvidia-utils",
@@ -553,7 +590,7 @@ def check_nvidia_version(f):
                        "Actualiza ambos juntos (juegos de 32 bits/Steam fallarían).")
     if loaded == utils:
         return Finding("UP04", "updates", OK, f"NVIDIA {loaded}: módulo y nvidia-utils coinciden", details)
-    if on_disk == utils:
+    if on_disk and all(v == utils for v in on_disk.values()):
         return Finding("UP04", "updates", WARN, "NVIDIA actualizado: falta reiniciar", details,
                        "Reinicia para cargar el módulo nuevo.")
     return Finding("UP04", "updates", FAIL, "El módulo NVIDIA en disco no coincide con nvidia-utils", details,
@@ -607,8 +644,12 @@ def check_update_log(f):
         return Finding("UP08", "updates", INFO, "Sin registro de `omarchy update` desde que arrancó el equipo")
     lines = []
     for raw in text.replace("\r", "\n").splitlines():
-        line = _ANSI_RE.sub("", raw).strip()
+        # Sin quitar la sangría: los detalles que imprime este mismo validador (sangrados) quedan en el
+        # registro porque el hook corre dentro de `omarchy update`, y no deben contarse como errores.
+        line = _ANSI_RE.sub("", raw).rstrip()
         if re.match(r"^(error:|ERROR|Hook failed|==> ERROR|Something went wrong)", line):
+            if line.startswith("error: failed retrieving file"):  # un espejo falló; pacman usó otro
+                continue
             lines.append(line[:160])
     if any(l.startswith("Something went wrong") for l in lines):
         return Finding("UP08", "updates", FAIL, "La última `omarchy update` terminó con error", lines[:12],

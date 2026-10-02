@@ -8,7 +8,8 @@
 #   ~/.local/bin/omarchy-hwcheck
 #   ~/.config/omarchy/hooks/post-update.d/omarchy-hwcheck.hook   (valida tras `omarchy update`)
 #   ~/.config/omarchy/hooks/post-boot.d/omarchy-hwcheck.hook     (valida en cada arranque)
-# y crea la línea base en ~/.local/state/omarchy-hwcheck/baseline.json si no existe.
+# y crea la línea base en ~/.local/state/omarchy-hwcheck/baseline.json si no existe. Lo que reemplaza queda
+# respaldado en ~/.local/state/omarchy-hwcheck/backups/<fecha>/.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -16,6 +17,7 @@ BIN=$HOME/.local/bin/omarchy-hwcheck
 HOOKS=$HOME/.config/omarchy/hooks
 EVENTS=(post-update post-boot)
 STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUPS=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-hwcheck/backups
 
 say() { printf '==> %s\n' "$*"; }
 fail() {
@@ -32,8 +34,11 @@ put() {
       say "  sin cambios: $dst"
       return
     fi
-    cp -a "$dst" "$dst.bak.$STAMP"
-    say "  respaldo: $dst.bak.$STAMP"
+    # Fuera de las carpetas de hooks: omarchy-hook ejecuta todo lo que haya en ellas, también un .bak
+    local bak=$BACKUPS/$STAMP${dst#"$HOME"}
+    mkdir -p "$(dirname "$bak")"
+    cp -a "$dst" "$bak"
+    say "  respaldo: $bak"
   fi
   install -m 755 "$src" "$dst"
   say "  instalado: $dst"

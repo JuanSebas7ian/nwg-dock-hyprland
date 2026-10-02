@@ -160,8 +160,14 @@ class Hardware(unittest.TestCase):
                "usb 6-11: device descriptor read/64, error -110\n"
                "usb usb6-port11: unable to enumerate USB device\n"
                "usb 3-2.4: device not accepting address 9, error -71\n"
+               "usb 3-2-port4: unable to enumerate USB device\n"
                "usb 1-1: new full-speed USB device number 2\n")
-        self.assertEqual(hc.usb_enum_errors(log), {"3-2.4": 1, "6-11": 3})
+        self.assertEqual(hc.usb_enum_errors(log), {"3-2.4": 2, "6-11": 3})
+
+    def test_usb_details_have_no_counts(self):
+        s = healthy()
+        s.commands["journalctl -k -b -o cat --no-pager"] = (0, "usb 6-11: device descriptor read/64, error -110\n")
+        self.assertEqual(scan(s)["HW02"].details, ["usb 6-11"])  # el conteo crece con el tiempo
 
     def test_firmware_load_failure(self):
         s = healthy()
@@ -169,6 +175,11 @@ class Hardware(unittest.TestCase):
             0, "bluetooth hci0: Direct firmware load for mediatek/mt7925/BT_RAM_CODE.bin failed with error -2\n")
         f = scan(s)["HW03"]
         self.assertEqual((f.level, f.details), (hc.FAIL, ["mediatek/mt7925/BT_RAM_CODE.bin"]))
+
+    def test_harmless_firmware_failures_ignored(self):
+        log = ("cfg80211: Direct firmware load for regulatory.db failed with error -2\n"
+               "iwlwifi 0000:00:14.3: Direct firmware load for iwlwifi-so-a0-gf-a0-89.ucode failed with error -2\n")
+        self.assertEqual(hc.firmware_failures(log), [])
 
     def test_missing_firmware_package(self):
         s = healthy()
@@ -233,6 +244,44 @@ class Updates(unittest.TestCase):
         set_package(s, "lib32-nvidia-utils", "615.10-1")
         self.assertEqual(scan(s)["UP04"].level, hc.FAIL)
 
+    def test_kernel_and_nvidia_updated_together(self):
+        """omarchy update trajo kernel y NVIDIA nuevos; aún corre el kernel viejo: avisos de reinicio, no fallos."""
+        s = healthy()
+        new = "7.2.4-arch1-1"
+        del s.files[f"/usr/lib/modules/{REL}/vmlinuz"]
+        del s.files[f"/usr/lib/modules/{REL}/modules.builtin"]
+        del s.files["/usr/lib/firmware/nvidia/610.57.04/gsp_ga10x.bin"]
+        s.files[f"/usr/lib/modules/{new}/vmlinuz"] = ""
+        s.files["/usr/lib/firmware/nvidia/615.10/gsp_ga10x.bin"] = ""
+        s.commands[f"pacman -Qqo /usr/lib/modules/{new}/vmlinuz"] = (0, "linux\n")
+        s.commands["dkms status"] = (0, f"nvidia/615.10, {new}, x86_64: installed\n")
+        s.commands.pop(f"modinfo -k {REL} -F version nvidia")
+        s.commands[f"modinfo -k {new} -F version nvidia"] = (0, "615.10\n")
+        for p, v in (("linux", "7.2.4.arch1-1"), ("linux-headers", "7.2.4.arch1-1"), ("nvidia-utils", "615.10-1"),
+                     ("lib32-nvidia-utils", "615.10-1"), ("nvidia-open-dkms", "615.10-1")):
+            set_package(s, p, v)
+        f = scan(s)
+        levels = {i: f[i].level for i in ("UP01", "UP02", "UP03", "UP04", "HW05")}
+        self.assertEqual(levels, {"UP01": hc.WARN, "UP02": hc.OK, "UP03": hc.OK, "UP04": hc.WARN, "HW05": hc.WARN})
+        self.assertFalse([x.id for x in f.values() if x.level == hc.FAIL])
+
+    def test_nvidia_new_kernel_without_module_fails(self):
+        s = healthy()
+        new = "7.2.4-arch1-1"
+        s.files[f"/usr/lib/modules/{new}/vmlinuz"] = ""
+        s.commands[f"pacman -Qqo /usr/lib/modules/{new}/vmlinuz"] = (0, "linux\n")
+        for p in ("nvidia-utils", "lib32-nvidia-utils", "nvidia-open-dkms"):
+            set_package(s, p, "615.10-1")
+        s.commands[f"modinfo -k {REL} -F version nvidia"] = (0, "615.10\n")
+        self.assertEqual(scan(s)["UP04"].level, hc.FAIL)  # el kernel nuevo no tiene módulo NVIDIA
+
+    def test_limine_assignment_resets_and_other_keys_ignored(self):
+        s = healthy()
+        s.files["/etc/limine-entry-tool.d/claude-bt.conf"] = (
+            'KERNEL_CMDLINE[linux-lts]+=" foo=1"\n'
+            'KERNEL_CMDLINE[default]="root=/dev/mapper/root rw"\n')
+        self.assertEqual(scan(s)["UP05"].level, hc.OK)
+
     def test_cmdline_pending(self):
         s = healthy()
         s.files["/etc/limine-entry-tool.d/claude-usb.conf"] = \
@@ -251,6 +300,12 @@ class Updates(unittest.TestCase):
         s = healthy()
         s.files[hc.UPDATE_LOG] = "ok\n\x1b[0;31mSomething went wrong during the update!\x1b[0m\r\nerror: failed\n"
         self.assertEqual(scan(s)["UP08"].level, hc.FAIL)
+
+    def test_update_log_ignores_mirror_errors_and_own_output(self):
+        s = healthy()
+        s.files[hc.UPDATE_LOG] = ("error: failed retrieving file 'mesa.pkg.tar.zst' from mirror.example\n"
+                                  "       error: missing 'libfoo' dependency for 'bar'\n")
+        self.assertEqual(scan(s)["UP08"].level, hc.OK)
 
     def test_pending_updates_online_only(self):
         s = healthy()

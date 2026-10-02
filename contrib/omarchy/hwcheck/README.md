@@ -21,10 +21,11 @@ El instalador corre las pruebas unitarias y luego instala tres archivos:
 |---|---|
 | `~/.local/bin/omarchy-hwcheck` | El validador |
 | `~/.config/omarchy/hooks/post-update.d/omarchy-hwcheck.hook` | Al final de `omarchy update` (después de los paquetes y antes de ofrecer el reinicio), muestra el informe en la terminal y avisa si hay fallos |
-| `~/.config/omarchy/hooks/post-boot.d/omarchy-hwcheck.hook` | En cada arranque compara con la línea base y avisa solo si hay fallos o regresiones |
+| `~/.config/omarchy/hooks/post-boot.d/omarchy-hwcheck.hook` | En cada arranque, en segundo plano: espera 30 s a que los dispositivos se asienten (y hasta 150 s más al Bluetooth si la línea base lo tenía), compara con la línea base y avisa solo si hay fallos o regresiones |
 
 Por último crea la línea base y hace una primera validación. Se puede ejecutar todas las veces que
-quieras: si un archivo cambió, guarda el anterior como `*.bak.<fecha>`. Para desinstalar,
+quieras: si un archivo cambió, guarda el anterior en `~/.local/state/omarchy-hwcheck/backups/<fecha>/` (nunca dentro
+de las carpetas de hooks, porque Omarchy ejecuta todo lo que hay ahí). Para desinstalar,
 `install.sh --remove` (los informes quedan en `~/.local/state/omarchy-hwcheck/`).
 
 Requisitos: `python3`, `pciutils` y `pacman`, que vienen con Omarchy. `--online` necesita además
@@ -62,20 +63,20 @@ Cada comprobación tiene un id estable, para buscarlo o compararlo entre ejecuci
 | Id | Qué valida | Nivel si falla |
 |---|---|---|
 | **HW01** | Todo dispositivo PCI tiene driver (salvo puentes de host, ISA e IOMMU) | WARN |
-| **HW02** | Dispositivos USB que no lograron conectarse en este arranque (`error -110/-71`); retrasan el arranque | WARN |
-| **HW03** | Firmware que el kernel no pudo cargar (`Direct firmware load ... failed`) | FAIL |
+| **HW02** | Dispositivos USB que no lograron conectarse en este arranque (`error -110/-71`, también en puertos de hubs); retrasan el arranque. Se listan sin conteo, para que la salida no cambie mientras el registro crece | WARN |
+| **HW03** | Firmware que el kernel no pudo cargar (`Direct firmware load ... failed`), salvo los fallos inofensivos (`regulatory.db`, iwlwifi probando versiones) | FAIL |
 | **HW04** | Paquete de firmware de Arch (`linux-firmware-amdgpu`, `-mediatek`, `-intel`...) para cada driver cargado | FAIL |
-| **HW05** | Firmware GSP de NVIDIA para la versión del módulo cargado | FAIL |
+| **HW05** | Firmware GSP de NVIDIA para la versión de `nvidia-utils` (WARN si el módulo cargado es otro: falta reiniciar) | WARN o FAIL |
 | **HW06** | Adaptador Bluetooth presente si `bluetooth.service` está habilitado | WARN |
 | **HW07** | Radios bloqueadas por hardware (rfkill) | WARN |
 | **UP01** | El kernel en uso sigue instalado; si no, hace falta reiniciar | WARN |
 | **UP02** | `<kernel>-headers` a la par de cada kernel (DKMS los necesita) | FAIL |
 | **UP03** | Cada módulo DKMS (NVIDIA, xpadneo...) compilado para cada kernel instalado | FAIL |
-| **UP04** | Módulo NVIDIA cargado, módulo en disco, `nvidia-utils` y `lib32-nvidia-utils` coinciden | WARN o FAIL |
-| **UP05** | Parámetros del kernel configurados (`/etc/default/limine` y drop-ins) que aún no están activos | WARN |
+| **UP04** | Módulo NVIDIA cargado, módulo en disco **de cada kernel instalado**, `nvidia-utils` y `lib32-nvidia-utils` coinciden. Kernel y NVIDIA nuevos sin reiniciar = WARN; un kernel sin el módulo nuevo = FAIL | WARN o FAIL |
+| **UP05** | Parámetros del kernel configurados (`KERNEL_CMDLINE[default]` de `/etc/default/limine` y los drop-ins; `=` reemplaza, `+=` agrega) que aún no están activos | WARN |
 | **UP06** | Servicios de systemd fallidos (sistema y usuario) | WARN |
 | **UP07** | Reinicio pendiente marcado por Omarchy o Hyprland actualizado en caliente | WARN |
-| **UP08** | Errores en el registro de la última `omarchy update` (`/tmp/omarchy-update.log`) | WARN o FAIL |
+| **UP08** | Errores en el registro de la última `omarchy update` (`/tmp/omarchy-update.log`), salvo un espejo caído (`failed retrieving file`) y la salida sangrada del propio validador | WARN o FAIL |
 | **UP09** | (`--online`) Actualizaciones pendientes, separando las de kernel y drivers | INFO |
 | **CF01** | Base de datos de pacman consistente (`pacman -Dk`): dependencias rotas o conflictos | FAIL |
 | **CF02** | `.pacnew`/`.pacsave` sin resolver en `/etc` | WARN |
@@ -100,5 +101,6 @@ python3 -m unittest -v test_hwcheck
 ```
 
 Las pruebas usan un sistema simulado (archivos de `/sys` y `/proc` y salidas de comandos fijas), así que
-no dependen del equipo. Hay una prueba por comprobación, más estas: que tres ejecuciones den una salida
+no dependen del equipo. Hay una prueba por comprobación (con el caso real de una actualización que trae kernel y
+NVIDIA nuevos antes de reiniciar), más estas: que tres ejecuciones den una salida
 idéntica, que `diff` detecte las regresiones y el ciclo de la línea base.
