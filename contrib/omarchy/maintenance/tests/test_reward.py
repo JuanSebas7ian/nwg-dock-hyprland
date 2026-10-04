@@ -72,6 +72,21 @@ class RewardTest(unittest.TestCase):
         self.assertEqual(r["score"], 80)
         self.assertIn("SMART", r["blockers"])
 
+    def test_all_skip_group_drops_and_rescales(self):
+        r = reward.score(checks(HYPR="SKIP", PKG="FAIL"))
+        self.assertTrue(r["groups"]["HYPR"]["dropped"])
+        self.assertEqual(r["score"], round(85 * 100 / 95, 2))  # 89.47
+        self.assertFalse(r["stable"])
+        r = reward.score(checks(HYPR="SKIP"))
+        self.assertEqual(r["score"], 100)
+        self.assertTrue(r["stable"])
+
+    def test_blocking_group_all_skip_is_blocker(self):
+        for g in ("TRIM", "SMART"):
+            r = reward.score(checks(**{g: "SKIP"}))
+            self.assertIn(g, r["blockers"])
+            self.assertFalse(r["stable"])
+
     def test_broken_json_cli(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
             f.write("{not json")

@@ -22,7 +22,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --dry-run) DRY=1 ;;
         --wait) WAIT=1 ;;
-        --only) ONLY=$2; shift ;;
+        --only) [ $# -ge 2 ] || { echo "uso: $0 [--dry-run] [--only S0,1,2,...] [--wait]" >&2; exit 3; }
+                ONLY=$2; shift ;;
         -h|--help) sed -n '2,7p' "$0"; exit 0 ;;
         *) echo "uso: $0 [--dry-run] [--only S0,1,2,...] [--wait]" >&2; exit 3 ;;
     esac
@@ -50,8 +51,11 @@ root_discard() {
 orphans_now() { pacman -Qdtq 2>/dev/null || true; }
 
 # ---- checks: return 0 when the step is already done (no root needed) ----
-chk_S0() { [ -s "$STATE/pre-number" ]; }
-chk_S1() { [ -s "$STATE/post-number" ]; }
+# S0/S1 are fresh per run: done only if the state file exists and no step 1-6 needs work
+# (NEED_WORK), or this run already took the snapshot (S0_TAKEN/S1_TAKEN).
+NEED_WORK=0; S0_TAKEN=0; S1_TAKEN=0
+chk_S0() { [ -s "$STATE/pre-number" ] && { [ "$NEED_WORK" -eq 0 ] || [ "$S0_TAKEN" -eq 1 ]; }; }
+chk_S1() { [ -s "$STATE/post-number" ] && { [ "$NEED_WORK" -eq 0 ] || [ "$S1_TAKEN" -eq 1 ]; }; }
 chk_1() { [ "$(root_discard)" -gt 0 ] && unit_ok fstrim.timer; }
 chk_2() { grep -q "^PACCACHE_ARGS='-k3'" /etc/conf.d/pacman-contrib 2>/dev/null && unit_ok paccache.timer; }
 chk_3() { unit_ok 'btrfs-scrub@-.timer'; }
@@ -71,17 +75,17 @@ chk_6() { pacman -Q "${PKGS6[@]}" >/dev/null 2>&1; }
 # ---- actions ----
 do_S0() {
     local n
-    if [ "$DRY" -eq 1 ]; then say '    [dry] sudo snapper -c root create -t pre -p -d "maintenance: before"'; return 0; fi
-    n=$(sudo snapper -c root create -t pre -p -d "maintenance: before") || return 1
-    mkdir -p "$STATE"; echo "$n" >"$STATE/pre-number"
+    if [ "$DRY" -eq 1 ]; then say '    [dry] sudo snapper -c root create -t pre -p -c number -d "maintenance: before"'; return 0; fi
+    n=$(sudo snapper -c root create -t pre -p -c number -d "maintenance: before") || return 1
+    mkdir -p "$STATE"; echo "$n" >"$STATE/pre-number"; rm -f "$STATE/post-number"; S0_TAKEN=1
     say "snapshot previo (pre) = #$n"
 }
 do_S1() {
     local pre n
-    if [ "$DRY" -eq 1 ]; then say '    [dry] sudo snapper -c root create -t post --pre-number <S0> -d "maintenance: after"'; return 0; fi
+    if [ "$DRY" -eq 1 ]; then say '    [dry] sudo snapper -c root create -t post --pre-number <S0> -c number -d "maintenance: after"'; return 0; fi
     pre=$(cat "$STATE/pre-number" 2>/dev/null) || { say "falta $STATE/pre-number (ejecuta S0)"; return 1; }
-    n=$(sudo snapper -c root create -t post --pre-number "$pre" -d "maintenance: after" -p) || return 1
-    echo "$n" >"$STATE/post-number"
+    n=$(sudo snapper -c root create -t post --pre-number "$pre" -c number -d "maintenance: after" -p) || return 1
+    echo "$n" >"$STATE/post-number"; S1_TAKEN=1
     say "snapshot posterior (post) = #$n (pre #$pre)"
 }
 do_1() {
@@ -115,28 +119,33 @@ SMART_SETS=(
     "-a -m <nomailer> -M exec $NOTIFY_DST"
 )
 do_4() {
-    local set tmp out rc ok=0
+    local set tmp out rc chosen=""
     rt pacman -S --needed --noconfirm smartmontools || return 1
     rt install -D -m 755 "$HERE/smart-notify" "$NOTIFY_DST" || return 1
     if [ "$DRY" -eq 1 ]; then
-        say "    [dry] respaldar $SMARTD_CONF y escribir 'DEVICESCAN ${SMART_SETS[0]}' (validar con smartd -q onecheck)"
+        say "    [dry] respaldar $SMARTD_CONF y escribir 'DEVICESCAN ${SMART_SETS[0]}' (validar un temporal con smartd -q onecheck -c)"
         say "    [dry] sudo systemctl enable --now smartd"; return 0
     fi
-    if [ -f "$SMARTD_CONF" ] && ! grep -qE "^[^#]*-M exec $NOTIFY_DST" "$SMARTD_CONF"; then
-        sudo cp -a "$SMARTD_CONF" "$SMARTD_CONF.bak.$DATE" || return 1
-    fi
     tmp=$(mktemp)
+    # Validate candidates in a temp file; /etc/smartd.conf is only touched once one is accepted.
     for set in "${SMART_SETS[@]}"; do
         printf '# Managed by omarchy maintenance (contrib/omarchy/maintenance)\nDEVICESCAN %s\n' "$set" >"$tmp"
-        sudo install -m 644 "$tmp" "$SMARTD_CONF" || return 1
-        out=$(sudo smartd -q onecheck 2>&1); rc=$?
-        say "smartd -q onecheck con 'DEVICESCAN $set': rc=$rc"
+        out=$(sudo smartd -q onecheck -c "$tmp" 2>&1); rc=$?
+        say "smartd -q onecheck -c con 'DEVICESCAN $set': rc=$rc"
         printf '%s\n' "$out" | sed 's/^/    | /'
-        if [ $rc -eq 0 ] && ! printf '%s\n' "$out" | grep -Eiq 'unable to parse|invalid|unknown (option|directive)|problem creating'; then ok=1; break; fi
+        if [ $rc -eq 0 ] && ! grep -Eiq 'unable to parse|invalid|unknown (option|directive)|problem creating' <<<"$out"; then chosen=$set; break; fi
         say "directivas rechazadas por smartd; probando un conjunto menor"
     done
+    if [ -z "$chosen" ]; then
+        rm -f "$tmp"; say "ningun conjunto fue aceptado; $SMARTD_CONF no se modifico"; return 1
+    fi
+    if [ -f "$SMARTD_CONF" ] && ! grep -qE "^[^#]*-M exec $NOTIFY_DST" "$SMARTD_CONF"; then
+        sudo cp -a "$SMARTD_CONF" "$SMARTD_CONF.bak.$DATE" || { rm -f "$tmp"; return 1; }
+    fi
+    if ! sudo install -m 644 "$tmp" "$SMARTD_CONF"; then
+        rm -f "$tmp"; [ -f "$SMARTD_CONF.bak.$DATE" ] && sudo cp -a "$SMARTD_CONF.bak.$DATE" "$SMARTD_CONF"; return 1
+    fi
     rm -f "$tmp"
-    [ $ok -eq 1 ] || return 1
     rt systemctl enable --now smartd || return 1
     rt systemctl restart smartd
 }
@@ -162,6 +171,9 @@ main() {
         ( while true; do sleep 50; sudo -n -v 2>/dev/null || exit; done ) >/dev/null 2>&1 & KEEP=$!
         trap 'kill $KEEP 2>/dev/null' EXIT
     fi
+    for s in "${SEL[@]}"; do
+        case "$s" in S0|S1) ;; *) "chk_$s" || NEED_WORK=1 ;; esac
+    done
     say "Mantenimiento ($([ $DRY -eq 1 ] && echo dry-run || echo real)) $(date '+%F %T'): pasos ${SEL[*]}"
     for s in "${SEL[@]}"; do
         say ""; say "== Paso $s =="

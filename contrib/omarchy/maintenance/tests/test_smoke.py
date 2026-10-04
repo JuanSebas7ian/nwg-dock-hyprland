@@ -125,6 +125,7 @@ class NotifyTest(unittest.TestCase):
                 text = f.read()
             self.assertIn("smartd-notify", text)
             self.assertIn("-u tester", text)
+            self.assertIn("DBUS_SESSION_BUS_ADDRESS=unix:path=%s/bus" % rundir, text)
             self.assertIn("notify-send -u critical", text)
             self.assertIn("/dev/nvme0", text)
 

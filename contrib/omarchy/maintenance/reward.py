@@ -4,7 +4,9 @@
 Usage: reward.py [smoke.json]   (stdin if no file)
 stdout: JSON; stderr: human summary. Exit 0 if stable, 1 if not, 3 on bad input.
 PASS = full weight, WARN = half, FAIL = 0, SKIP = ignored. A group made only of
-SKIPs counts as full; a group with no checks at all counts as 0.
+SKIPs drops out of the total and the score is rescaled to 100; a group with no
+checks at all counts as 0. A blocking group (TRIM, SMART) needs at least one
+non-SKIP check, otherwise it is a blocker.
 """
 import json
 import sys
@@ -33,22 +35,21 @@ def score(data):
         if g is None:
             continue
         per[g].append(str(c["status"]).upper())
-    groups, total, blockers = {}, 0.0, []
+    groups, total, active, blockers = {}, 0.0, 0, []
     for g, w in WEIGHTS.items():
         sts = per[g]
         scored = [s for s in sts if s != "SKIP"]
-        if not sts:
-            frac = 0.0
-        elif not scored:
-            frac = 1.0
-        else:
-            frac = sum(VALUE.get(s, 0.0) for s in scored) / len(scored)
-        got = w * frac
-        total += got
-        groups[g] = {"weight": w, "points": round(got, 2), "statuses": sts}
-        if g in BLOCKING and (not sts or any(VALUE.get(s, 0.0) == 0.0 and s != "SKIP" for s in sts)):
+        dropped = bool(sts) and not scored
+        got = 0.0
+        if scored:
+            got = w * sum(VALUE.get(s, 0.0) for s in scored) / len(scored)
+        if not dropped:
+            total += got
+            active += w
+        groups[g] = {"weight": w, "points": round(got, 2), "statuses": sts, "dropped": dropped}
+        if g in BLOCKING and (not scored or any(VALUE.get(s, 0.0) == 0.0 for s in scored)):
             blockers.append(g)
-    total = round(total, 2)
+    total = round(total * 100 / active, 2) if active else 0.0
     return {"score": total, "threshold": THRESHOLD, "blockers": blockers,
             "stable": total >= THRESHOLD and not blockers, "groups": groups}
 

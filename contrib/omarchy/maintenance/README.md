@@ -41,4 +41,4 @@ Para repetir S0/S1 borra `pre-number` / `post-number` de esa carpeta.
 ## Reward
 
 Pesos: TRIM 25, smartd 20, paccache 10, scrub 10, huérfanos 5, paquetes 10, `/boot` 5, servicios 10, `hyprctl configerrors` 5.
-PASS = peso completo, WARN = mitad, FAIL = 0, SKIP = ignorado. Estable: nota >= 90 y ningún FAIL en TRIM ni smartd.
+PASS = peso completo, WARN = mitad, FAIL = 0. Un grupo con todo SKIP sale del total y la nota se reescala a 100. Estable: nota >= 90, ningún FAIL en TRIM ni smartd, y cada uno con al menos una comprobación no SKIP.

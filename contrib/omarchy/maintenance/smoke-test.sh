@@ -75,7 +75,7 @@ if want SMART03; then
     jr=$(journalctl -u smartd -b --no-pager -q 2>&1)
     if [ -z "$jr" ] || [[ "$jr" == *"No journal files"* ]] || [[ "$jr" == *"not seeing messages"* ]]; then
         emit SKIP SMART03 "journal de smartd ilegible o vacio sin root"
-    elif printf '%s\n' "$jr" | grep -Eiq 'unable to parse|invalid|unknown (option|directive)|problem creating|bad configuration'; then
+    elif grep -Eiq 'unable to parse|invalid|unknown (option|directive)|problem creating|bad configuration' <<<"$jr"; then
         emit FAIL SMART03 "errores de configuracion en journalctl -u smartd"
     else emit PASS SMART03 "sin errores de configuracion en journalctl -u smartd"; fi
 fi
@@ -105,7 +105,7 @@ if want PKG02; then
     if ! command -v vainfo >/dev/null 2>&1; then emit WARN PKG02 "vainfo no instalado"
     else
         vi=$(vainfo 2>&1)
-        if printf '%s\n' "$vi" | grep -Eqi 'nvidia|nvdec' && printf '%s\n' "$vi" | grep -q 'VAProfile'; then
+        if [[ "${vi,,}" == *nvidia* || "${vi,,}" == *nvdec* ]] && [[ "$vi" == *VAProfile* ]]; then
             emit PASS PKG02 "vainfo lista perfiles con el driver nvidia (NVDEC)"
         else emit WARN PKG02 "vainfo no lista perfiles con el driver nvidia"; fi
     fi
