@@ -33,15 +33,24 @@ Panel {
   readonly property var tr: st && st.track ? st.track : null
   readonly property bool playing: authorized ? !!st.playing : (mpris !== null && mpris.isPlaying)
 
+  // The Spotify app or spotifyd, whichever is playing (spotifyd only shows up
+  // on D-Bus while it is the active Spotify Connect device).
   readonly property var mpris: {
     var list = Mpris.players ? Mpris.players.values : []
+    var found = null
     for (var i = 0; i < list.length; i++) {
       var p = list[i]
       var n = String((p.identity || "") + " " + (p.desktopEntry || "") + " " + (p.dbusName || "")).toLowerCase()
-      if (n.indexOf("spotify") >= 0) return p
+      if (n.indexOf("spotify") < 0) continue
+      if (p.isPlaying) return p
+      if (!found) found = p
     }
-    return null
+    return found
   }
+  readonly property string trackKey: mpris && mpris.metadata
+    ? String(mpris.metadata["mpris:trackid"] || mpris.metadata["xesam:url"] || "") : ""
+  onTrackKeyChanged: if (trackKey !== "") Quickshell.execDetached(["python3", backend, "remember", trackKey])
+  property bool starting: false
 
   function fmt(ms) {
     var s = Math.max(0, Math.floor(Number(ms || 0) / 1000))
@@ -63,17 +72,29 @@ Panel {
     actionProc.command = actionQueue.shift()
     actionProc.running = true
   }
+  // Works with or without the Spotify window: the Web API when the account is
+  // connected, MPRIS when a player exists, and otherwise a cold start of
+  // spotifyd on this PC (spotify.py local-play).
+  function coldStart() {
+    if (localProc.running) return
+    starting = true
+    actionError = ""
+    localProc.running = true
+  }
   function toggle() {
     if (authorized) act("toggle")
     else if (mpris && mpris.canTogglePlaying) mpris.togglePlaying()
+    else coldStart()
   }
   function next() {
     if (authorized) act("next")
     else if (mpris && mpris.canGoNext) mpris.next()
+    else coldStart()
   }
   function previous() {
     if (authorized) act("previous")
     else if (mpris && mpris.canGoPrevious) mpris.previous()
+    else coldStart()
   }
 
   implicitWidth: button.implicitWidth
@@ -137,6 +158,22 @@ Panel {
     }
   }
   Timer { id: refreshSoon; interval: 400; onTriggered: root.refresh() }
+
+  Process {
+    id: localProc
+    command: ["python3", root.backend, "local-play"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.starting = false
+        try {
+          var r = JSON.parse(text)
+          if (!r.ok) root.actionError = r.error || "Could not start Spotify on this PC"
+        } catch (e) {}
+        refreshSoon.restart()
+      }
+    }
+  }
 
   // One-time login: reads the Client ID saved by the installer.
   Process {
@@ -220,7 +257,7 @@ Panel {
             spacing: Style.space(6)
             Text {
               width: parent.width
-              text: "Connect your Spotify account to see the queue and your lists and to play without opening Spotify."
+              text: "Optional: connect your Spotify account to see the queue, recently played, top tracks and playlists, and pick devices. Needs your app Client ID in ~/.config/spotify-bar/client_id."
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -230,6 +267,26 @@ Panel {
               text: authProc.running ? "Waiting for the browser…" : "Connect Spotify"
               enabled: !authProc.running
               onClicked: authProc.running = true
+            }
+          }
+
+          // ------------------------------------------------ cold start
+          Column {
+            visible: !root.mpris && !(root.authorized && root.tr)
+            width: parent.width
+            spacing: Style.space(4)
+            Button {
+              text: root.starting ? "Starting Spotify on this PC…" : "▶  Play on this PC"
+              enabled: !root.starting
+              onClicked: root.coldStart()
+            }
+            Text {
+              width: parent.width
+              text: "Plays through spotifyd (no Spotify window). It resumes your account's session, or the last song you played."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
 

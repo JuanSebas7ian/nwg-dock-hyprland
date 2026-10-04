@@ -19,6 +19,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -305,11 +306,85 @@ def action(name, arg):
   return 0
 
 
+# ------------------------------------------------------------------ spotifyd, no Web API
+
+LAST_URI = CACHE / "last-uri"
+
+
+def bus_names(prefix):
+  out = subprocess.run(["busctl", "--user", "list", "--no-pager", "--no-legend"], capture_output=True, text=True).stdout
+  return [line.split()[0] for line in out.splitlines() if line.split() and line.split()[0].startswith(prefix)]
+
+
+def mpris_status(name):
+  out = subprocess.run(["busctl", "--user", "get-property", name, "/org/mpris/MediaPlayer2",
+                        "org.mpris.MediaPlayer2.Player", "PlaybackStatus"], capture_output=True, text=True).stdout
+  return out.strip().split()[-1].strip('"') if out.strip() else ""
+
+
+def local_play():
+  """Play on this PC through spotifyd without the Spotify window or the Web API.
+
+  TransferPlayback makes spotifyd the active device (its MPRIS player appears
+  and it resumes the account's current session). With nothing to resume,
+  OpenUri plays the last track any Spotify player reported.
+  """
+  if not bus_names("rs.spotifyd.instance"):
+    subprocess.run(["systemctl", "--user", "start", "spotifyd.service"], capture_output=True)
+    for _ in range(20):
+      if bus_names("rs.spotifyd.instance"):
+        break
+      time.sleep(0.5)
+  ctl = bus_names("rs.spotifyd.instance")
+  if not ctl:
+    out({"ok": False, "error": "spotifyd is not running (systemctl --user status spotifyd)"})
+    return 1
+  subprocess.run(["busctl", "--user", "call", ctl[0], "/rs/spotifyd/Controls", "rs.spotifyd.Controls",
+                  "TransferPlayback"], capture_output=True)
+  player = None
+  for _ in range(16):
+    names = bus_names("org.mpris.MediaPlayer2.spotifyd")
+    if names:
+      player = names[0]
+      if mpris_status(player) == "Playing":
+        out({"ok": True, "via": "transfer"})
+        return 0
+    time.sleep(0.25)
+  if not player:
+    out({"ok": False, "error": "spotifyd did not become the active device"})
+    return 1
+  try:
+    uri = LAST_URI.read_text().strip()
+  except OSError:
+    uri = ""
+  method = ["OpenUri", "s", uri] if uri.startswith("spotify:") else ["Play"]
+  subprocess.run(["busctl", "--user", "call", player, "/org/mpris/MediaPlayer2", "org.mpris.MediaPlayer2.Player",
+                  *method], capture_output=True)
+  time.sleep(1.5)
+  if mpris_status(player) == "Playing":
+    out({"ok": True, "via": method[0]})
+    return 0
+  out({"ok": False, "error": "Nothing to resume yet: play something once (or connect your account)."})
+  return 1
+
+
+def remember(uri):
+  m = re.search(r"(?:spotify[:/])?(track|episode)[:/]([A-Za-z0-9]{22})", uri or "")
+  if m:
+    CACHE.mkdir(parents=True, exist_ok=True)
+    LAST_URI.write_text(f"spotify:{m.group(1)}:{m.group(2)}\n")
+  return 0
+
+
 def main(argv):
   cmd = argv[1] if len(argv) > 1 else "status"
   arg = argv[2] if len(argv) > 2 else ""
   if cmd == "auth":
     return auth(arg) if arg else 2
+  if cmd == "local-play":
+    return local_play()
+  if cmd == "remember":
+    return remember(arg)
   if cmd == "status":
     status()
   elif cmd == "library":

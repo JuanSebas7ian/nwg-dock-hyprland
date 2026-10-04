@@ -28,7 +28,8 @@ WIDGETS=(
   "juansebas7ian.gdrive:omarchy.dropbox"
   "juansebas7ian.ollama:omarchy.agents"
   "juansebas7ian.sysmon:juansebas7ian.ollama"
-  "juansebas7ian.nvidia:juansebas7ian.sysmon"
+  "juansebas7ian.storage:juansebas7ian.sysmon"
+  "juansebas7ian.nvidia:juansebas7ian.storage"
   "juansebas7ian.drivers:juansebas7ian.nvidia"
 )
 COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard)
@@ -113,7 +114,7 @@ esac
 
 # --------------------------------------------------------------- requisitos
 command -v omarchy >/dev/null || fail "esto es para Omarchy (no encuentro el comando omarchy)"
-for dep in python3 jq rsync; do
+for dep in python3 jq rsync busctl; do
   command -v "$dep" >/dev/null || fail "falta $dep: omarchy pkg add $dep"
 done
 command -v checkupdates >/dev/null || warn "sin checkupdates, el widget de drivers no verá actualizaciones: omarchy pkg add pacman-contrib"
