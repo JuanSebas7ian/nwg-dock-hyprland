@@ -1,0 +1,183 @@
+#!/usr/bin/python3
+"""Keep a wired Xbox 360 pad alive across USB drops.
+
+Creates one persistent virtual pad (uinput, same IDs as the real one) and
+forwards buttons, sticks and rumble from the physical pad, which is grabbed so
+games only see the virtual one. When the physical pad drops off the bus
+("disabled by hub (EMI?)"), the virtual pad stays, inputs are released and the
+pad is re-attached as soon as it re-enumerates (~1 s), so the game never sees a
+disconnect.
+"""
+import ctypes
+import os
+import selectors
+import signal
+import sys
+import time
+
+import evdev
+from evdev import ecodes as e
+
+VENDOR, PRODUCT, VERSION = 0x045E, 0x028E, 0x0110
+NAME = "Microsoft X-Box 360 pad"
+PHYS = "pad-keepalive/input0"
+
+STICK = dict(min=-32768, max=32767, fuzz=16, flat=128)
+TRIG = dict(min=0, max=255, fuzz=0, flat=0)
+HAT = dict(min=-1, max=1, fuzz=0, flat=0)
+AXES = {e.ABS_X: STICK, e.ABS_Y: STICK, e.ABS_Z: TRIG, e.ABS_RX: STICK,
+        e.ABS_RY: STICK, e.ABS_RZ: TRIG, e.ABS_HAT0X: HAT, e.ABS_HAT0Y: HAT}
+KEYS = [e.BTN_A, e.BTN_B, e.BTN_X, e.BTN_Y, e.BTN_TL, e.BTN_TR, e.BTN_SELECT,
+        e.BTN_START, e.BTN_MODE, e.BTN_THUMBL, e.BTN_THUMBR]
+FF = [e.FF_RUMBLE, e.FF_PERIODIC, e.FF_SQUARE, e.FF_TRIANGLE, e.FF_SINE, e.FF_GAIN]
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def find_physical():
+    for path in evdev.list_devices():
+        try:
+            d = evdev.InputDevice(path)
+        except OSError:
+            continue
+        if (d.info.vendor, d.info.product) == (VENDOR, PRODUCT) and d.phys.startswith("usb-"):
+            return d
+        d.close()
+    return None
+
+
+class Proxy:
+    def __init__(self):
+        caps = {e.EV_KEY: KEYS,
+                e.EV_ABS: [(c, evdev.AbsInfo(value=0, resolution=0, **i)) for c, i in AXES.items()],
+                e.EV_FF: FF}
+        self.ui = evdev.UInput(caps, name=NAME, vendor=VENDOR, product=PRODUCT,
+                               version=VERSION, bustype=e.BUS_USB, phys=PHYS, max_effects=16)
+        self.phys = None
+        self.effects = {}   # virtual effect id -> copy of the effect
+        self.mapped = {}    # virtual effect id -> physical effect id (current physical pad)
+        self.sel = selectors.DefaultSelector()
+        self.sel.register(self.ui.fd, selectors.EVENT_READ, "ui")
+        log(f"virtual pad ready: {self.ui.device.path}")
+
+    # physical pad ----------------------------------------------------------
+    def attach(self, d):
+        try:
+            d.grab()
+        except OSError as err:
+            log(f"cannot grab {d.path}: {err}")
+            d.close()
+            return
+        self.phys, self.mapped = d, {}
+        self.sel.register(d.fd, selectors.EVENT_READ, "phys")
+        log(f"attached {d.path} ({d.phys})")
+
+    def detach(self, why):
+        if self.phys is None:
+            return
+        try:
+            self.sel.unregister(self.phys.fd)
+        except (KeyError, ValueError):
+            pass
+        try:
+            self.phys.close()
+        except OSError:
+            pass
+        self.phys, self.mapped = None, {}
+        self.release_all()
+        log(f"physical pad lost ({why}); virtual pad kept, waiting for it to come back")
+
+    def release_all(self):
+        for k in KEYS:
+            self.ui.write(e.EV_KEY, k, 0)
+        for a in AXES:
+            self.ui.write(e.EV_ABS, a, 0)
+        self.ui.syn()
+
+    def forward_input(self):
+        try:
+            for ev in self.phys.read():
+                if ev.type in (e.EV_KEY, e.EV_ABS, e.EV_SYN):
+                    self.ui.write(ev.type, ev.code, ev.value)
+        except BlockingIOError:
+            pass
+        except OSError as err:
+            self.detach(err.strerror or err)
+
+    # rumble ----------------------------------------------------------------
+    def phys_effect(self, vid):
+        if self.phys is None or vid not in self.effects:
+            return None
+        eff = type(self.effects[vid]).from_buffer_copy(self.effects[vid])
+        eff.id = self.mapped.get(vid, -1)
+        try:
+            self.mapped[vid] = self.phys.upload_effect(eff)
+        except OSError:
+            return None
+        return self.mapped[vid]
+
+    def handle_ui(self):
+        try:
+            events = list(self.ui.read())
+        except BlockingIOError:
+            return
+        for ev in events:
+            if ev.type == e.EV_UINPUT and ev.code == e.UI_FF_UPLOAD:
+                up = self.ui.begin_upload(ev.value)
+                eff = up.effect
+                self.effects[eff.id] = type(eff).from_buffer_copy(eff)
+                self.phys_effect(eff.id)
+                up.retval = 0
+                self.ui.end_upload(up)
+            elif ev.type == e.EV_UINPUT and ev.code == e.UI_FF_ERASE:
+                er = self.ui.begin_erase(ev.value)
+                self.effects.pop(er.effect_id, None)
+                pid = self.mapped.pop(er.effect_id, None)
+                if pid is not None and self.phys is not None:
+                    try:
+                        self.phys.erase_effect(pid)
+                    except OSError:
+                        pass
+                er.retval = 0
+                self.ui.end_erase(er)
+            elif ev.type == e.EV_FF and self.phys is not None:
+                code = ev.code
+                if ev.code != e.FF_GAIN:
+                    code = self.mapped.get(ev.code)
+                    if code is None:
+                        code = self.phys_effect(ev.code)
+                    if code is None:
+                        continue
+                try:
+                    self.phys.write(e.EV_FF, code, ev.value)
+                except OSError:
+                    pass
+
+    # main loop -------------------------------------------------------------
+    def run(self):
+        next_scan = 0.0
+        while True:
+            if self.phys is None and time.monotonic() >= next_scan:
+                d = find_physical()
+                if d:
+                    self.attach(d)
+                next_scan = time.monotonic() + 0.25
+            for key, _ in self.sel.select(timeout=0.25):
+                if key.data == "phys" and self.phys is not None:
+                    self.forward_input()
+                elif key.data == "ui":
+                    self.handle_ui()
+
+
+def main():
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        Proxy().run()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

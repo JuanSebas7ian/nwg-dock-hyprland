@@ -50,6 +50,24 @@ pacman pasa solo nombres, así que el gancho solo se activa para `Install`/`Upgr
 `omarchy pkg add git && git clone -b feat/dnd-reorder https://github.com/JuanSebas7ian/nwg-dock-hyprland.git ~/src/nwg-dock-hyprland-dnd`,
 luego `contrib/omarchy/drivers/install.sh --wait` y reiniciar.
 
+## Control Xbox 360 con cable: `xpad` y `pad-keepalive`
+
+- `etc/modules-load.d/claude-xpad.conf` carga `xpad` (ver arriba): sin él, el control con cable (`045e:028e`) no tiene driver.
+- **Cortes USB jugando** (2026-10-04, ELDEN RING): el puerto del chipset (`usb6-port2`, `xhci-pci-prom21`) registraba
+  `disabled by hub (EMI?), re-enabling...` y desconexiones limpias, cada ~2 min y solo con el juego abierto. Se descartaron el driver,
+  el autosuspend (`power/control = on`), la vibración (20 s al máximo y 3.000 órdenes en 30 s) y el cable (30 s doblándolo).
+  En un puerto trasero del controlador de la CPU (`3-2.2`, `0b:00.4`) no se ha repetido.
+- `pad-keepalive/` (usuario, sin root; `python-evdev`, grupo `input`): crea un **mando virtual permanente** (uinput, mismos IDs,
+  `phys=pad-keepalive/input0`), acapara el físico (`EVIOCGRAB`) y le reenvía botones, ejes y vibración. Si el físico se cae, el
+  virtual sigue (se sueltan los botones) y el físico se retoma al volver (~1 s): el juego no ve la desconexión. Probado
+  desconectando el cable con el juego abierto: Steam y `winedevice.exe` abrieron el virtual sin reiniciar el juego.
+  Instalar: `pad-keepalive/install.sh` (idempotente; respaldos en `~/.local/state/omarchy-drivers/backups/`). Quitar: `--remove`.
+  Registro: `journalctl --user -u pad-keepalive`.
+- **Limitación conocida:** Steam sigue listando el físico (mudo) como mando 0 y el virtual como 1. Si un juego solo escucha al
+  mando 0, en Steam → Configuración → Mando poner el virtual primero. La solución completa sería una regla udev que oculte el
+  físico (`TAG-="uaccess"`, `MODE="0600"`, `ENV{ID_INPUT_JOYSTICK}=""`) con el proxy como servicio del sistema; **no está
+  incluida**: pendiente de la decisión del usuario.
+
 ## Deshacer
 
 `sudo rm /etc/pacman.d/hooks/90-omarchy-compat.hook /usr/local/lib/omarchy/compat-hook /usr/local/lib/omarchy/compat.py`.

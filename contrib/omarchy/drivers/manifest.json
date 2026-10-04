@@ -73,6 +73,7 @@
         "lm_sensors",
         "nvme-cli",
         "openrgb",
+        "python-evdev",
         "smartmontools",
         "solaar",
         "xpadneo-dkms"
@@ -242,6 +243,11 @@
       "name": "bt-guardian",
       "note": "unidades y script ya incluidos en etc_files; el instalador original los gestiona",
       "path": "~/.claude/skills/omarchy-hardware/scripts/bt-guardian/install.sh"
+    },
+    {
+      "name": "pad-keepalive",
+      "note": "mando virtual permanente para el control Xbox 360 con cable (sobrevive a cortes USB); usuario, sin root; lo ejecuta omarchy-restore full",
+      "path": "contrib/omarchy/drivers/pad-keepalive/install.sh"
     }
   ]
 }
