@@ -2,12 +2,13 @@
 Description=Persistent virtual Xbox 360 pad (survives USB drops)
 After=graphical-session.target
 PartOf=graphical-session.target
+# Never give up restarting: without the proxy the game would see every USB drop again
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=%h/.local/bin/pad-keepalive
 Restart=always
 RestartSec=2
-Nice=-5
 
 [Install]
 WantedBy=graphical-session.target

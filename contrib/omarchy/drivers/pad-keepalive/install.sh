@@ -18,7 +18,8 @@ if [ "${1:-}" = --remove ]; then
 fi
 
 /usr/bin/python3 -c 'import evdev' 2>/dev/null || { echo "python-evdev missing: sudo pacman -S --needed python-evdev" >&2; exit 1; }
-id -nG | tr ' ' '\n' | grep -qx input || echo "warning: $USER is not in the input group; the pad cannot be grabbed" >&2
+groups=" $(id -nG) "   # no grep -q in a pipe: SIGPIPE + pipefail fails at random
+[[ $groups == *" input "* ]] || echo "warning: $USER is not in the input group; the pad cannot be grabbed" >&2
 
 put() { # src dest mode
     if [ -e "$2" ] && ! cmp -s "$1" "$2"; then mkdir -p "$BACKUP"; cp -a "$2" "$BACKUP/"; echo "backup: $BACKUP/$(basename "$2")"; fi
@@ -27,7 +28,7 @@ put() { # src dest mode
 put "$HERE/pad-keepalive" "$BIN" 755
 put "$HERE/pad-keepalive.service" "$UNIT" 644
 systemctl --user daemon-reload
-systemctl --user enable pad-keepalive.service >/dev/null 2>&1
+systemctl --user enable --quiet pad-keepalive.service
 systemctl --user restart pad-keepalive.service
 sleep 1
 systemctl --user is-active pad-keepalive.service

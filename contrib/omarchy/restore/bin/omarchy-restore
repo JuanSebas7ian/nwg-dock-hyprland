@@ -182,7 +182,8 @@ cmd_full() {
   [[ -d $REPO_DIR/.git ]] || git clone -b feat/dnd-reorder "$REPO_URL" "$REPO_DIR"
   # drivers first (packages, /etc files, DKMS, services, pacman hook), then the rest; a failure in one does not stop the others
   (cd "$REPO_DIR" && { contrib/omarchy/drivers/install.sh || echo "drivers/install.sh reported problems; see ~/.local/state/omarchy-drivers/"; } &&
-    contrib/omarchy/drivers/pad-keepalive/install.sh && contrib/omarchy/install.sh && contrib/omarchy/hwcheck/install.sh && contrib/omarchy/bar/install.sh --host) || true
+    { contrib/omarchy/drivers/pad-keepalive/install.sh || echo "pad-keepalive/install.sh failed (python-evdev?); the rest continues"; } &&
+    contrib/omarchy/install.sh && contrib/omarchy/hwcheck/install.sh && contrib/omarchy/bar/install.sh --host) || true
   echo "== 7. services"
   systemctl --user daemon-reload
   [[ -f $sys/user-units.txt ]] && xargs -r systemctl --user enable <"$sys/user-units.txt" 2>/dev/null

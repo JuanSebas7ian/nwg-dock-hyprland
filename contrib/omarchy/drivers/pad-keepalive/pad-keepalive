@@ -21,6 +21,8 @@ from evdev import ecodes as e
 VENDOR, PRODUCT, VERSION = 0x045E, 0x028E, 0x0110
 NAME = "Microsoft X-Box 360 pad"
 PHYS = "pad-keepalive/input0"
+SCAN_EVERY = 0.25   # s between looks for the physical pad while it is gone
+GRAB_RETRY = 5.0    # s before retrying a pad that another process holds
 
 STICK = dict(min=-32768, max=32767, fuzz=16, flat=128)
 TRIG = dict(min=0, max=255, fuzz=0, flat=0)
@@ -36,16 +38,41 @@ def log(msg):
     print(msg, flush=True)
 
 
-def find_physical():
-    for path in evdev.list_devices():
-        try:
-            d = evdev.InputDevice(path)
-        except OSError:
-            continue
-        if (d.info.vendor, d.info.product) == (VENDOR, PRODUCT) and d.phys.startswith("usb-"):
-            return d
-        d.close()
+SYSFS = os.environ.get("PAD_KEEPALIVE_SYSFS", "/sys/class/input")
+DEV = os.environ.get("PAD_KEEPALIVE_DEV", "/dev/input")
+
+
+def read_attr(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def find_physical_path():
+    """Event node of the physical pad, found through sysfs: nothing is opened while it is unplugged."""
+    try:
+        names = sorted(n for n in os.listdir(SYSFS) if n.startswith("event"))
+    except OSError:
+        return None
+    for name in names:
+        dev = os.path.join(SYSFS, name, "device")
+        if (read_attr(os.path.join(dev, "id/vendor")) == f"{VENDOR:04x}"
+                and read_attr(os.path.join(dev, "id/product")) == f"{PRODUCT:04x}"
+                and read_attr(os.path.join(dev, "phys")).startswith("usb-")):
+            return os.path.join(DEV, name)
     return None
+
+
+def find_physical():
+    path = find_physical_path()
+    if path is None:
+        return None
+    try:
+        return evdev.InputDevice(path)
+    except OSError:
+        return None
 
 
 class Proxy:
@@ -56,6 +83,7 @@ class Proxy:
         self.ui = evdev.UInput(caps, name=NAME, vendor=VENDOR, product=PRODUCT,
                                version=VERSION, bustype=e.BUS_USB, phys=PHYS, max_effects=16)
         self.phys = None
+        self.grab_error = None
         self.effects = {}   # virtual effect id -> copy of the effect
         self.mapped = {}    # virtual effect id -> physical effect id (current physical pad)
         self.sel = selectors.DefaultSelector()
@@ -64,15 +92,33 @@ class Proxy:
 
     # physical pad ----------------------------------------------------------
     def attach(self, d):
+        """Grab the physical pad; False if it cannot be grabbed (caller backs off)."""
         try:
             d.grab()
         except OSError as err:
-            log(f"cannot grab {d.path}: {err}")
+            if self.grab_error != str(err):
+                log(f"cannot grab {d.path}: {err}; retrying every {GRAB_RETRY:.0f} s")
+                self.grab_error = str(err)
             d.close()
-            return
+            return False
+        self.grab_error = None
         self.phys, self.mapped = d, {}
         self.sel.register(d.fd, selectors.EVENT_READ, "phys")
+        self.sync_state()
         log(f"attached {d.path} ({d.phys})")
+        return True
+
+    def sync_state(self):
+        """Copy what is held right now (buttons, sticks) so nothing stays stale after a re-attach."""
+        try:
+            held = set(self.phys.active_keys())
+            for k in KEYS:
+                self.ui.write(e.EV_KEY, k, 1 if k in held else 0)
+            for a in AXES:
+                self.ui.write(e.EV_ABS, a, self.phys.absinfo(a).value)
+            self.ui.syn()
+        except OSError:
+            pass
 
     def detach(self, why):
         if self.phys is None:
@@ -161,10 +207,9 @@ class Proxy:
         while True:
             if self.phys is None and time.monotonic() >= next_scan:
                 d = find_physical()
-                if d:
-                    self.attach(d)
-                next_scan = time.monotonic() + 0.25
-            for key, _ in self.sel.select(timeout=0.25):
+                wait = SCAN_EVERY if d is None or self.attach(d) else GRAB_RETRY
+                next_scan = time.monotonic() + wait
+            for key, _ in self.sel.select(timeout=SCAN_EVERY):
                 if key.data == "phys" and self.phys is not None:
                     self.forward_input()
                 elif key.data == "ui":

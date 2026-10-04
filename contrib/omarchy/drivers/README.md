@@ -63,6 +63,10 @@ luego `contrib/omarchy/drivers/install.sh --wait` y reiniciar.
   desconectando el cable con el juego abierto: Steam y `winedevice.exe` abrieron el virtual sin reiniciar el juego.
   Instalar: `pad-keepalive/install.sh` (idempotente; respaldos en `~/.local/state/omarchy-drivers/backups/`). Quitar: `--remove`.
   Registro: `journalctl --user -u pad-keepalive`.
+  Pruebas (sin hardware: sysfs y dispositivos falsos): `cd pad-keepalive && PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest test_pad_keepalive` (9).
+  Detalles: mientras el control falta lo busca en sysfs cada 0,25 s sin abrir ningún dispositivo; si otro proceso lo tiene acaparado,
+  lo registra una vez y reintenta cada 5 s; al reconectar copia los botones y palancas que estén pulsados; el servicio no tiene
+  límite de reinicios. Un único control por proxy: un segundo Xbox 360 con cable no pasa por él.
 - **Limitación conocida:** Steam sigue listando el físico (mudo) como mando 0 y el virtual como 1. Si un juego solo escucha al
   mando 0, en Steam → Configuración → Mando poner el virtual primero. La solución completa sería una regla udev que oculte el
   físico (`TAG-="uaccess"`, `MODE="0600"`, `ENV{ID_INPUT_JOYSTICK}=""`) con el proxy como servicio del sistema; **no está
