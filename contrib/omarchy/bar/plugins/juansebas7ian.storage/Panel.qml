@@ -24,6 +24,9 @@ Panel {
   property var ov: null
   property var bd: null
   property var cl: null
+  property var steam: null
+  property var fw: null
+  property string selftestMsg: ""
   property var dirView: null
   property var dirStack: []
   readonly property real usedFrac: ov && ov.root.size > 0 ? ov.root.used / ov.root.size : 0
@@ -68,6 +71,8 @@ Panel {
     run(ovProc, ["overview"])
     run(bdProc, ["breakdown"])
     run(clProc, ["cleanup"])
+    run(steamProc, ["steam"])
+    run(fwProc, ["firmware"])
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -84,6 +89,26 @@ Panel {
   Process {
     id: clProc
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.cl = JSON.parse(text) } catch (e) {} } }
+  }
+  Process {
+    id: steamProc
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.steam = JSON.parse(text) } catch (e) {} } }
+  }
+  Process {
+    id: fwProc
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.fw = JSON.parse(text) } catch (e) {} } }
+  }
+  Process {
+    id: testProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var r = JSON.parse(text)
+          root.selftestMsg = r.ok ? "Short self-test started (about 2 min). Reopen the panel to see the result." : "Self-test: " + r.error
+        } catch (e) {}
+      }
+    }
   }
   Process {
     id: dirProc
@@ -348,6 +373,150 @@ Panel {
               size: root.bd ? root.bd.other : 0
               total: root.bd ? root.bd.system.total : 1
               clickable: false
+            }
+
+            // ================================================= steam
+            PanelSeparator { visible: !!root.steam && root.steam.games.length + root.steam.tools.length > 0; foreground: root.foreground }
+            PanelSectionHeader {
+              visible: !!root.steam && root.steam.games.length + root.steam.tools.length > 0
+              text: "STEAM · " + (root.steam ? root.bytes(root.steam.total) : "")
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Repeater {
+              model: root.steam ? root.steam.games : []
+              Column {
+                id: game
+                required property var modelData
+                width: column.width
+                SizeRow {
+                  label: "󰊗 " + game.modelData.name
+                  size: game.modelData.total
+                  total: root.steam.total
+                  onPicked: root.openDir(game.modelData.path)
+                }
+                Text {
+                  width: parent.width
+                  leftPadding: Style.space(8)
+                  text: "game " + root.bytes(game.modelData.size)
+                    + (game.modelData.prefix > 0 ? " · Proton prefix " + root.bytes(game.modelData.prefix) : "")
+                    + (game.modelData.shaders > 0 ? " · shaders " + root.bytes(game.modelData.shaders) : "")
+                    + (game.modelData.lastPlayed > 0 ? " · played " + new Date(game.modelData.lastPlayed * 1000).toLocaleDateString() : " · never played")
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+              }
+            }
+            Repeater {
+              model: root.steam ? root.steam.tools : []
+              SizeRow {
+                required property var modelData
+                label: "󰏗 " + modelData.name
+                size: modelData.total
+                total: root.steam.total
+                onPicked: root.openDir(modelData.path)
+              }
+            }
+            SizeRow {
+              visible: !!root.steam && root.steam.client > 0
+              label: "Steam client, downloads, logs"
+              size: root.steam ? root.steam.client : 0
+              total: root.steam ? root.steam.total : 1
+              onPicked: root.openDir(root.steam.path)
+            }
+            Text {
+              visible: !!root.steam && root.steam.games.length > 0
+              width: parent.width
+              text: "Uninstall a game from Steam (Library → Manage → Uninstall) to free its space and its Proton prefix."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            // ================================================= health & firmware (Magician)
+            PanelSeparator { visible: !!root.fw; foreground: root.foreground }
+            PanelSectionHeader { visible: !!root.fw; text: "DISK HEALTH & FIRMWARE"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Repeater {
+              model: root.fw ? root.fw.drives : []
+              Column {
+                id: drv
+                required property var modelData
+                width: column.width
+                spacing: Style.space(3)
+                readonly property real tbwUsed: drv.modelData.tbw && drv.modelData.written ? drv.modelData.written / (drv.modelData.tbw * 1e12) : -1
+                Pair { label: (drv.modelData.vendor === "Samsung" ? "Samsung Magician · " : "") + drv.modelData.model; value: ""; strong: true }
+                Pair {
+                  label: "Firmware"
+                  value: drv.modelData.firmware + (drv.modelData.upToDate ? " · up to date ✓" : " → " + drv.modelData.latest + " available")
+                  hot: !drv.modelData.upToDate
+                }
+                Pair { small: true; label: "  checked against"; value: drv.modelData.source }
+                Pair {
+                  visible: drv.tbwUsed >= 0
+                  label: "Endurance (TBW)"
+                  value: root.bytes(drv.modelData.written) + " of " + drv.modelData.tbw + " TB rated · " + Math.round(drv.tbwUsed * 100) + "%"
+                  hot: drv.tbwUsed >= 0.8
+                }
+                Meter { visible: drv.tbwUsed >= 0; fraction: drv.tbwUsed; hot: drv.tbwUsed >= 0.8 }
+                Pair {
+                  visible: !!drv.modelData.health && drv.modelData.health.unsafeShutdowns !== undefined
+                  small: true
+                  label: "  unsafe shutdowns · media errors"
+                  value: drv.modelData.health ? drv.modelData.health.unsafeShutdowns + " · " + drv.modelData.health.mediaErrors : ""
+                }
+                Pair {
+                  visible: !!drv.modelData.selftest && drv.modelData.selftest.status !== ""
+                  small: true
+                  label: "  last self-test"
+                  value: drv.modelData.selftest ? drv.modelData.selftest.status + (drv.modelData.selftest.remaining > 0 ? " · " + drv.modelData.selftest.remaining + "% left" : "") : ""
+                }
+                Row {
+                  spacing: Style.space(6)
+                  PanelActionButton {
+                    visible: drv.modelData.udisks !== ""
+                    iconText: "󰙨"
+                    tooltipText: "Run a short SMART self-test (asks for your password)"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: {
+                      if (testProc.running) return
+                      testProc.command = ["python3", root.backend, "selftest", drv.modelData.udisks, "short"]
+                      testProc.running = true
+                    }
+                  }
+                  PanelActionButton {
+                    visible: drv.modelData.download !== ""
+                    iconText: "󰇚"
+                    tooltipText: drv.modelData.vendor === "Samsung" ? "Samsung firmware ISO (boot it from USB to update)" : "Update with fwupd"
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: drv.modelData.download.indexOf("http") === 0
+                      ? (root.bar.run("xdg-open " + root.bar.shellQuote(drv.modelData.download)), root.close())
+                      : root.inTerminal(drv.modelData.download)
+                  }
+                }
+                Text {
+                  visible: !!drv.modelData.note
+                  width: parent.width
+                  text: drv.modelData.note || ""
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+              }
+            }
+            Text {
+              visible: root.selftestMsg !== ""
+              width: parent.width
+              text: root.selftestMsg
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
 
             // ================================================= available

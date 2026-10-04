@@ -1,0 +1,13 @@
+[Unit]
+Description=spotify-player daemon: Spotify Web API client for the bar (playback is spotifyd)
+After=graphical-session.target pipewire-pulse.service
+PartOf=graphical-session.target
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/spotify_player -d
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

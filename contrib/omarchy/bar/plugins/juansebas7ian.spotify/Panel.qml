@@ -7,10 +7,11 @@ import Quickshell.Services.Mpris
 import qs.Commons
 import qs.Ui
 
-// Spotify without the Spotify window: now playing with cover and progress,
-// transport and volume, devices (this PC plays through spotifyd), the queue,
-// recently played, top tracks of the month and your playlists. Web API via
-// spotify.py; MPRIS is the fallback before the account is connected.
+// Spotify without the Spotify window. Playback is spotifyd (this PC's Spotify
+// Connect device "Omarchy") through MPRIS: play, pause, skip, seek, volume and
+// opening any playlist/album/track need no Web API. Lists (your playlists,
+// saved albums, top tracks) and other devices come from spotify-player's CLI,
+// which works best with your own Spotify app (Connect → spotify-bar-setup).
 Panel {
   id: root
   moduleName: "juansebas7ian.spotify"
@@ -18,171 +19,113 @@ Panel {
   manageIpc: false
 
   readonly property string backend: String(Qt.resolvedUrl("spotify.py")).replace("file://", "")
-  readonly property string clientIdFile: Quickshell.env("HOME") + "/.config/spotify-bar/client_id"
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  property var st: null
   property var lib: null
-  property string tab: "queue"
-  property real progressMs: 0
-  property string actionError: ""
-  readonly property bool authorized: !!st && st.authorized === true
-  readonly property var tr: st && st.track ? st.track : null
-  readonly property bool playing: authorized ? !!st.playing : (mpris !== null && mpris.isPlaying)
+  property var devs: []
+  property var setup: null
+  property string tab: "playlists"
+  property string message: ""
+  property bool busy: false
 
-  // The Spotify app or spotifyd, whichever is playing (spotifyd only shows up
-  // on D-Bus while it is the active Spotify Connect device).
-  readonly property var mpris: {
+  // spotifyd first (it is ours), else the Spotify app if it is open.
+  readonly property var player: {
     var list = Mpris.players ? Mpris.players.values : []
-    var found = null
+    var app = null
     for (var i = 0; i < list.length; i++) {
       var p = list[i]
       var n = String((p.identity || "") + " " + (p.desktopEntry || "") + " " + (p.dbusName || "")).toLowerCase()
-      if (n.indexOf("spotify") < 0) continue
-      if (p.isPlaying) return p
-      if (!found) found = p
+      if (n.indexOf("spotifyd") >= 0) return p
+      if (n.indexOf("spotify") >= 0 && n.indexOf("spotify_player") < 0) app = p
     }
-    return found
+    return app
   }
-  readonly property string trackKey: mpris && mpris.metadata
-    ? String(mpris.metadata["mpris:trackid"] || mpris.metadata["xesam:url"] || "") : ""
+  readonly property bool playing: !!player && player.isPlaying
+  readonly property string title: player ? (player.trackTitle || "") : ""
+  readonly property string artist: player ? (player.trackArtist || "") : ""
+  readonly property string trackKey: player && player.metadata
+    ? String(player.metadata["mpris:trackid"] || player.metadata["xesam:url"] || "") : ""
   onTrackKeyChanged: if (trackKey !== "") Quickshell.execDetached(["python3", backend, "remember", trackKey])
-  property bool starting: false
 
-  function fmt(ms) {
-    var s = Math.max(0, Math.floor(Number(ms || 0) / 1000))
+  readonly property var listModel: !lib ? [] : tab === "albums" ? (lib.albums || [])
+    : tab === "top" ? (lib.top || []).map(function(t) { return { uri: t.uri, name: t.name, sub: t.artist, image: t.image } })
+    : (lib.playlists || [])
+
+  function fmt(sec) {
+    var s = Math.max(0, Math.floor(Number(sec || 0)))
     return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2)
   }
-
-  function refresh() { if (!statusProc.running) statusProc.running = true }
-  function loadLibrary() { if (!libProc.running) libProc.running = true }
-  function act(name, arg) {
-    actionError = ""
-    var cmd = ["python3", backend, name]
-    if (arg !== undefined) cmd.push(String(arg))
-    actionQueue.push(cmd)
-    pumpActions()
-  }
-  property var actionQueue: []
-  function pumpActions() {
-    if (actionProc.running || actionQueue.length === 0) return
-    actionProc.command = actionQueue.shift()
+  function run(args) {
+    if (actionProc.running) return
+    busy = true
+    message = ""
+    actionProc.command = ["python3", backend].concat(args)
     actionProc.running = true
   }
-  // Works with or without the Spotify window: the Web API when the account is
-  // connected, MPRIS when a player exists, and otherwise a cold start of
-  // spotifyd on this PC (spotify.py local-play).
-  function coldStart() {
-    if (localProc.running) return
-    starting = true
-    actionError = ""
-    localProc.running = true
-  }
+  // A player with a loaded track is controlled directly; otherwise start this PC.
   function toggle() {
-    if (authorized) act("toggle")
-    else if (mpris && mpris.canTogglePlaying) mpris.togglePlaying()
-    else coldStart()
+    if (player && player.canTogglePlaying && trackKey !== "") player.togglePlaying()
+    else run(["local-play"])
   }
-  function next() {
-    if (authorized) act("next")
-    else if (mpris && mpris.canGoNext) mpris.next()
-    else coldStart()
+  function next() { if (player && player.canGoNext && trackKey !== "") player.next(); else run(["local-play"]) }
+  function previous() { if (player && player.canGoPrevious && trackKey !== "") player.previous(); else run(["local-play"]) }
+  function playUri(uri) { run(["play-uri", uri]) }
+  function connectAccount() {
+    root.bar.run("omarchy-launch-floating-terminal-with-presentation spotify-bar-setup")
+    root.close()
   }
-  function previous() {
-    if (authorized) act("previous")
-    else if (mpris && mpris.canGoPrevious) mpris.previous()
-    else coldStart()
+  function loadLists(force) {
+    if (libProc.running) return
+    libProc.command = ["python3", backend, "library"].concat(force ? ["--force"] : [])
+    libProc.running = true
   }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
-    refresh()
-    loadLibrary()
+    setupProc.running = true
+    loadLists(false)
+    if (!devProc.running) devProc.running = true
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
-  Timer {
-    interval: root.opened ? 2000 : 15000
-    running: true
-    repeat: true
-    triggeredOnStart: true
-    onTriggered: root.refresh()
-  }
-  // Smooth progress between polls.
-  Timer {
-    interval: 500
-    running: root.opened && root.playing
-    repeat: true
-    onTriggered: root.progressMs += 500
-  }
-
   Process {
-    id: statusProc
-    command: ["python3", root.backend, "status"]
+    id: actionProc
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
+        root.busy = false
         try {
-          var s = JSON.parse(text)
-          root.st = s
-          root.progressMs = s.progress || 0
+          var r = JSON.parse(text)
+          if (!r.ok) root.message = r.error || "Spotify did not accept that"
         } catch (e) {}
       }
     }
   }
   Process {
     id: libProc
-    command: ["python3", root.backend, "library"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: { try { root.lib = JSON.parse(text) } catch (e) {} }
-    }
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.lib = JSON.parse(text) } catch (e) {} } }
   }
   Process {
-    id: actionProc
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        try {
-          var r = JSON.parse(text)
-          if (!r.ok) root.actionError = r.error || "Spotify did not accept that"
-        } catch (e) {}
-        refreshSoon.restart()
-        root.pumpActions()
-      }
-    }
+    id: devProc
+    command: ["python3", root.backend, "devices"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.devs = JSON.parse(text).devices || [] } catch (e) {} } }
   }
-  Timer { id: refreshSoon; interval: 400; onTriggered: root.refresh() }
-
   Process {
-    id: localProc
-    command: ["python3", root.backend, "local-play"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        root.starting = false
-        try {
-          var r = JSON.parse(text)
-          if (!r.ok) root.actionError = r.error || "Could not start Spotify on this PC"
-        } catch (e) {}
-        refreshSoon.restart()
-      }
-    }
+    id: setupProc
+    command: ["python3", root.backend, "setup-state"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.setup = JSON.parse(text) } catch (e) {} } }
   }
-
-  // One-time login: reads the Client ID saved by the installer.
-  Process {
-    id: authProc
-    command: ["bash", "-c", "id=$(cat " + root.clientIdFile + " 2>/dev/null) && exec python3 " + root.backend + " auth \"$id\""]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: { root.refresh(); root.loadLibrary() }
-    }
+  // MPRIS position does not tick by itself.
+  Timer {
+    interval: 1000
+    running: root.opened && root.playing
+    repeat: true
+    onTriggered: if (root.player) root.player.positionChanged()
   }
 
   IpcHandler {
@@ -201,17 +144,15 @@ Panel {
     bar: root.bar
     text: ""
     dimmed: !root.playing
-    tooltipText: root.tr ? (root.playing ? "▶ " : "⏸ ") + root.tr.name + " — " + root.tr.artist + (root.st.device ? "  ·  " + root.st.device : "")
-      : root.mpris && root.mpris.trackTitle ? (root.playing ? "▶ " : "⏸ ") + root.mpris.trackTitle + " — " + (root.mpris.trackArtist || "")
-      : "Spotify"
+    tooltipText: root.title !== "" ? (root.playing ? "▶ " : "⏸ ") + root.title + " — " + root.artist
+      : "Spotify: click for the panel, middle-click to play on this PC"
     onPressed: function(code) {
       if (code === Qt.MiddleButton) root.toggle()
       else if (code === Qt.RightButton) root.next()
-      else root.toggle_panel()
+      else root.opened ? root.close() : root.open()
     }
     onWheelMoved: function(delta) { if (delta > 0) root.previous(); else root.next() }
   }
-  function toggle_panel() { opened ? close() : open() }
 
   KeyboardPanel {
     id: panel
@@ -220,8 +161,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(760))
+    contentWidth: panel.fittedContentWidth(Style.space(430))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(780))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -233,6 +174,7 @@ Panel {
         if (t === " " || t === "p") root.toggle()
         else if (t === "l" || t === "n") root.next()
         else if (t === "h" || t === "b") root.previous()
+        else if (t === "r") root.loadLists(true)
       }
 
       Flickable {
@@ -250,46 +192,6 @@ Panel {
           width: flick.width
           spacing: Style.space(10)
 
-          // ------------------------------------------------ connect account
-          Column {
-            visible: !!root.st && !root.authorized
-            width: parent.width
-            spacing: Style.space(6)
-            Text {
-              width: parent.width
-              text: "Optional: connect your Spotify account to see the queue, recently played, top tracks and playlists, and pick devices. Needs your app Client ID in ~/.config/spotify-bar/client_id."
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
-            }
-            Button {
-              text: authProc.running ? "Waiting for the browser…" : "Connect Spotify"
-              enabled: !authProc.running
-              onClicked: authProc.running = true
-            }
-          }
-
-          // ------------------------------------------------ cold start
-          Column {
-            visible: !root.mpris && !(root.authorized && root.tr)
-            width: parent.width
-            spacing: Style.space(4)
-            Button {
-              text: root.starting ? "Starting Spotify on this PC…" : "▶  Play on this PC"
-              enabled: !root.starting
-              onClicked: root.coldStart()
-            }
-            Text {
-              width: parent.width
-              text: "Plays through spotifyd (no Spotify window). It resumes your account's session, or the last song you played."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
-          }
-
           // ------------------------------------------------ now playing
           RowLayout {
             width: parent.width
@@ -302,13 +204,13 @@ Panel {
               clip: true
               Image {
                 anchors.fill: parent
-                source: root.tr ? root.tr.image : (root.mpris ? root.mpris.trackArtUrl || "" : "")
+                source: root.player ? (root.player.trackArtUrl || "") : ""
                 fillMode: Image.PreserveAspectCrop
                 asynchronous: true
               }
               Text {
                 anchors.centerIn: parent
-                visible: !root.tr && !(root.mpris && root.mpris.trackArtUrl)
+                visible: !root.player || !root.player.trackArtUrl
                 text: ""
                 color: root.dim
                 font.family: root.fontFamily
@@ -320,7 +222,7 @@ Panel {
               spacing: Style.space(2)
               Text {
                 Layout.fillWidth: true
-                text: root.tr ? root.tr.name : root.mpris && root.mpris.trackTitle ? root.mpris.trackTitle : "Nothing playing"
+                text: root.title !== "" ? root.title : "Nothing playing"
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.heading
@@ -329,15 +231,19 @@ Panel {
               }
               Text {
                 Layout.fillWidth: true
-                text: root.tr ? root.tr.artist : root.mpris ? root.mpris.trackArtist || "" : ""
-                color: root.foreground
+                text: root.title !== "" ? root.artist : "Press play: it starts on this PC, no Spotify window needed"
+                color: root.title !== "" ? root.foreground : root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.body
+                font.pixelSize: root.title !== "" ? Style.font.body : Style.font.caption
+                wrapMode: Text.WordWrap
+                maximumLineCount: 2
                 elide: Text.ElideRight
               }
               Text {
                 Layout.fillWidth: true
-                text: root.tr ? root.tr.album + (root.st.device ? "  ·  󰓃 " + root.st.device : "") : ""
+                visible: !!root.player && root.title !== ""
+                text: root.player ? (root.player.trackAlbum || "") + "  ·  󰓃 "
+                  + (String(root.player.dbusName).indexOf("spotifyd") >= 0 ? "This PC (Omarchy)" : "Spotify app") : ""
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -348,7 +254,7 @@ Panel {
 
           // progress (click to seek)
           Column {
-            visible: !!root.tr
+            visible: !!root.player && root.player.lengthSupported && root.player.length > 0
             width: parent.width
             spacing: Style.space(3)
             Item {
@@ -359,25 +265,21 @@ Panel {
                 height: parent.height
                 radius: height / 2
                 color: root.foreground
-                width: root.tr && root.tr.duration > 0 ? parent.width * Math.min(1, root.progressMs / root.tr.duration) : 0
+                width: root.player && root.player.length > 0 ? parent.width * Math.min(1, root.player.position / root.player.length) : 0
               }
               MouseArea {
                 anchors.fill: parent
                 anchors.margins: -Style.space(4)
                 cursorShape: Qt.PointingHandCursor
-                onClicked: function(m) {
-                  if (!root.tr) return
-                  var ms = Math.round(root.tr.duration * Math.max(0, Math.min(1, m.x / width)))
-                  root.progressMs = ms
-                  root.act("seek", ms)
-                }
+                enabled: !!root.player && root.player.canSeek
+                onClicked: function(m) { root.player.position = root.player.length * Math.max(0, Math.min(1, m.x / width)) }
               }
             }
             Item {
               width: parent.width
               implicitHeight: elapsed.implicitHeight
-              Text { id: elapsed; text: root.fmt(root.progressMs); color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
-              Text { anchors.right: parent.right; text: root.tr ? root.fmt(root.tr.duration) : ""; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+              Text { id: elapsed; text: root.player ? root.fmt(root.player.position) : ""; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+              Text { anchors.right: parent.right; text: root.player ? root.fmt(root.player.length) : ""; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
             }
           }
 
@@ -389,119 +291,125 @@ Panel {
             Ctl {
               icon: "󰒝"
               tip: "Shuffle"
-              on: root.authorized && root.st.shuffle
-              visible: root.authorized
-              onClicked: root.act("shuffle", root.st.shuffle ? "false" : "true")
+              visible: !!root.player && root.player.shuffleSupported
+              on: !!root.player && root.player.shuffle
+              onClicked: root.player.shuffle = !root.player.shuffle
             }
             Ctl { icon: "󰒮"; tip: "Previous (h)"; onClicked: root.previous() }
-            Ctl { icon: root.playing ? "󰏤" : "󰐊"; tip: "Play / pause (space)"; big: true; onClicked: root.toggle() }
+            Ctl { icon: root.busy ? "󰑐" : (root.playing ? "󰏤" : "󰐊"); tip: "Play / pause (space)"; big: true; onClicked: root.toggle() }
             Ctl { icon: "󰒭"; tip: "Next (l)"; onClicked: root.next() }
             Ctl {
-              icon: root.authorized && root.st.repeat === "track" ? "󰑘" : "󰑖"
-              tip: "Repeat: " + (root.authorized ? root.st.repeat : "")
-              on: root.authorized && root.st.repeat !== "off"
-              visible: root.authorized
-              onClicked: root.act("repeat", root.st.repeat === "off" ? "context" : root.st.repeat === "context" ? "track" : "off")
+              icon: root.player && root.player.loopState === MprisLoopState.Track ? "󰑘" : "󰑖"
+              tip: "Repeat"
+              visible: !!root.player && root.player.loopSupported
+              on: !!root.player && root.player.loopState !== MprisLoopState.None
+              onClicked: root.player.loopState = root.player.loopState === MprisLoopState.None ? MprisLoopState.Playlist
+                : root.player.loopState === MprisLoopState.Playlist ? MprisLoopState.Track : MprisLoopState.None
             }
             Item { Layout.fillWidth: true }
           }
 
-          // volume
           RowLayout {
-            visible: root.authorized && root.st.volume !== null && root.st.volume !== undefined
+            visible: !!root.player && root.player.volumeSupported
             width: parent.width
             spacing: Style.space(8)
             Text { text: "󰕾"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.icon }
             PanelSlider {
               Layout.fillWidth: true
               bar: root.bar
-              value: root.authorized && root.st.volume !== null ? root.st.volume / 100 : 0
-              onReleased: function(v) { root.act("volume", Math.round(v * 100)) }
+              value: root.player ? root.player.volume : 0
+              onReleased: function(v) { if (root.player) root.player.volume = v }
             }
           }
 
           Text {
-            visible: root.actionError !== "" || (!!root.st && !!root.st.error)
+            visible: root.message !== ""
             width: parent.width
-            text: root.actionError !== "" ? root.actionError : (root.st ? root.st.error || "" : "")
+            text: root.message
             color: root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
           }
 
-          // devices
+          // ------------------------------------------------ devices
           Flow {
-            visible: root.authorized
+            visible: root.devs.length > 0
             width: parent.width
             spacing: Style.space(4)
             Repeater {
-              model: root.authorized ? root.st.devices : []
+              model: root.devs
               Chip {
                 required property var modelData
-                label: (modelData.type === "Computer" ? "󰍹 " : modelData.type === "Smartphone" ? "󰄜 " : "󰓃 ") + modelData.name
-                on: modelData.active
-                onClicked: root.act("device", modelData.id)
+                label: (modelData.type === "Smartphone" ? "󰄜 " : modelData.type === "Computer" ? "󰍹 " : "󰓃 ") + modelData.name
+                on: !!modelData.active
+                onClicked: modelData.name === "Omarchy" ? root.run(["local-play"]) : root.run(["device", modelData.name])
               }
             }
-            Chip {
-              visible: root.authorized && !root.st.devices.some(function(d) { return d.name === root.st.localDevice })
-              label: "󰍹 This PC (start spotifyd)"
-              onClicked: root.act("device", "local")
+          }
+
+          // ------------------------------------------------ connect account
+          CursorSurface {
+            visible: !!root.setup && (!root.setup.ownClientId || (!!root.lib && !!root.lib.error && (root.lib.playlists || []).length === 0))
+            width: parent.width
+            foreground: root.foreground
+            hasCursor: connectMouse.containsMouse
+            implicitHeight: connectCol.implicitHeight + Style.space(12)
+            MouseArea { id: connectMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: root.connectAccount() }
+            Column {
+              id: connectCol
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.margins: Style.space(8)
+              spacing: Style.space(2)
+              Text {
+                width: parent.width
+                text: "󰌆  Connect your Spotify app"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+              Text {
+                width: parent.width
+                text: root.lib && root.lib.error ? root.lib.error + " Click to set up your own Spotify app (2 min)."
+                  : "Your lists load through Spotify's shared app, which is often rate limited. Click to use your own (2 min)."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
             }
           }
 
-          // tabs
+          // ------------------------------------------------ lists
           Row {
-            visible: root.authorized
             spacing: Style.space(4)
-            Chip { label: "Queue"; on: root.tab === "queue"; onClicked: root.tab = "queue" }
-            Chip { label: "Recent"; on: root.tab === "recent"; onClicked: root.tab = "recent" }
-            Chip { label: "Top this month"; on: root.tab === "top"; onClicked: root.tab = "top" }
             Chip { label: "Playlists"; on: root.tab === "playlists"; onClicked: root.tab = "playlists" }
+            Chip { label: "Albums"; on: root.tab === "albums"; onClicked: root.tab = "albums" }
+            Chip { label: "Top this month"; on: root.tab === "top"; onClicked: root.tab = "top" }
+            Chip { label: "󰑐"; onClicked: root.loadLists(true) }
           }
-
+          Text {
+            visible: root.listModel.length === 0
+            width: parent.width
+            text: !root.lib ? "Loading your library…" : root.lib.error ? "Lists unavailable right now." : "Nothing here yet."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
           Column {
-            visible: root.authorized
             width: parent.width
             spacing: Style.space(2)
-
-            // Queue
             Repeater {
-              model: root.tab === "queue" && root.authorized ? root.st.queue : []
-              Item_ { required property var modelData; entry: modelData; onPicked: root.act("play-uri", modelData.uri) }
-            }
-            // Recent: places first, then tracks
-            Repeater {
-              model: root.tab === "recent" && root.lib ? root.lib.recentContexts || [] : []
-              Item_ {
+              model: root.listModel
+              ListRow {
                 required property var modelData
-                entry: ({ name: modelData.name, artist: modelData.sub, image: modelData.image })
-                onPicked: root.act("play-context", modelData.uri)
+                entry: modelData
+                onPicked: root.playUri(modelData.uri)
               }
-            }
-            Repeater {
-              model: root.tab === "recent" && root.lib ? root.lib.recentTracks || [] : []
-              Item_ { required property var modelData; entry: modelData; onPicked: root.act("play-uri", modelData.uri) }
-            }
-            Repeater {
-              model: root.tab === "top" && root.lib ? root.lib.top || [] : []
-              Item_ { required property var modelData; entry: modelData; onPicked: root.act("play-uri", modelData.uri) }
-            }
-            Repeater {
-              model: root.tab === "playlists" && root.lib ? root.lib.playlists || [] : []
-              Item_ {
-                required property var modelData
-                entry: ({ name: modelData.name, artist: modelData.sub, image: modelData.image })
-                onPicked: root.act("play-context", modelData.uri)
-              }
-            }
-            Text {
-              visible: root.tab === "queue" && root.authorized && root.st.queue.length === 0
-              text: "The queue is empty."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
             }
           }
         }
@@ -543,7 +451,7 @@ Panel {
     MouseArea { id: chipMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: chip.clicked() }
   }
 
-  component Item_: CursorSurface {
+  component ListRow: CursorSurface {
     id: row
     property var entry: ({})
     signal picked()
@@ -568,30 +476,10 @@ Panel {
       ColumnLayout {
         Layout.fillWidth: true
         spacing: 0
-        Text {
-          Layout.fillWidth: true
-          text: row.entry.name || ""
-          color: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          elide: Text.ElideRight
-        }
-        Text {
-          Layout.fillWidth: true
-          text: row.entry.artist || ""
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
-        }
+        Text { Layout.fillWidth: true; text: row.entry.name || ""; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
+        Text { Layout.fillWidth: true; text: row.entry.sub || ""; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
       }
-      Text {
-        visible: !!row.entry.duration
-        text: root.fmt(row.entry.duration)
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-      }
+      Text { text: "󰐊"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.icon; visible: rowMouse.containsMouse }
     }
   }
 }

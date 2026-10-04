@@ -1,0 +1,9 @@
+# spotify-player as the bar's Spotify Web API client only (contrib/omarchy/bar).
+# Playback on this PC is spotifyd (device "Omarchy", MPRIS); this daemon just
+# answers the CLI the panel uses to list playlists, albums, top tracks, devices.
+# Your own app's client_id goes here (spotify-bar-setup); without it the shared
+# default ID is often rate limited (HTTP 429).
+client_port = 8642
+enable_streaming = "Never"
+enable_media_control = false
+enable_notify = false

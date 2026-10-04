@@ -1,0 +1,55 @@
+#!/bin/bash
+# Connect the bar's Spotify panel to your account through your own Spotify
+# app (Client ID). The shared default client ID is rate limited (HTTP 429), so
+# with your own one the panel's playlists and controls stay reliable.
+set -uo pipefail
+
+CONF=$HOME/.config/spotify-player/app.toml
+REDIRECT=http://127.0.0.1:8989/login
+
+echo "Conectar el panel de Spotify a tu cuenta (una sola vez, ~2 minutos)"
+echo
+echo "1. Se abre el panel de desarrollador de Spotify. Inicia sesión y pulsa «Create app»:"
+echo "     App name:      Omarchy bar        (cualquiera)"
+echo "     Description:   Barra de Omarchy   (cualquiera)"
+echo "     Redirect URI:  $REDIRECT   ← cópialo exacto y pulsa «Add»"
+echo "     APIs used:     marca «Web API»"
+echo "   Acepta los términos y pulsa «Save»."
+echo "2. En la app creada, abre «Settings» y copia el «Client ID» (32 caracteres)."
+echo
+read -rp "Pulsa Enter para abrir el navegador... "
+xdg-open https://developer.spotify.com/dashboard >/dev/null 2>&1 &
+
+while true; do
+  echo
+  read -rp "Pega aquí el Client ID: " id
+  id=$(printf '%s' "$id" | tr -d '[:space:]')
+  [[ $id =~ ^[0-9a-fA-F]{32}$ ]] && break
+  echo "Eso no parece un Client ID (son 32 caracteres hexadecimales). Inténtalo de nuevo."
+done
+id=${id,,}
+
+mkdir -p "$(dirname "$CONF")"
+touch "$CONF"
+cp -a "$CONF" "$CONF.bak.$(date +%Y%m%d-%H%M%S)"
+if grep -qE '^\s*client_id\s*=' "$CONF"; then
+  sed -i -E "s|^\s*client_id\s*=.*|client_id = \"$id\"|" "$CONF"
+else
+  # top-level keys must come before the first [section]
+  awk -v line="client_id = \"$id\"" 'BEGIN{done=0} /^\[/ && !done {print line; done=1} {print} END{if(!done) print line}' \
+    "$CONF" >"$CONF.tmp" && mv "$CONF.tmp" "$CONF"
+fi
+echo
+echo "3. Autoriza en el navegador (Spotify puede pedirlo dos o tres veces)."
+systemctl --user stop spotify-player.service 2>/dev/null
+spotify_player -o enable_streaming=Always authenticate
+rc=$?
+systemctl --user enable --now spotify-player.service
+rm -f "$HOME/.cache/spotify-bar/library.json"
+echo
+if [[ $rc == 0 ]]; then
+  echo "Listo: el panel de Spotify usa tu propia app. Abre el ícono de Spotify en la barra."
+else
+  echo "La autorización falló (código $rc). Vuelve a ejecutar: spotify-bar-setup"
+fi
+read -rp "Pulsa Enter para cerrar... "

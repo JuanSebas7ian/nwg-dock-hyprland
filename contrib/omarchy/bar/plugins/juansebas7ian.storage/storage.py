@@ -205,6 +205,147 @@ def directory(path):
   print(json.dumps({"path": path, "total": total, "items": items}, separators=(",", ":")))
 
 
+# ------------------------------------------------------------------ firmware ("Magician")
+
+# Rated endurance (TBW) by model, from the manufacturers' spec sheets.
+TBW = {"Samsung SSD 980 500GB": 300, "Samsung SSD 980 1TB": 600, "Samsung SSD 980 PRO 500GB": 300,
+       "Samsung SSD 980 PRO 1TB": 600, "Samsung SSD 990 PRO 1TB": 600, "Samsung SSD 990 PRO 2TB": 1200,
+       "WD_BLACK SN770 500GB": 300, "WD_BLACK SN770 1TB": 600, "WD_BLACK SN850X 1TB": 600}
+SAMSUNG_TOOLS = "https://semiconductor.samsung.com/consumer-storage/support/tools/"
+
+
+def samsung_latest():
+  """{model family: {version, iso}} scraped from Samsung's tools page, cached a day."""
+  path = CACHE / "samsung-firmware.json"
+  try:
+    if time.time() - path.stat().st_mtime < 86400:
+      return json.loads(path.read_text())
+  except (OSError, ValueError):
+    pass
+  import urllib.request
+  try:
+    req = urllib.request.Request(SAMSUNG_TOOLS, headers={"User-Agent": "Mozilla/5.0"})
+    page = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+  except Exception:
+    try:
+      return json.loads(path.read_text())
+    except (OSError, ValueError):
+      return {}
+  found = {}
+  for url in set(re.findall(r'https://[^"\s]+/Samsung_SSD_([0-9A-Za-z_]+?)_([0-9A-Z]{8})\.iso', page)):
+    family, version = url
+    found[family.replace("_", " ")] = {"version": version}
+  for m in re.finditer(r'(https://[^"\s]+/Samsung_SSD_([0-9A-Za-z_]+?)_([0-9A-Z]{8})\.iso)', page):
+    found.setdefault(m.group(2).replace("_", " "), {})["iso"] = m.group(1)
+  CACHE.mkdir(parents=True, exist_ok=True)
+  path.write_text(json.dumps(found))
+  return found
+
+
+def fwupd_updates():
+  try:
+    data = json.loads(run(["fwupdmgr", "get-updates", "--json"], timeout=60) or "{}")
+  except ValueError:
+    return {}
+  return {d.get("Serial") or d.get("Name"): [r.get("Version") for r in d.get("Releases", [])] for d in data.get("Devices", [])}
+
+
+def selftest(obj):
+  out = run(["busctl", "--system", "--json=short", "get-property", "org.freedesktop.UDisks2", obj,
+             "org.freedesktop.UDisks2.NVMe.Controller", "SmartSelftestStatus", "SmartSelftestPercentRemaining"])
+  vals = [json.loads(l)["data"] for l in out.splitlines() if l.strip()]
+  return {"status": vals[0] if vals else "", "remaining": vals[1] if len(vals) > 1 else -1}
+
+
+def firmware():
+  health = smart()
+  samsung = samsung_latest()
+  fw_updates = fwupd_updates()
+  objs = {}
+  for obj in run(["busctl", "--system", "tree", "org.freedesktop.UDisks2", "--list"]).split():
+    if "/drives/" in obj:
+      ser = run(["busctl", "--system", "--json=short", "get-property", "org.freedesktop.UDisks2", obj,
+                 "org.freedesktop.UDisks2.Drive", "Serial"])
+      try:
+        objs[json.loads(ser)["data"]] = obj
+      except ValueError:
+        pass
+  drives = []
+  for ctrl in sorted(Path("/sys/class/nvme").iterdir()):
+    model = (ctrl / "model").read_text().strip()
+    serial = (ctrl / "serial").read_text().strip()
+    fw = (ctrl / "firmware_rev").read_text().strip()
+    h = health.get(serial) or {}
+    entry = {"model": model, "serial": serial, "firmware": fw, "vendor": model.split()[0].replace("_", " "),
+             "tbw": TBW.get(model), "written": h.get("written"), "health": h, "udisks": objs.get(serial, ""),
+             "selftest": selftest(objs[serial]) if serial in objs else {}}
+    if model.startswith("Samsung"):
+      family = re.sub(r"^Samsung SSD |\s*\d+(GB|TB)$", "", model).strip()
+      info = samsung.get(family) or {}
+      entry.update(latest=info.get("version", ""), source="Samsung", download=info.get("iso", SAMSUNG_TOOLS),
+                   note="Samsung Magician has no Linux version for consumer SSDs; firmware ships as a bootable ISO.")
+    else:
+      versions = fw_updates.get(serial) or []
+      entry.update(latest=versions[0] if versions else fw, source="LVFS (fwupd)",
+                   download="fwupdmgr update" if versions else "")
+    entry["upToDate"] = not entry.get("latest") or entry["latest"] == fw
+    drives.append(entry)
+  print(json.dumps({"drives": drives}, separators=(",", ":")))
+
+
+def start_selftest(obj, kind):
+  # UDisks asks the polkit agent (Omarchy's shell has one) for permission.
+  out = subprocess.run(["busctl", "--system", "call", "org.freedesktop.UDisks2", obj,
+                        "org.freedesktop.UDisks2.NVMe.Controller", "SmartSelftestStart", "sa{sv}", kind, "0"],
+                       capture_output=True, text=True, timeout=120)
+  print(json.dumps({"ok": out.returncode == 0, "error": out.stderr.strip()}))
+
+
+# ------------------------------------------------------------------ steam
+
+TOOLS = re.compile(r"(?i)^(proton|steam linux runtime|steamworks common|steamvr)")
+
+
+def vdf_values(text, key):
+  return re.findall(r'"' + re.escape(key) + r'"\s+"([^"]*)"', text)
+
+
+def steam():
+  """Installed Steam games per library, with Proton prefix and shader cache."""
+  roots = [HOME / ".local/share/Steam", HOME / ".steam/steam",
+           HOME / ".var/app/com.valvesoftware.Steam/.local/share/Steam"]
+  libraries = []
+  for r in roots:
+    vdf = r / "steamapps" / "libraryfolders.vdf"
+    if vdf.exists():
+      for path in vdf_values(vdf.read_text(errors="replace"), "path"):
+        if path not in libraries:
+          libraries.append(path)
+  games, tools = [], []
+  for lib in libraries:
+    apps = Path(lib) / "steamapps"
+    for acf in sorted(apps.glob("appmanifest_*.acf")):
+      text = acf.read_text(errors="replace")
+      appid = (vdf_values(text, "appid") or [""])[0]
+      name = (vdf_values(text, "name") or [appid])[0]
+      installdir = (vdf_values(text, "installdir") or [""])[0]
+      size = int((vdf_values(text, "SizeOnDisk") or ["0"])[0] or 0)
+      last = int((vdf_values(text, "LastPlayed") or ["0"])[0] or 0)
+      game_dir = apps / "common" / installdir
+      prefix = sum(du(str(apps / "compatdata" / appid)).values()) if (apps / "compatdata" / appid).exists() else 0
+      shaders = sum(du(str(apps / "shadercache" / appid)).values()) if (apps / "shadercache" / appid).exists() else 0
+      entry = {"appid": appid, "name": name, "size": size, "prefix": prefix, "shaders": shaders,
+               "total": size + prefix + shaders, "lastPlayed": last, "path": str(game_dir), "library": lib}
+      (tools if TOOLS.match(name) else games).append(entry)
+  games.sort(key=lambda g: -g["total"])
+  tools.sort(key=lambda g: -g["total"])
+  steam_dir = next((str(r) for r in roots if r.exists()), "")
+  total = sum(du(steam_dir).values()) if steam_dir else 0
+  listed = sum(g["total"] for g in games + tools)
+  print(json.dumps({"libraries": libraries, "games": games, "tools": tools, "total": total,
+                    "client": max(0, total - listed), "path": steam_dir}, separators=(",", ":")))
+
+
 # ------------------------------------------------------------------ cleanup
 
 def cleanup():
@@ -258,6 +399,12 @@ def main(argv):
     breakdown()
   elif cmd == "dir" and len(argv) > 2:
     directory(argv[2])
+  elif cmd == "firmware":
+    firmware()
+  elif cmd == "selftest" and len(argv) > 2:
+    start_selftest(argv[2], argv[3] if len(argv) > 3 else "short")
+  elif cmd == "steam":
+    steam()
   elif cmd == "cleanup":
     cleanup()
   else:

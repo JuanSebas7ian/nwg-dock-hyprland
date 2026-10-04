@@ -15,7 +15,7 @@ Panel {
   manageIpc: false
 
   readonly property string backend: String(Qt.resolvedUrl("gdrive.py")).replace("file://", "")
-  readonly property string glyph: String.fromCodePoint(0xF02CA)
+  readonly property string glyph: String.fromCodePoint(0xF02B6)
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)

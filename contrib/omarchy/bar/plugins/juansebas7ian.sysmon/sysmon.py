@@ -193,7 +193,7 @@ def memory():
 
 
 def temps():
-  out = {"cpu": None, "nvme": [], "ram": [], "igpu": None}
+  out = {"cpu": None, "nvme": [], "ram": [], "igpu": None, "fans": [], "board": []}
   for name in sorted(os.listdir(HWMON)):
     base = os.path.join(HWMON, name)
     kind = read(os.path.join(base, "name"))
@@ -210,6 +210,19 @@ def temps():
         out["ram"].append(t)
     elif kind == "amdgpu":
       out["igpu"] = num(os.path.join(base, "temp1_input"), 1000)
+    elif kind.startswith("nct6"):
+      # Motherboard Super I/O (nct6775 driver): fans and board temperatures.
+      names = FAN_NAMES
+      for i in range(1, 8):
+        rpm = num(os.path.join(base, f"fan{i}_input"))
+        if rpm:
+          out["fans"].append({"name": names.get(str(i), f"Fan {i}"), "rpm": int(rpm)})
+      for i in range(1, 14):
+        label = read(os.path.join(base, f"temp{i}_label"))
+        if label in ("SYSTIN", "CPUTIN"):
+          t = num(os.path.join(base, f"temp{i}_input"), 1000)
+          if t:
+            out["board"].append({"name": {"SYSTIN": "Motherboard", "CPUTIN": "CPU socket"}[label], "temp": t})
   return out
 
 
@@ -234,6 +247,12 @@ def igpu():
             "vramTotal": num(f"{dev}/mem_info_vram_total")}
   return None
 
+
+# Optional fan names: ~/.config/omarchy-sysmon/fans.json, e.g. {"1": "CPU", "7": "AIO pump"}
+try:
+  FAN_NAMES = json.loads(open(os.path.expanduser("~/.config/omarchy-sysmon/fans.json")).read())
+except (OSError, ValueError):
+  FAN_NAMES = {}
 
 CPU_MODEL = next((l.split(":", 1)[1].strip() for l in read("/proc/cpuinfo").splitlines()
                   if l.startswith("model name")), "CPU")

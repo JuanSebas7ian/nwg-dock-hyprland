@@ -265,6 +265,17 @@ Panel {
             fraction: root.s && root.s.igpu ? root.s.igpu.util / 100 : 0
           }
 
+          // ---------------------------------------------------------- Board
+          Section { visible: !!root.s && root.s.temps.fans.length > 0; title: "MOTHERBOARD" }
+          Repeater {
+            model: root.s ? root.s.temps.board : []
+            Pair { required property var modelData; label: modelData.name; value: root.deg(modelData.temp) }
+          }
+          Repeater {
+            model: root.s ? root.s.temps.fans : []
+            Pair { required property var modelData; label: "󰈐 " + modelData.name; value: modelData.rpm + " RPM" }
+          }
+
           // ---------------------------------------------------------- Storage / network
           Section { title: "STORAGE · NETWORK" }
           Repeater {

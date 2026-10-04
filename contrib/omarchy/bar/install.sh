@@ -32,7 +32,7 @@ WIDGETS=(
   "juansebas7ian.nvidia:juansebas7ian.storage"
   "juansebas7ian.drivers:juansebas7ian.nvidia"
 )
-COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }
@@ -155,7 +155,22 @@ if command -v spotifyd >/dev/null; then
   rm -f "$tmp"
   mkdir -p "$HOME/.cache/spotifyd"
 else
-  warn "sin spotifyd: el panel de Spotify solo controlará otros dispositivos. Instálalo con: omarchy pkg add spotifyd"
+  warn "sin spotifyd: no se podrá reproducir en este PC sin la app. Instálalo con: omarchy pkg add spotifyd"
+fi
+if command -v spotify_player >/dev/null; then
+  say "Spotify: spotify-player como cliente de la API (listas, dispositivos)"
+  sp_conf=$CONFIG/spotify-player/app.toml
+  tmp=$(mktemp)
+  cp "$HERE/config/spotify-player/app.toml" "$tmp"
+  # Keep the user's own client ID (set by spotify-bar-setup).
+  if [[ -f $sp_conf ]] && id_line=$(grep -m1 -E '^\s*client_id\s*=' "$sp_conf"); then
+    awk -v line="$id_line" 'BEGIN{d=0} /^\[/ && !d {print line; d=1} {print} END{if(!d) print line}' "$tmp" >"$tmp.2" && mv "$tmp.2" "$tmp"
+  fi
+  install_file "$tmp" "$sp_conf" 644 || say "  sin cambios: $sp_conf"
+  rm -f "$tmp"
+  install_file "$HERE/systemd/spotify-player.service" "$UNITS/spotify-player.service" 644 || say "  sin cambios: $UNITS/spotify-player.service"
+else
+  warn "sin spotify-player: el panel de Spotify no mostrará tus listas. Instálalo con: omarchy pkg add spotify-player"
 fi
 
 # --------------------------------------------------------------- opencode + Ollama
@@ -178,6 +193,11 @@ if $HOST; then
     install_file "$HERE/host/51-disable-nexigo-webcam-mic.conf" \
       "$CONFIG/wireplumber/wireplumber.conf.d/51-disable-nexigo-webcam-mic.conf" 644 &&
       systemctl --user restart wireplumber || true
+  fi
+  if ! cmp -s "$HERE/host/claude-nct6775.conf" /etc/modules-load.d/claude-nct6775.conf 2>/dev/null; then
+    say "  sensores de la placa: cargar nct6775 al arrancar (sudo)"
+    sudo install -D -m 644 "$HERE/host/claude-nct6775.conf" /etc/modules-load.d/claude-nct6775.conf
+    sudo modprobe nct6775 || true
   fi
   if command -v ollama >/dev/null; then
     dropin=/etc/systemd/system/ollama.service.d/context.conf
@@ -207,6 +227,9 @@ fi
 if command -v spotifyd >/dev/null && compgen -G "$HOME/.cache/spotifyd/oauth/*" >/dev/null; then
   systemctl --user enable --now spotifyd.service >/dev/null || true
 fi
+if [[ -e $UNITS/spotify-player.service ]] && compgen -G "$HOME/.cache/spotify-player/*token.json" >/dev/null; then
+  systemctl --user enable --now spotify-player.service >/dev/null || true
+fi
 
 say "Colocando los widgets en la barra"
 omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
@@ -227,9 +250,7 @@ cat <<EOF
 
 Listo. Pasos que solo puedes hacer tú (una vez):
   - Spotify en este PC sin abrir la app (Premium): spotifyd authenticate && systemctl --user enable --now spotifyd
-  - Panel de Spotify (cola, listas): crea una app en https://developer.spotify.com/dashboard con
-    Redirect URI http://127.0.0.1:8898/callback y API "Web API"; guarda su Client ID con
-      mkdir -p ~/.config/spotify-bar && echo <CLIENT_ID> > ~/.config/spotify-bar/client_id
-    y pulsa "Connect Spotify" en el panel.
+  - Listas de Spotify en el panel: spotify-bar-setup (o "Connect" en el panel) guía la creación de tu app
+    de Spotify, guarda el Client ID y autoriza spotify-player.
 Respaldos de lo reemplazado: ${BACKUPS}
 EOF
