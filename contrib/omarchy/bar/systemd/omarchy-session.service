@@ -1,0 +1,12 @@
+[Unit]
+Description=Save the Hyprland session and restore it at the next login (omarchy-session)
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/omarchy-session daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

@@ -28,9 +28,10 @@ WIDGETS=(
   "juansebas7ian.gdrive:omarchy.dropbox"
   "juansebas7ian.ollama:omarchy.agents"
   "juansebas7ian.sysmon:juansebas7ian.ollama"
-  "juansebas7ian.drivers:juansebas7ian.sysmon"
+  "juansebas7ian.nvidia:juansebas7ian.sysmon"
+  "juansebas7ian.drivers:juansebas7ian.nvidia"
 )
-COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }
@@ -85,8 +86,8 @@ remove_all() {
       say "  quitado: $id"
     fi
   done
-  systemctl --user disable --now omarchy-agent-usage-extra.timer >/dev/null 2>&1 || true
-  for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer; do
+  systemctl --user disable --now omarchy-agent-usage-extra.timer omarchy-session.service >/dev/null 2>&1 || true
+  for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
   for c in "${COLLECTORS[@]}"; do
@@ -131,7 +132,7 @@ say "Colectores de uso (Antigravity, opencode)"
 for c in "${COLLECTORS[@]}"; do
   install_file "$HERE/bin/$c" "$BIN/$c" 755 || say "  sin cambios: $BIN/$c"
 done
-for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer; do
+for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service; do
   install_file "$HERE/systemd/$unit" "$UNITS/$unit" 644 || say "  sin cambios: $UNITS/$unit"
 done
 
@@ -191,6 +192,14 @@ fi
 # --------------------------------------------------------------- activar
 systemctl --user daemon-reload
 systemctl --user enable --now omarchy-agent-usage-extra.timer >/dev/null
+# Session restore: this session counts as already restored, so enabling it
+# now does not reopen windows that are already open.
+if ! systemctl --user is-active -q omarchy-session.service; then
+  state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-session
+  mkdir -p "$state"
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && printf '%s' "$HYPRLAND_INSTANCE_SIGNATURE" >"$state/restored-instance"
+fi
+systemctl --user enable --now omarchy-session.service >/dev/null
 if [[ -e $UNITS/rclone-gdrive.service ]]; then
   systemctl --user enable --now rclone-gdrive.service >/dev/null || warn "el montaje de Drive no arrancó: journalctl --user -u rclone-gdrive"
 fi

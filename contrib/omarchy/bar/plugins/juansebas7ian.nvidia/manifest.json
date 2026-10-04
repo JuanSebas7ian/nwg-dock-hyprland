@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.nvidia",
+  "name": "NVIDIA",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "NVIDIA driver and kernel module health, DKMS per kernel, CUDA live check and toolkit, and NVIDIA/CUDA/kernel updates with a notification.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "NVIDIA",
+    "description": "Left = panel · right = check again. The number is pending NVIDIA/CUDA/kernel updates; red = driver or CUDA problem.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
