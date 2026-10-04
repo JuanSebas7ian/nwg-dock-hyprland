@@ -26,7 +26,7 @@ del sistema (paquetes, archivos propios de `/etc`, servicios activos) y la copia
 
 ## Reconstruir un equipo desde cero
 
-En un Omarchy recién instalado, con tu cuenta de Google y la contraseña de restic (guardada en 1Password):
+En un Omarchy recién instalado, con tu cuenta de Google y la contraseña de restic (guardada en el gestor de contraseñas de Google y en papel):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JuanSebas7ian/nwg-dock-hyprland/feat/dnd-reorder/contrib/omarchy/restore/bin/omarchy-restore -o /tmp/omarchy-restore
@@ -38,4 +38,7 @@ una carpeta aparte y la copia sin pisar archivos más nuevos, reinstala los paqu
 ejecutar los instaladores del dock, el validador y la barra, y reactiva los servicios.
 
 **La contraseña de restic es la llave de todo:** está en `~/.config/omarchy-backup/restic-password` y debe estar
-también fuera del equipo (1Password). Sin ella, la copia de Drive no se puede leer.
+también fuera del equipo: en el gestor de contraseñas de Google (passwords.google.com, con verificación en dos pasos y
+*cifrado en el dispositivo* activados, porque la copia también está en esa cuenta) y en una copia en papel. Sin ella,
+la copia de Drive no se puede leer. En el equipo hay además `~/.config/omarchy-backup/.env` (0600, para usar `restic` a mano)
+y una nota en Obsidian; ninguna de las dos sirve si se pierde el disco.

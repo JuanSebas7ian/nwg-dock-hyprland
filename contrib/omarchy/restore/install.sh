@@ -37,7 +37,7 @@ if [[ ! -s $RESTIC_PASSWORD_FILE ]]; then
   (umask 077 && python3 -c "import secrets; print(secrets.token_urlsafe(32))" >"$RESTIC_PASSWORD_FILE")
   restic init
   echo
-  echo "IMPORTANT: save this restic password in 1Password; without it the Drive backup cannot be restored:"
+  echo "IMPORTANT: save this restic password in Google Password Manager (and on paper); without it the Drive backup cannot be restored:"
   echo "  $(cat "$RESTIC_PASSWORD_FILE")"
 fi
 

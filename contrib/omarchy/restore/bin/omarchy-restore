@@ -13,7 +13,7 @@
 #
 # Layers: snapper "home" snapshots (hourly, on this disk) for accidents; restic on Google Drive (daily, encrypted)
 # for losing the disk; the fork on GitHub for the tools. The restic password lives in
-# ~/.config/omarchy-backup/restic-password and must also be kept somewhere else (1Password).
+# ~/.config/omarchy-backup/restic-password and must also be kept outside this machine (Google Password Manager + a paper copy).
 set -uo pipefail
 
 CONF=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-backup
@@ -143,7 +143,7 @@ cmd_heal() {
 
 cmd_full() {
   echo "Rebuild this Omarchy from the Google Drive backup."
-  echo "You need: your Google account (Drive) and the restic password (1Password)."
+  echo "You need: your Google account (Drive) and the restic password (Google Password Manager or your paper copy)."
   read -rp "Continue? [y/N] " a
   [[ $a == [yYsS]* ]] || exit 0
   echo "== 1. tools"
@@ -156,7 +156,7 @@ cmd_full() {
   echo "== 3. restic password"
   mkdir -p "$CONF" && chmod 700 "$CONF"
   if [[ ! -s $CONF/restic-password ]]; then
-    read -rsp "Paste the restic password (from 1Password): " pw
+    read -rsp "Paste the restic password (Google Password Manager or paper copy): " pw
     echo
     (umask 077 && printf '%s\n' "$pw" >"$CONF/restic-password")
   fi
