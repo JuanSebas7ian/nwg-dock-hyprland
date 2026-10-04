@@ -20,3 +20,4 @@ bin
 /.idea
 # helper scripts of the Omarchy bar extras (not build output)
 !contrib/omarchy/bar/bin/
+!contrib/omarchy/restore/bin/

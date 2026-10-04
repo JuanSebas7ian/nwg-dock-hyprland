@@ -122,6 +122,12 @@ contrib/omarchy/bar/install.sh             # widgets, colectores y servicios de 
 
 Detalle y pasos manuales (Spotify): [`bar/README.md`](bar/README.md).
 
+## Respaldo y autorrestauración
+
+`restore/` agrega snapshots de `/home` cada hora, un respaldo diario cifrado en Google Drive (restic) y
+`omarchy-restore`, que recupera archivos, repone sola la configuración que falte al arrancar y reconstruye un
+equipo nuevo desde Drive. Detalle: [`restore/README.md`](restore/README.md).
+
 ## Diagnóstico
 
 ```bash

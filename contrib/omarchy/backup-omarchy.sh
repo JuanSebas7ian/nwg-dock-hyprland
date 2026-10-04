@@ -28,6 +28,11 @@ PATHS=(
   .local/bin/omarchy-agent-usage-antigravity .local/bin/omarchy-agent-usage-opencode
   .local/bin/omarchy-agent-usage-extra .local/bin/omarchy-hwcheck
   .local/state/omarchy-hwcheck
+  # spotify, sesión, sensores y respaldo (sin la contraseña de restic)
+  .config/spotify-player/app.toml .config/omarchy-sysmon .config/omarchy-session
+  .config/omarchy-backup/config .config/omarchy-backup/excludes
+  .local/bin/omarchy-session .local/bin/omarchy-backup .local/bin/omarchy-restore
+  .local/bin/bt-pair-keyboard .local/bin/spotify-bar-setup
   .bashrc .bash_profile .profile
   # contexto, skill y agente de Claude para este equipo
   .claude/CLAUDE.md .claude/omarchy.md .claude/skills/omarchy-hardware .claude/agents

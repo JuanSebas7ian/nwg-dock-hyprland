@@ -1,0 +1,10 @@
+#!/bin/bash
+# Hook de Omarchy: autorrestauración al arrancar el escritorio.
+# Si falta configuración vigilada (Hyprland, la barra, scripts, servicios, contexto de Claude…),
+# omarchy-restore heal la repone desde el snapshot más reciente de /home y avisa con una notificación.
+# Solo repone rutas que ya no existen; nunca sobrescribe. Registro: ~/.local/state/omarchy-backup/heal.log.
+# Nunca hace fallar al evento que lo llama.
+bin=$HOME/.local/bin/omarchy-restore
+[[ -x $bin ]] || exit 0
+setsid -f bash -c "sleep 20; '$bin' heal --quiet" >/dev/null 2>&1 </dev/null
+exit 0

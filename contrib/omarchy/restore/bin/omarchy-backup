@@ -1,0 +1,67 @@
+#!/bin/bash
+# Daily backup of this Omarchy PC, run by omarchy-backup.timer:
+#   1. the Omarchy/dock/bar config tarball (backup-omarchy.sh), last 5 kept in ~/omarchy-backups;
+#   2. a system manifest (packages, own /etc files, enabled services) in ~/.local/state/omarchy-backup/system;
+#   3. restic: your home folder, encrypted, to Google Drive (rclone remote "rclone:"), only what changed;
+#   4. retention (7 daily, 4 weekly, 6 monthly), pruning once a week.
+# Status: ~/.local/state/omarchy-backup/status.json. Failures raise a critical notification.
+# Restore: omarchy-restore (files, a whole folder, or a full machine).
+set -uo pipefail
+
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-backup
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-backup
+REPO_DIR=$HOME/src/nwg-dock-hyprland-dnd
+mkdir -p "$STATE/system"
+# shellcheck source=/dev/null
+. "$CONF/config"
+export RESTIC_REPOSITORY RESTIC_PASSWORD_FILE=$CONF/restic-password
+LOG=$STATE/last.log
+exec > >(tee "$LOG") 2>&1
+
+say() { printf '[%(%F %T)T] %s\n' -1 "$*"; }
+fail() {
+  say "ERROR: $*"
+  printf '{"ok":false,"at":%s,"error":"%s"}\n' "$(date +%s)" "${*//\"/\'}" >"$STATE/status.json"
+  notify-send -u critical -a Backup "Backup failed" "$*  (log: $LOG)" 2>/dev/null
+  exit 1
+}
+
+[[ -s $RESTIC_PASSWORD_FILE ]] || fail "missing $RESTIC_PASSWORD_FILE"
+
+# 1. config tarball
+if [[ -x $REPO_DIR/contrib/omarchy/backup-omarchy.sh ]]; then
+  say "config tarball"
+  "$REPO_DIR/contrib/omarchy/backup-omarchy.sh" >/dev/null || say "warning: backup-omarchy.sh failed"
+  ls -1t "$HOME"/omarchy-backups/omarchy-*.tar.gz 2>/dev/null | tail -n +6 | while read -r old; do
+    rm -f "$old" "$old.sha256"
+  done
+fi
+
+# 2. system manifest (what reinstalls the machine)
+say "system manifest"
+pacman -Qqen >"$STATE/system/packages-repo.txt"
+pacman -Qqem >"$STATE/system/packages-aur.txt"
+systemctl list-unit-files --state=enabled --no-legend --no-pager | awk '{print $1}' >"$STATE/system/system-units.txt"
+systemctl --user list-unit-files --state=enabled --no-legend --no-pager | awk '{print $1}' >"$STATE/system/user-units.txt"
+mkdir -p "$STATE/system/etc"
+for f in /etc/limine-entry-tool.d/claude-*.conf /etc/modules-load.d/claude-*.conf /etc/modprobe.d/*.conf \
+  /etc/systemd/system/ollama.service.d/*.conf /etc/mkinitcpio.conf.d/*.conf /etc/snapper/configs/*; do
+  [[ -r $f ]] && install -D -m 644 "$f" "$STATE/system/etc${f#/etc}" 2>/dev/null
+done
+cat /proc/cmdline >"$STATE/system/cmdline.txt"
+
+# 3. restic
+say "restic backup → $RESTIC_REPOSITORY"
+restic backup "$HOME" --one-file-system --exclude-caches --exclude-file "$CONF/excludes" \
+  --tag daily --host "$(hostname)" --no-scan --compression auto \
+  || fail "restic backup failed (network or Google Drive?)"
+
+# 4. retention; prune (slow over Drive) on Sundays only
+say "retention"
+args=(forget $KEEP --tag daily --host "$(hostname)")
+[[ $(date +%u) == 7 ]] && args+=(--prune)
+restic "${args[@]}" || say "warning: restic forget failed"
+
+snap=$(restic snapshots --latest 1 --json --host "$(hostname)" 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.stdin); print(s[-1]["short_id"] if s else "")')
+printf '{"ok":true,"at":%s,"snapshot":"%s"}\n' "$(date +%s)" "$snap" >"$STATE/status.json"
+say "done (snapshot $snap)"

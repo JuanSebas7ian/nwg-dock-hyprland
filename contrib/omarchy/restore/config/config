@@ -1,0 +1,5 @@
+# omarchy-backup settings
+# restic repository on Google Drive through the rclone remote "rclone:" (encrypted by restic)
+RESTIC_REPOSITORY=rclone:rclone:Backups/omarchy-restic
+# keep: 7 daily, 4 weekly, 6 monthly
+KEEP="--keep-daily 7 --keep-weekly 4 --keep-monthly 6"

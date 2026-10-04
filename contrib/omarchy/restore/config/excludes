@@ -1,0 +1,23 @@
+# Paths restic skips (one pattern per line). Everything here can be downloaded or rebuilt.
+@HOME@/.cache
+@HOME@/.local/share/Steam
+@HOME@/Dropbox
+@HOME@/GoogleDrive
+@HOME@/.local/share/Trash
+@HOME@/.rustup
+@HOME@/.cargo/registry
+@HOME@/.cargo/git
+@HOME@/.npm
+@HOME@/.local/share/mise/installs
+@HOME@/.local/share/flatpak
+@HOME@/.ollama/models
+@HOME@/.config/*/Cache
+@HOME@/.config/*/Code Cache
+@HOME@/.config/*/GPUCache
+@HOME@/.config/*/Service Worker/CacheStorage
+@HOME@/.config/*/*/Cache
+@HOME@/.config/*/*/Code Cache
+@HOME@/.config/*/*/GPUCache
+node_modules
+.venv
+__pycache__

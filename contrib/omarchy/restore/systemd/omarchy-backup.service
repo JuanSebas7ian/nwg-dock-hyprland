@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily encrypted backup of the home folder to Google Drive (omarchy-backup)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omarchy-backup
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=6h

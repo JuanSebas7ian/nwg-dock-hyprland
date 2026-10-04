@@ -1,0 +1,205 @@
+#!/bin/bash
+# Restore files or the whole setup of this Omarchy PC.
+#
+#   omarchy-restore list                     what can be restored (home snapshots, Drive backups, config tarballs)
+#   omarchy-restore file <path> [N]          bring back a file or folder: from home snapshot N (default: the newest
+#                                            that has it), else from the latest Google Drive backup. What is there now
+#                                            is kept as <path>.before-restore.<date>.
+#   omarchy-restore heal [--quiet]           self-heal: put back config that has gone missing (Hyprland, the bar, scripts,
+#                                            services, Claude's context...) from the newest home snapshot. Runs at every
+#                                            boot (post-boot hook); only restores paths that no longer exist.
+#   omarchy-restore full                     rebuild a freshly installed Omarchy from Google Drive: rclone + restic,
+#                                            your home folder, packages, the dock/bar/validator installers, services.
+#
+# Layers: snapper "home" snapshots (hourly, on this disk) for accidents; restic on Google Drive (daily, encrypted)
+# for losing the disk; the fork on GitHub for the tools. The restic password lives in
+# ~/.config/omarchy-backup/restic-password and must also be kept somewhere else (1Password).
+set -uo pipefail
+
+CONF=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-backup
+SNAPS=/home/.snapshots
+STAMP=$(date +%Y%m%d-%H%M%S)
+REPO_URL=https://github.com/JuanSebas7ian/nwg-dock-hyprland.git
+REPO_DIR=$HOME/src/nwg-dock-hyprland-dnd
+QUIET=false
+
+# Config that heal watches (relative to $HOME).
+HEAL_PATHS=(
+  .config/hypr .config/omarchy/shell.json .config/omarchy/plugins .config/omarchy/hooks .config/omarchy/extensions
+  .config/systemd/user .config/nwg-dock-hyprland .config/wireplumber .config/spotifyd .config/spotify-player/app.toml
+  .config/rclone/rclone.conf .config/omarchy-backup .config/omarchy-sysmon .config/omarchy-session
+  .config/opencode/opencode.json .config/uwsm .config/environment.d .config/git
+  .local/bin/nwg-dock-hyprland-dnd .local/bin/omarchy-hwcheck .local/bin/omarchy-session .local/bin/omarchy-backup
+  .local/bin/omarchy-restore .local/bin/omarchy-agent-usage-extra .local/bin/omarchy-agent-usage-antigravity
+  .local/bin/omarchy-agent-usage-opencode .local/bin/bt-pair-keyboard .local/bin/spotify-bar-setup
+  .cache/nwg-dock-pinned .claude/CLAUDE.md .claude/omarchy.md .claude/agents .claude/skills/omarchy-hardware
+  .ssh .gnupg
+)
+
+say() { $QUIET || printf '%s\n' "$*"; }
+die() {
+  printf 'omarchy-restore: %s\n' "$*" >&2
+  exit 1
+}
+
+restic_env() {
+  # shellcheck source=/dev/null
+  [[ -f $CONF/config ]] && . "$CONF/config"
+  export RESTIC_REPOSITORY=${RESTIC_REPOSITORY:-rclone:rclone:Backups/omarchy-restic}
+  export RESTIC_PASSWORD_FILE=$CONF/restic-password
+}
+
+# Snapshot numbers of the home config, newest first.
+home_snapshots() {
+  [[ -d $SNAPS ]] || return 0
+  find "$SNAPS" -mindepth 1 -maxdepth 1 -regex '.*/[0-9]+' -printf '%f\n' 2>/dev/null | sort -rn
+}
+
+snapshot_date() {
+  sed -n 's:.*<date>\(.*\)</date>.*:\1:p' "$SNAPS/$1/info.xml" 2>/dev/null | head -1
+}
+
+cmd_list() {
+  echo "== Home snapshots (this disk, hourly) — omarchy-restore file <path> <N>"
+  for n in $(home_snapshots); do printf '  #%-4s %s UTC\n' "$n" "$(snapshot_date "$n")"; done
+  echo
+  echo "== Google Drive backups (restic, daily, encrypted)"
+  restic_env
+  if [[ -s $RESTIC_PASSWORD_FILE ]]; then
+    restic snapshots --compact 2>/dev/null | sed 's/^/  /' || echo "  (cannot reach the repository)"
+  else
+    echo "  (no restic password in $RESTIC_PASSWORD_FILE)"
+  fi
+  echo
+  echo "== Config tarballs (~/omarchy-backups)"
+  ls -1t "$HOME"/omarchy-backups/*.tar.gz 2>/dev/null | head -5 | sed 's/^/  /'
+}
+
+keep_current() {
+  local p=$1
+  if [[ -e $p || -L $p ]]; then
+    mv "$p" "$p.before-restore.$STAMP"
+    say "  kept the current one as $p.before-restore.$STAMP"
+  fi
+}
+
+cmd_file() {
+  local target want rel src n
+  target=$(realpath -m -- "$1")
+  want=${2:-}
+  [[ $target == "$HOME"/* || $target == "$HOME" ]] || die "only paths inside $HOME can be restored"
+  rel=${target#/home/}
+  for n in ${want:-$(home_snapshots)}; do
+    src=$SNAPS/$n/snapshot/$rel
+    if [[ -e $src || -L $src ]]; then
+      say "Restoring $target from home snapshot #$n ($(snapshot_date "$n") UTC)"
+      keep_current "$target"
+      mkdir -p "$(dirname "$target")"
+      cp -a --reflink=auto "$src" "$target" && say "  done" && return 0
+      die "copy failed"
+    fi
+  done
+  [[ -n $want ]] && die "#$want does not have $target"
+  say "Not in any home snapshot; trying the latest Google Drive backup…"
+  restic_env
+  local tmp
+  tmp=$(mktemp -d)
+  restic restore latest --target "$tmp" --include "$target" >/dev/null || { rm -rf "$tmp"; die "not found in the Drive backup either"; }
+  [[ -e $tmp$target ]] || { rm -rf "$tmp"; die "not found in the Drive backup either"; }
+  keep_current "$target"
+  mkdir -p "$(dirname "$target")"
+  mv "$tmp$target" "$target"
+  rm -rf "$tmp"
+  say "  restored from Google Drive"
+}
+
+cmd_heal() {
+  local newest restored=() p src
+  newest=$(home_snapshots | head -1)
+  [[ -n $newest ]] || { say "no home snapshots yet"; return 0; }
+  for p in "${HEAL_PATHS[@]}"; do
+    [[ -e $HOME/$p || -L $HOME/$p ]] && continue
+    # newest snapshot that still has it
+    for n in $(home_snapshots); do
+      src=$SNAPS/$n/snapshot/${HOME#/home/}/$p
+      if [[ -e $src || -L $src ]]; then
+        mkdir -p "$(dirname "$HOME/$p")"
+        cp -a --reflink=auto "$src" "$HOME/$p" && restored+=("$p (#$n)")
+        break
+      fi
+    done
+  done
+  if ((${#restored[@]} == 0)); then
+    say "nothing missing"
+    return 0
+  fi
+  printf -v list '%s\n' "${restored[@]}"
+  say "Restored:"$'\n'"$list"
+  printf '[%(%F %T)T] healed: %s\n' -1 "${restored[*]}" >>"${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-backup/heal.log"
+  systemctl --user daemon-reload 2>/dev/null
+  [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && hyprctl reload >/dev/null 2>&1
+  notify-send -a Backup "Missing configuration restored" "$list(from the home snapshots; omarchy-restore list)" 2>/dev/null
+}
+
+cmd_full() {
+  echo "Rebuild this Omarchy from the Google Drive backup."
+  echo "You need: your Google account (Drive) and the restic password (1Password)."
+  read -rp "Continue? [y/N] " a
+  [[ $a == [yYsS]* ]] || exit 0
+  echo "== 1. tools"
+  sudo pacman -S --needed --noconfirm rclone restic git jq rsync || die "could not install tools"
+  echo "== 2. Google Drive (rclone remote \"rclone\")"
+  if ! rclone listremotes 2>/dev/null | grep -qx 'rclone:'; then
+    echo "A browser opens to sign in to Google Drive."
+    rclone config create rclone drive scope=drive || die "rclone setup failed"
+  fi
+  echo "== 3. restic password"
+  mkdir -p "$CONF" && chmod 700 "$CONF"
+  if [[ ! -s $CONF/restic-password ]]; then
+    read -rsp "Paste the restic password (from 1Password): " pw
+    echo
+    (umask 077 && printf '%s\n' "$pw" >"$CONF/restic-password")
+  fi
+  restic_env
+  restic snapshots --latest 1 || die "cannot open the backup (password or Drive?)"
+  echo "== 4. your home folder (latest backup)"
+  local stage=$HOME/.omarchy-restore-$STAMP
+  restic restore latest --target "$stage" || die "restore failed"
+  local src=$stage$HOME
+  echo "Restored into $stage. Copying into $HOME without overwriting newer files…"
+  rsync -a --update "$src/" "$HOME/"
+  echo "== 5. packages"
+  local sys=$src/.local/state/omarchy-backup/system
+  if [[ -f $sys/packages-repo.txt ]]; then
+    comm -23 <(sort "$sys/packages-repo.txt") <(pacman -Qq | sort) | grep -vE '^(linux|linux-headers)$' >/tmp/omarchy-missing-pkgs || true
+    if [[ -s /tmp/omarchy-missing-pkgs ]]; then
+      echo "$(wc -l </tmp/omarchy-missing-pkgs) packages missing; installing what the repos have"
+      sudo pacman -S --needed --noconfirm $(pacman -Ssq | sort | comm -12 - <(sort /tmp/omarchy-missing-pkgs)) || true
+    fi
+    [[ -s $sys/packages-aur.txt ]] && echo "AUR packages to review: $(tr '\n' ' ' <"$sys/packages-aur.txt")"
+  fi
+  echo "== 6. tools from the fork (dock, validator, bar)"
+  [[ -d $REPO_DIR/.git ]] || git clone -b feat/dnd-reorder "$REPO_URL" "$REPO_DIR"
+  (cd "$REPO_DIR" && contrib/omarchy/install.sh && contrib/omarchy/hwcheck/install.sh && contrib/omarchy/bar/install.sh --host) || true
+  echo "== 7. services"
+  systemctl --user daemon-reload
+  [[ -f $sys/user-units.txt ]] && xargs -r systemctl --user enable <"$sys/user-units.txt" 2>/dev/null
+  hyprctl reload >/dev/null 2>&1
+  echo
+  echo "Done. Review $stage (then delete it) and system settings in $sys/etc (kernel parameters,"
+  echo "modules, Ollama). Snapper's home config: see ~/.claude/omarchy.md (\"Respaldos\"). Reboot when ready."
+}
+
+case ${1:-} in
+list) cmd_list ;;
+file)
+  [[ -n ${2:-} ]] || die "usage: omarchy-restore file <path> [snapshot]"
+  cmd_file "$2" "${3:-}"
+  ;;
+heal)
+  [[ ${2:-} == --quiet ]] && QUIET=true
+  cmd_heal
+  ;;
+full) cmd_full ;;
+*) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac
