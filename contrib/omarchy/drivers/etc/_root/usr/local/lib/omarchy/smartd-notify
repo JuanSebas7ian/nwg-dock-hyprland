@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# smartd -M exec handler: log to the journal and raise a critical desktop
+# notification in the user's session. Installed as /usr/local/lib/omarchy/smartd-notify.
+# smartd provides SMARTD_DEVICE, SMARTD_MESSAGE and SMARTD_FAILTYPE.
+set -uo pipefail
+
+dev=${SMARTD_DEVICE:-desconocido}
+msg=${SMARTD_MESSAGE:-"(sin mensaje)"}
+type=${SMARTD_FAILTYPE:-desconocido}
+uid=${NOTIFY_UID:-1000}
+rundir=${NOTIFY_RUNDIR:-/run/user/$uid}
+
+logger -t smartd-notify -p daemon.warning -- "[$type] $dev: $msg"
+
+# No desktop session (not logged in): the journal entry is enough.
+[ -S "$rundir/bus" ] || exit 0
+user=$(getent passwd "$uid" | cut -d: -f1)
+[ -n "$user" ] || exit 0
+
+runuser -u "$user" -- env \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$rundir/bus" XDG_RUNTIME_DIR="$rundir" \
+    notify-send -u critical -a smartd "SMART: $dev ($type)" "$msg" || true
+exit 0

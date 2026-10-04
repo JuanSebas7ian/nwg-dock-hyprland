@@ -5,18 +5,18 @@ Usage: reward.py [smoke.json]   (stdin if no file)
 stdout: JSON; stderr: human summary. Exit 0 if stable, 1 if not, 3 on bad input.
 PASS = full weight, WARN = half, FAIL = 0, SKIP = ignored. A group made only of
 SKIPs drops out of the total and the score is rescaled to 100; a group with no
-checks at all counts as 0. A blocking group (TRIM, SMART) needs at least one
+checks at all counts as 0. A blocking group (TRIM, SMART, DRIVERS) needs at least one
 non-SKIP check, otherwise it is a blocker.
 """
 import json
 import sys
 
 WEIGHTS = {
-    "TRIM": 25, "SMART": 20, "PACCACHE": 10, "SCRUB": 10, "ORPHAN": 5,
-    "PKG": 10, "BOOT": 5, "SVC": 10, "HYPR": 5,
+    "TRIM": 22, "SMART": 17, "PACCACHE": 8, "SCRUB": 8, "ORPHAN": 4,
+    "PKG": 8, "BOOT": 4, "SVC": 9, "HYPR": 5, "DRIVERS": 15,
 }
 THRESHOLD = 90
-BLOCKING = ("TRIM", "SMART")
+BLOCKING = ("TRIM", "SMART", "DRIVERS")
 VALUE = {"PASS": 1.0, "WARN": 0.5, "FAIL": 0.0}
 
 

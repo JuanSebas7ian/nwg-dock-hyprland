@@ -1,0 +1,8 @@
+[Unit]
+Description=Recupera el adaptador Bluetooth MT7925 si no aparece (bt-guardian)
+After=systemd-udev-settle.service bluetooth.service
+ConditionPathExists=/usr/local/lib/bt-guardian/bt-guardian.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/bt-guardian/bt-guardian.sh

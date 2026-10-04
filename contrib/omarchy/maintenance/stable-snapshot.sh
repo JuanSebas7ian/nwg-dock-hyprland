@@ -20,11 +20,15 @@ main() {
     "$HERE/smoke-test.sh" --json >"$tmp/smoke.json"
     python3 "$HERE/reward.py" "$tmp/smoke.json" >"$tmp/reward.json"
     if [ $? -ne 0 ]; then echo "reward no es estable: me niego a crear el snapshot."; cat "$tmp/reward.json"; return 1; fi
+    python3 "$FORK_DIR/contrib/omarchy/drivers/compat.py" post >"$tmp/compat.txt" 2>&1
+    if [ $? -ge 2 ]; then echo "compat.py post encontro FALLOS: me niego a crear el snapshot."; cat "$tmp/compat.txt"; return 1; fi
     echo ">>> Escribe tu contrasena de sudo. <<<"
     sudo -v || return 1
 
     mkdir -p "$MAN" || return 1
-    cp "$tmp/smoke.json" "$tmp/reward.json" "$MAN/" || return 1
+    cp "$tmp/smoke.json" "$tmp/reward.json" "$tmp/compat.txt" "$MAN/" || return 1
+    # exact driver versions; --no-repo keeps the fork tree untouched (the commit hash below stays valid)
+    "$FORK_DIR/contrib/omarchy/drivers/capture.sh" --no-repo --quiet --state "$MAN" || { echo "capture.sh --state fallo"; fails=$((fails + 1)); }
     n=$(sudo snapper -c root create -p -d "stable $TODAY: maintenance" -u important=yes) \
         && echo "root=$n" >"$MAN/snapshots.txt" || { echo "snapshot root fallo"; return 1; }
     n=$(sudo snapper -c home create -p -d "stable $TODAY: maintenance") \

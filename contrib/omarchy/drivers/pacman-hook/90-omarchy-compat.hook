@@ -1,0 +1,13 @@
+# Warns (never aborts) when an upgrade would leave drivers or apps incompatible. See contrib/omarchy/drivers/.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Operation = Remove
+Type = Package
+Target = *
+
+[Action]
+Description = Comprobando compatibilidad de drivers (solo avisa)...
+When = PreTransaction
+Exec = /usr/local/lib/omarchy/compat-hook
+NeedsTargets

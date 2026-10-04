@@ -167,6 +167,30 @@ class ApplyTest(Base):
         self.assertIn("STEP S1 would-do", p.stdout)
         self.assertIn("STEP 3 would-do", p.stdout)
 
+class SmokeDriversGroupTest(Base):
+    """DRIVERS01/02 delegate to the drivers module; a fake DRIVERS_DIR stands in for it."""
+
+    def fake_drivers(self, check_rc, compat_rc, compat_line="FAIL C13c nvidia-smi no responde"):
+        self.n = getattr(self, "n", 0) + 1
+        d = os.path.join(self.t, "drivers%d" % self.n)
+        os.makedirs(d)
+        put(os.path.join(d, "install.sh"), "#!/bin/sh\n[ %d -ne 0 ] && echo 'FALTA paquete (repo): foo'\nexit %d\n" % (check_rc, check_rc), 0o755)
+        put(os.path.join(d, "compat.py"), "import sys\nprint(%r)\nsys.exit(%d)\n" % (compat_line, compat_rc))
+        return d
+
+    def test_drivers01(self):
+        self.assertEqual(self.smoke("DRIVERS01", DRIVERS_DIR=self.fake_drivers(0, 0))[0], "PASS")
+        st, p = self.smoke("DRIVERS01", DRIVERS_DIR=self.fake_drivers(1, 0))
+        self.assertEqual(st, "FAIL")
+        self.assertIn("FALTA paquete (repo): foo", p.stdout)
+
+    def test_drivers02(self):
+        self.assertEqual(self.smoke("DRIVERS02", DRIVERS_DIR=self.fake_drivers(0, 0))[0], "PASS")
+        self.assertEqual(self.smoke("DRIVERS02", DRIVERS_DIR=self.fake_drivers(0, 1, "WARN C14 x"))[0], "WARN")
+        st, p = self.smoke("DRIVERS02", DRIVERS_DIR=self.fake_drivers(0, 2))
+        self.assertEqual(st, "FAIL")
+        self.assertIn("nvidia-smi", p.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -180,7 +180,9 @@ cmd_full() {
   fi
   echo "== 6. tools from the fork (dock, validator, bar)"
   [[ -d $REPO_DIR/.git ]] || git clone -b feat/dnd-reorder "$REPO_URL" "$REPO_DIR"
-  (cd "$REPO_DIR" && contrib/omarchy/install.sh && contrib/omarchy/hwcheck/install.sh && contrib/omarchy/bar/install.sh --host) || true
+  # drivers first (packages, /etc files, DKMS, services, pacman hook), then the rest; a failure in one does not stop the others
+  (cd "$REPO_DIR" && { contrib/omarchy/drivers/install.sh || echo "drivers/install.sh reported problems; see ~/.local/state/omarchy-drivers/"; } &&
+    contrib/omarchy/install.sh && contrib/omarchy/hwcheck/install.sh && contrib/omarchy/bar/install.sh --host) || true
   echo "== 7. services"
   systemctl --user daemon-reload
   [[ -f $sys/user-units.txt ]] && xargs -r systemctl --user enable <"$sys/user-units.txt" 2>/dev/null

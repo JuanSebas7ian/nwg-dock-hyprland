@@ -1,0 +1,12 @@
+[Unit]
+Description=Revisa el Bluetooth al despertar de la suspensión (bt-guardian)
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+# al despertar, se permite una nueva tanda de intentos
+ExecStartPre=/usr/bin/rm -f /run/bt-guardian/attempts
+ExecStart=/usr/local/lib/bt-guardian/bt-guardian.sh
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target

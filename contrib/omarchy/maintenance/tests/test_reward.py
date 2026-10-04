@@ -9,7 +9,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 import reward  # noqa: E402
 
-GROUPS = ["TRIM", "SMART", "PACCACHE", "SCRUB", "ORPHAN", "PKG", "BOOT", "SVC", "HYPR"]
+GROUPS = ["TRIM", "SMART", "PACCACHE", "SCRUB", "ORPHAN", "PKG", "BOOT", "SVC", "HYPR", "DRIVERS"]
 
 
 def checks(**over):
@@ -19,31 +19,30 @@ def checks(**over):
 class RewardTest(unittest.TestCase):
     def test_weights_sum_to_100(self):
         self.assertEqual(sum(reward.WEIGHTS.values()), 100)
-        self.assertEqual(reward.WEIGHTS["TRIM"], 25)
-        self.assertEqual(reward.WEIGHTS["SMART"], 20)
+        self.assertEqual(reward.WEIGHTS["DRIVERS"], 15)
+        self.assertEqual(reward.BLOCKING, ("TRIM", "SMART", "DRIVERS"))
 
     def test_all_pass_is_stable(self):
         r = reward.score(checks())
         self.assertEqual(r["score"], 100)
         self.assertTrue(r["stable"])
 
-    def test_threshold_exactly_90(self):
-        r = reward.score(checks(PKG="FAIL"))  # -10
-        self.assertEqual(r["score"], 90)
+    def test_threshold_boundary(self):
+        W = reward.WEIGHTS
+        r = reward.score(checks(PKG="FAIL"))  # 100 - 8 = 92
+        self.assertEqual(r["score"], 100 - W["PKG"])
         self.assertTrue(r["stable"])
-
-    def test_below_threshold(self):
-        r = reward.score(checks(PKG="FAIL", BOOT="FAIL"))  # 85
-        self.assertEqual(r["score"], 85)
+        r = reward.score(checks(PKG="FAIL", SVC="FAIL"))  # 100 - 8 - 9 = 83
+        self.assertEqual(r["score"], 100 - W["PKG"] - W["SVC"])
         self.assertFalse(r["stable"])
 
     def test_warn_is_half(self):
         r = reward.score(checks(SVC="WARN"))
-        self.assertEqual(r["score"], 95)
+        self.assertEqual(r["score"], 100 - reward.WEIGHTS["SVC"] / 2)
 
     def test_blocking_fail_trim(self):
         r = reward.score(checks(TRIM="FAIL"))
-        self.assertEqual(r["score"], 75)
+        self.assertEqual(r["score"], 100 - reward.WEIGHTS["TRIM"])
         self.assertFalse(r["stable"])
         self.assertIn("TRIM", r["blockers"])
 
@@ -54,35 +53,47 @@ class RewardTest(unittest.TestCase):
         self.assertFalse(r["stable"])
         self.assertIn("SMART", r["blockers"])
 
+    def test_drivers_fail_blocks(self):
+        r = reward.score(checks(DRIVERS="FAIL"))
+        self.assertEqual(r["score"], 85)
+        self.assertFalse(r["stable"])
+        self.assertIn("DRIVERS", r["blockers"])
+
+    def test_drivers_warn_is_not_blocking(self):
+        r = reward.score(checks(DRIVERS="WARN"))
+        self.assertEqual(r["score"], 92.5)
+        self.assertTrue(r["stable"])
+        self.assertEqual(r["blockers"], [])
+
     def test_trim_warn_is_not_blocking(self):
         r = reward.score(checks(TRIM="WARN"))
-        self.assertEqual(r["score"], 87.5)
+        self.assertEqual(r["score"], 100 - reward.WEIGHTS["TRIM"] / 2)
         self.assertEqual(r["blockers"], [])
 
     def test_group_average_and_skip(self):
         d = checks()
         d["checks"] += [{"id": "PKG02", "status": "WARN", "text": ""}, {"id": "HYPR02", "status": "SKIP", "text": ""}]
         r = reward.score(d)
-        self.assertEqual(r["groups"]["PKG"]["points"], 7.5)
-        self.assertEqual(r["groups"]["HYPR"]["points"], 5)
+        self.assertEqual(r["groups"]["PKG"]["points"], reward.WEIGHTS["PKG"] * 0.75)
+        self.assertEqual(r["groups"]["HYPR"]["points"], reward.WEIGHTS["HYPR"])
 
     def test_missing_group_is_zero(self):
         d = {"checks": [c for c in checks()["checks"] if not c["id"].startswith("SMART")]}
         r = reward.score(d)
-        self.assertEqual(r["score"], 80)
+        self.assertEqual(r["score"], 100 - reward.WEIGHTS["SMART"])
         self.assertIn("SMART", r["blockers"])
 
     def test_all_skip_group_drops_and_rescales(self):
+        W = reward.WEIGHTS
         r = reward.score(checks(HYPR="SKIP", PKG="FAIL"))
         self.assertTrue(r["groups"]["HYPR"]["dropped"])
-        self.assertEqual(r["score"], round(85 * 100 / 95, 2))  # 89.47
-        self.assertFalse(r["stable"])
+        self.assertEqual(r["score"], round((100 - W["HYPR"] - W["PKG"]) * 100 / (100 - W["HYPR"]), 2))
         r = reward.score(checks(HYPR="SKIP"))
         self.assertEqual(r["score"], 100)
         self.assertTrue(r["stable"])
 
     def test_blocking_group_all_skip_is_blocker(self):
-        for g in ("TRIM", "SMART"):
+        for g in ("TRIM", "SMART", "DRIVERS"):
             r = reward.score(checks(**{g: "SKIP"}))
             self.assertIn(g, r["blockers"])
             self.assertFalse(r["stable"])

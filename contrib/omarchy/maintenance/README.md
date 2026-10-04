@@ -40,5 +40,7 @@ Para repetir S0/S1 borra `pre-number` / `post-number` de esa carpeta.
 
 ## Reward
 
-Pesos: TRIM 25, smartd 20, paccache 10, scrub 10, huérfanos 5, paquetes 10, `/boot` 5, servicios 10, `hyprctl configerrors` 5.
-PASS = peso completo, WARN = mitad, FAIL = 0. Un grupo con todo SKIP sale del total y la nota se reescala a 100. Estable: nota >= 90, ningún FAIL en TRIM ni smartd, y cada uno con al menos una comprobación no SKIP.
+Pesos: TRIM 22, smartd 17, paccache 8, scrub 8, huérfanos 4, paquetes 8, `/boot` 4, servicios 9, `hyprctl configerrors` 5,
+DRIVERS 15 (`../drivers/`: `install.sh --check` limpio y `compat.py post` sin FAIL).
+PASS = peso completo, WARN = mitad, FAIL = 0. Un grupo con todo SKIP sale del total y la nota se reescala a 100. Estable: nota >= 90, ningún FAIL en TRIM, smartd ni DRIVERS, y cada uno con al menos una comprobación no SKIP.
+`stable-snapshot.sh` además exige `compat.py post` sin FAIL y guarda `drivers-state.json` (`capture.sh --no-repo --state`).

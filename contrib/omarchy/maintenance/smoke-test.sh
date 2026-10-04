@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Read-only, root-less smoke test of the maintenance plan.
 # One line per check: PASS|FAIL|WARN|SKIP <id> <text>; --json for reward.py.
-# Env: SYSFS_ROOT, PROC_ROOT (fake trees for tests), SMARTD_CONF, BOOT_USED_PCT (override).
+# Env: SYSFS_ROOT, PROC_ROOT (fake trees for tests), SMARTD_CONF, BOOT_USED_PCT, DRIVERS_DIR (override).
 # Option: --only ID,ID  runs just those checks.
 set -uo pipefail
 export LC_ALL=C
@@ -9,6 +9,7 @@ export LC_ALL=C
 SYSFS_ROOT=${SYSFS_ROOT:-/sys}
 PROC_ROOT=${PROC_ROOT:-/proc}
 SMARTD_CONF=${SMARTD_CONF:-/etc/smartd.conf}
+DRIVERS_DIR=${DRIVERS_DIR:-$(cd "$(dirname "$0")/../drivers" && pwd)}
 JSON=0
 ONLY=""
 while [ $# -gt 0 ]; do
@@ -139,6 +140,19 @@ if want HYPR01; then
         elif [ -z "$he" ]; then emit PASS HYPR01 "hyprctl configerrors vacio"
         else emit FAIL HYPR01 "hyprctl configerrors: $(printf '%s' "$he" | head -n1)"; fi
     fi
+fi
+
+# --- drivers module (contrib/omarchy/drivers) ---
+if want DRIVERS01; then
+    dchk=$("$DRIVERS_DIR/install.sh" --check 2>&1); drc=$?
+    if [ "$drc" -eq 0 ]; then emit PASS DRIVERS01 "drivers: install.sh --check limpio"
+    else emit FAIL DRIVERS01 "drivers: install.sh --check: $(grep -m1 -E '^(FALTA|DIFIERE)' <<<"$dchk")"; fi
+fi
+if want DRIVERS02; then
+    dout=$(python3 "$DRIVERS_DIR/compat.py" post 2>&1); drc=$?
+    if [ "$drc" -ge 2 ]; then emit FAIL DRIVERS02 "drivers: compat.py post: $(grep -m1 '^FAIL' <<<"$dout")"
+    elif [ "$drc" -eq 1 ]; then emit WARN DRIVERS02 "drivers: compat.py post con avisos: $(grep -m1 '^WARN' <<<"$dout")"
+    else emit PASS DRIVERS02 "drivers: compat.py post sin fallos"; fi
 fi
 
 if [ "$JSON" -eq 1 ]; then

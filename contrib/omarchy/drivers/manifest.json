@@ -1,0 +1,237 @@
+{
+  "version": 1,
+  "groups": {
+    "kernel": {
+      "repo": [
+        "amd-ucode",
+        "linux",
+        "linux-firmware",
+        "linux-firmware-amdgpu",
+        "linux-firmware-atheros",
+        "linux-firmware-broadcom",
+        "linux-firmware-cirrus",
+        "linux-firmware-intel",
+        "linux-firmware-mediatek",
+        "linux-firmware-nvidia",
+        "linux-firmware-other",
+        "linux-firmware-radeon",
+        "linux-firmware-realtek",
+        "linux-firmware-whence",
+        "linux-headers"
+      ],
+      "aur": []
+    },
+    "nvidia": {
+      "repo": [
+        "dkms",
+        "egl-gbm",
+        "egl-wayland",
+        "egl-wayland2",
+        "egl-x11",
+        "lib32-nvidia-utils",
+        "libva-nvidia-driver",
+        "libvdpau",
+        "nvidia-open-dkms",
+        "nvidia-utils",
+        "opencl-nvidia"
+      ],
+      "aur": []
+    },
+    "cuda": {
+      "repo": [
+        "cccl",
+        "cuda",
+        "cudnn",
+        "ollama",
+        "ollama-cuda"
+      ],
+      "aur": []
+    },
+    "amd": {
+      "repo": [
+        "lib32-mesa",
+        "lib32-vulkan-radeon",
+        "mesa",
+        "vulkan-radeon"
+      ],
+      "aur": []
+    },
+    "vulkan": {
+      "repo": [
+        "lib32-vulkan-icd-loader",
+        "libva-utils",
+        "vulkan-icd-loader",
+        "vulkan-tools"
+      ],
+      "aur": []
+    },
+    "peripherals": {
+      "repo": [
+        "bluez",
+        "bluez-utils",
+        "fwupd",
+        "lm_sensors",
+        "nvme-cli",
+        "openrgb",
+        "smartmontools",
+        "solaar",
+        "xpadneo-dkms"
+      ],
+      "aur": []
+    },
+    "gaming": {
+      "repo": [
+        "gamemode",
+        "gamescope",
+        "lib32-gamemode",
+        "lib32-mangohud",
+        "mangohud",
+        "steam"
+      ],
+      "aur": []
+    }
+  },
+  "etc_files": [
+    {
+      "dest": "/etc/conf.d/pacman-contrib",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/conf.d/pacman-contrib"
+    },
+    {
+      "dest": "/etc/limine-entry-tool.d/claude-bluetooth-mt7925.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/limine-entry-tool.d/claude-bluetooth-mt7925.conf"
+    },
+    {
+      "dest": "/etc/limine-entry-tool.d/claude-usb-fast-timeout.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/limine-entry-tool.d/claude-usb-fast-timeout.conf"
+    },
+    {
+      "dest": "/etc/mkinitcpio.conf.d/nvidia.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/mkinitcpio.conf.d/nvidia.conf"
+    },
+    {
+      "dest": "/etc/modprobe.d/blacklist-xpad.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/modprobe.d/blacklist-xpad.conf"
+    },
+    {
+      "dest": "/etc/modprobe.d/nvidia.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/modprobe.d/nvidia.conf"
+    },
+    {
+      "dest": "/etc/modules-load.d/claude-nct6775.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/modules-load.d/claude-nct6775.conf"
+    },
+    {
+      "dest": "/etc/modules-load.d/xpadneo.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/modules-load.d/xpadneo.conf"
+    },
+    {
+      "dest": "/etc/smartd.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/smartd.conf"
+    },
+    {
+      "dest": "/etc/systemd/system/bt-guardian-resume.service",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/systemd/system/bt-guardian-resume.service"
+    },
+    {
+      "dest": "/etc/systemd/system/bt-guardian.service",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/systemd/system/bt-guardian.service"
+    },
+    {
+      "dest": "/etc/systemd/system/bt-guardian.timer",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/systemd/system/bt-guardian.timer"
+    },
+    {
+      "dest": "/etc/systemd/system/ollama.service.d/context.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/systemd/system/ollama.service.d/context.conf"
+    },
+    {
+      "dest": "/usr/local/lib/bt-guardian/bt-guardian.sh",
+      "mode": "755",
+      "owner": "root:root",
+      "src": "etc/_root/usr/local/lib/bt-guardian/bt-guardian.sh"
+    },
+    {
+      "dest": "/usr/local/lib/omarchy/smartd-notify",
+      "mode": "755",
+      "owner": "root:root",
+      "src": "etc/_root/usr/local/lib/omarchy/smartd-notify"
+    }
+  ],
+  "services": {
+    "system": [
+      "bluetooth",
+      "bt-guardian-resume.service",
+      "bt-guardian.timer",
+      "btrfs-scrub@-.timer",
+      "fstrim.timer",
+      "ollama",
+      "paccache.timer",
+      "smartd"
+    ],
+    "user": []
+  },
+  "dkms": [
+    "hid-xpadneo",
+    "nvidia"
+  ],
+  "omarchy_owned": [
+    "/etc/limine-entry-tool.d/omarchy-defaults.conf",
+    "/etc/limine-entry-tool.d/omarchy-uki.conf",
+    "/etc/mkinitcpio.conf.d/omarchy_hooks.conf",
+    "/etc/mkinitcpio.conf.d/omarchy_resume.conf",
+    "/etc/modprobe.d/omarchy-usb-autosuspend.conf",
+    "/usr/share/libalpm/hooks/70-dkms-install.hook",
+    "/usr/share/libalpm/hooks/70-dkms-upgrade.hook",
+    "/usr/share/libalpm/hooks/80-limine-efi-deploy.hook"
+  ],
+  "hook": [
+    {
+      "src": "pacman-hook/90-omarchy-compat.hook",
+      "dest": "/etc/pacman.d/hooks/90-omarchy-compat.hook",
+      "mode": "644"
+    },
+    {
+      "src": "pacman-hook/compat-hook",
+      "dest": "/usr/local/lib/omarchy/compat-hook",
+      "mode": "755"
+    },
+    {
+      "src": "compat.py",
+      "dest": "/usr/local/lib/omarchy/compat.py",
+      "mode": "755"
+    }
+  ],
+  "installers": [
+    {
+      "name": "bt-guardian",
+      "note": "unidades y script ya incluidos en etc_files; el instalador original los gestiona",
+      "path": "~/.claude/skills/omarchy-hardware/scripts/bt-guardian/install.sh"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=Revisa el Bluetooth al arrancar y cada 2 minutos (bt-guardian)
+
+[Timer]
+OnBootSec=20s
+OnUnitActiveSec=2min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
