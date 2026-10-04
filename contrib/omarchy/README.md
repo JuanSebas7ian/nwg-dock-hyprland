@@ -110,6 +110,18 @@ omarchy-hwcheck                            # validación completa
 
 Detalle de cada comprobación: [`hwcheck/README.md`](hwcheck/README.md).
 
+## Extras de la barra
+
+`bar/` agrega a la barra de Omarchy widgets de Spotify (sin abrir la app, vía spotifyd), Google Drive
+(rclone), Ollama, monitor del sistema (CPU, RAM, temperaturas, GPU con NVML) y drivers (salud, actualizaciones,
+BIOS de ASUS), más los colectores de uso de Antigravity y opencode para el panel de agentes.
+
+```bash
+contrib/omarchy/bar/install.sh             # widgets, colectores y servicios de usuario
+```
+
+Detalle y pasos manuales (Spotify): [`bar/README.md`](bar/README.md).
+
 ## Diagnóstico
 
 ```bash

@@ -1,0 +1,24 @@
+[Unit]
+Description=Google Drive (rclone remote "rclone:") mounted at ~/GoogleDrive
+Documentation=man:rclone(1)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+ExecStartPre=/usr/bin/mkdir -p %h/GoogleDrive
+ExecStartPre=/usr/bin/rm -f %t/rclone-gdrive.sock
+# Same options as the manual mount (full VFS cache), plus a private remote-control
+# socket (in $XDG_RUNTIME_DIR, mode 0700) that the bar widget reads for transfers.
+ExecStart=/usr/bin/rclone mount rclone: %h/GoogleDrive \
+  --vfs-cache-mode full \
+  --vfs-cache-max-age 72h \
+  --dir-cache-time 1h --poll-interval 1m \
+  --rc --rc-addr unix://%t/rclone-gdrive.sock --rc-no-auth \
+  --log-level NOTICE
+ExecStop=/usr/bin/fusermount3 -uz %h/GoogleDrive
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

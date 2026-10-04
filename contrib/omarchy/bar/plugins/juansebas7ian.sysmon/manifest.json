@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.sysmon",
+  "name": "System monitor",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "CPU, RAM, temperatures, NVIDIA and Radeon GPU load, memory bandwidth, PCIe traffic and GPU processes, disk and network throughput.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "System monitor",
+    "description": "Left = panel · right = btop. Icon turns red when CPU ≥ 85 °C, GPU ≥ 83 °C or RAM ≥ 90 %.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

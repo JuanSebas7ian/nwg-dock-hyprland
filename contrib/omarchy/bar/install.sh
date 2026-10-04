@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# Instala los extras de la barra de Omarchy: widgets de Spotify, Google Drive,
+# Ollama, monitor del sistema y drivers, más los colectores de uso de
+# Antigravity y opencode para el panel de agentes.
+#
+# Uso, desde la raíz del repositorio:
+#   contrib/omarchy/bar/install.sh            # instala o actualiza (idempotente)
+#   contrib/omarchy/bar/install.sh --host     # además los ajustes de ESTE equipo (WirePlumber, Ollama 32k: pide sudo)
+#   contrib/omarchy/bar/install.sh --remove   # quita todo lo que instala
+#
+# Nunca toca /usr/share/omarchy. Lo que reemplaza queda en
+# ~/.local/state/omarchy-bar-extras/backups/<fecha>/ (no junto a los plugins:
+# la barra cargaría las copias como plugins).
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}
+PLUGINS=$CONFIG/omarchy/plugins
+UNITS=$CONFIG/systemd/user
+BIN=$HOME/.local/bin
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUPS=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-bar-extras/backups/$STAMP
+RCLONE_REMOTE=${RCLONE_REMOTE:-rclone:}
+
+# id del plugin y widget junto al que se coloca en la sección derecha
+WIDGETS=(
+  "juansebas7ian.spotify:omarchy.tray"
+  "juansebas7ian.gdrive:omarchy.dropbox"
+  "juansebas7ian.ollama:omarchy.agents"
+  "juansebas7ian.sysmon:juansebas7ian.ollama"
+  "juansebas7ian.drivers:juansebas7ian.sysmon"
+)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra)
+
+say() { printf '==> %s\n' "$*"; }
+warn() { printf 'AVISO: %s\n' "$*" >&2; }
+fail() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+backup() {
+  [[ -e $1 ]] || return 0
+  mkdir -p "$BACKUPS"
+  cp -a "$1" "$BACKUPS/"
+  say "  respaldo: $BACKUPS/$(basename "$1")"
+}
+
+install_file() {
+  local src=$1 dst=$2 mode=$3
+  if [[ -e $dst ]] && cmp -s "$src" "$dst"; then
+    return 1
+  fi
+  backup "$dst"
+  install -D -m "$mode" "$src" "$dst"
+  say "  instalado: $dst"
+}
+
+install_dir() {
+  local src=$1 dst=$2
+  if [[ -d $dst ]] && diff -rq -x __pycache__ -x .placed "$src" "$dst" >/dev/null 2>&1; then
+    say "  sin cambios: $dst"
+    return
+  fi
+  backup "$dst"
+  mkdir -p "$dst"
+  rsync -a --delete --exclude __pycache__ --exclude .placed "$src/" "$dst/"
+  say "  instalado: $dst"
+}
+
+remote_exists() {
+  local remotes
+  remotes=$(rclone listremotes 2>/dev/null || true)
+  [[ $'\n'$remotes$'\n' == *$'\n'$RCLONE_REMOTE$'\n'* ]]
+}
+
+remove_all() {
+  say "Quitando los extras de la barra"
+  for entry in "${WIDGETS[@]}"; do
+    id=${entry%%:*}
+    omarchy plugin disable "$id" >/dev/null 2>&1 || true
+    if [[ -d $PLUGINS/$id ]]; then
+      backup "$PLUGINS/$id"
+      rm -rf "${PLUGINS:?}/$id"
+      say "  quitado: $id"
+    fi
+  done
+  systemctl --user disable --now omarchy-agent-usage-extra.timer >/dev/null 2>&1 || true
+  for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer; do
+    [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
+  done
+  for c in "${COLLECTORS[@]}"; do
+    [[ -e $BIN/$c ]] && backup "$BIN/$c" && rm -f "$BIN/$c"
+  done
+  rm -f "${XDG_STATE_HOME:-$HOME/.local/state}"/omarchy/agents/usage/{antigravity,opencode}.json
+  systemctl --user daemon-reload
+  say "El montaje de Drive (rclone-gdrive.service) y spotifyd se dejan como están."
+  say "Para quitarlos: systemctl --user disable --now rclone-gdrive.service spotifyd.service"
+  omarchy restart shell >/dev/null 2>&1 || true
+}
+
+HOST=false
+case ${1:-} in
+--remove)
+  remove_all
+  exit 0
+  ;;
+--host) HOST=true ;;
+"") ;;
+*) fail "opción desconocida: $1 (usa --host o --remove)" ;;
+esac
+
+# --------------------------------------------------------------- requisitos
+command -v omarchy >/dev/null || fail "esto es para Omarchy (no encuentro el comando omarchy)"
+for dep in python3 jq rsync; do
+  command -v "$dep" >/dev/null || fail "falta $dep: omarchy pkg add $dep"
+done
+command -v checkupdates >/dev/null || warn "sin checkupdates, el widget de drivers no verá actualizaciones: omarchy pkg add pacman-contrib"
+command -v omarchy-hwcheck >/dev/null || warn "sin omarchy-hwcheck, el widget de drivers no mostrará la salud: contrib/omarchy/hwcheck/install.sh"
+
+# --------------------------------------------------------------- plugins
+say "Widgets de la barra"
+for entry in "${WIDGETS[@]}"; do
+  id=${entry%%:*}
+  omarchy plugin validate "$HERE/plugins/$id" >/dev/null || fail "manifiesto inválido: $id"
+  install_dir "$HERE/plugins/$id" "$PLUGINS/$id"
+done
+
+# --------------------------------------------------------------- colectores
+say "Colectores de uso (Antigravity, opencode)"
+for c in "${COLLECTORS[@]}"; do
+  install_file "$HERE/bin/$c" "$BIN/$c" 755 || say "  sin cambios: $BIN/$c"
+done
+for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer; do
+  install_file "$HERE/systemd/$unit" "$UNITS/$unit" 644 || say "  sin cambios: $UNITS/$unit"
+done
+
+# --------------------------------------------------------------- Google Drive
+if command -v rclone >/dev/null && remote_exists; then
+  say "Google Drive: montaje de $RCLONE_REMOTE en ~/GoogleDrive"
+  install_file "$HERE/systemd/rclone-gdrive.service" "$UNITS/rclone-gdrive.service" 644 ||
+    say "  sin cambios: $UNITS/rclone-gdrive.service"
+else
+  warn "sin el remoto rclone '$RCLONE_REMOTE': configúralo con 'rclone config' y vuelve a ejecutar (o RCLONE_REMOTE=nombre: $0)"
+fi
+
+# --------------------------------------------------------------- Spotify
+if command -v spotifyd >/dev/null; then
+  say "Spotify: configuración de spotifyd"
+  tmp=$(mktemp)
+  sed "s|@HOME@|$HOME|" "$HERE/config/spotifyd/spotifyd.conf" >"$tmp"
+  install_file "$tmp" "$CONFIG/spotifyd/spotifyd.conf" 644 || say "  sin cambios: $CONFIG/spotifyd/spotifyd.conf"
+  rm -f "$tmp"
+  mkdir -p "$HOME/.cache/spotifyd"
+else
+  warn "sin spotifyd: el panel de Spotify solo controlará otros dispositivos. Instálalo con: omarchy pkg add spotifyd"
+fi
+
+# --------------------------------------------------------------- opencode + Ollama
+oc=$CONFIG/opencode/opencode.json
+if command -v ollama >/dev/null && [[ -f $oc ]]; then
+  if [[ $(jq -r '.provider.ollama // empty | type' "$oc") != object ]]; then
+    say "opencode: proveedor de Ollama con los modelos instalados"
+    backup "$oc"
+    models=$(ollama list 2>/dev/null | awk 'NR > 1 && $1 !~ /embed/ {print $1}' |
+      jq -R . | jq -s 'map({key: ., value: {name: (. + " (local)")}}) | from_entries')
+    jq --argjson m "${models:-{\}}" '.provider.ollama = {npm: "@ai-sdk/openai-compatible", name: "Ollama (local)",
+      options: {baseURL: "http://127.0.0.1:11434/v1"}, models: $m}' "$oc" >"$oc.tmp" && mv "$oc.tmp" "$oc"
+  fi
+fi
+
+# --------------------------------------------------------------- ajustes del equipo
+if $HOST; then
+  say "Ajustes de este equipo"
+  if lsusb -d 1d6c:0103 >/dev/null 2>&1; then
+    install_file "$HERE/host/51-disable-nexigo-webcam-mic.conf" \
+      "$CONFIG/wireplumber/wireplumber.conf.d/51-disable-nexigo-webcam-mic.conf" 644 &&
+      systemctl --user restart wireplumber || true
+  fi
+  if command -v ollama >/dev/null; then
+    dropin=/etc/systemd/system/ollama.service.d/context.conf
+    if ! cmp -s "$HERE/host/ollama-context.conf" "$dropin" 2>/dev/null; then
+      say "  Ollama a 32k de contexto (sudo)"
+      sudo install -D -m 644 "$HERE/host/ollama-context.conf" "$dropin"
+      sudo systemctl daemon-reload
+      sudo systemctl restart ollama
+    fi
+  fi
+fi
+
+# --------------------------------------------------------------- activar
+systemctl --user daemon-reload
+systemctl --user enable --now omarchy-agent-usage-extra.timer >/dev/null
+if [[ -e $UNITS/rclone-gdrive.service ]]; then
+  systemctl --user enable --now rclone-gdrive.service >/dev/null || warn "el montaje de Drive no arrancó: journalctl --user -u rclone-gdrive"
+fi
+if command -v spotifyd >/dev/null && compgen -G "$HOME/.cache/spotifyd/oauth/*" >/dev/null; then
+  systemctl --user enable --now spotifyd.service >/dev/null || true
+fi
+
+say "Colocando los widgets en la barra"
+omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+for entry in "${WIDGETS[@]}"; do
+  id=${entry%%:*}
+  after=${entry#*:}
+  omarchy plugin enable "$id" >/dev/null
+  # Solo se coloca la primera vez: si el usuario lo movió, se respeta.
+  if [[ ! -e $PLUGINS/$id/.placed ]]; then
+    omarchy bar move "$id" --section right --after "$after" >/dev/null 2>&1 ||
+      omarchy bar move "$id" --section right >/dev/null 2>&1 || true
+    touch "$PLUGINS/$id/.placed"
+  fi
+done
+omarchy restart shell >/dev/null 2>&1 || true
+
+cat <<EOF
+
+Listo. Pasos que solo puedes hacer tú (una vez):
+  - Spotify en este PC sin abrir la app (Premium): spotifyd authenticate && systemctl --user enable --now spotifyd
+  - Panel de Spotify (cola, listas): crea una app en https://developer.spotify.com/dashboard con
+    Redirect URI http://127.0.0.1:8898/callback y API "Web API"; guarda su Client ID con
+      mkdir -p ~/.config/spotify-bar && echo <CLIENT_ID> > ~/.config/spotify-bar/client_id
+    y pulsa "Connect Spotify" en el panel.
+Respaldos de lo reemplazado: ${BACKUPS}
+EOF

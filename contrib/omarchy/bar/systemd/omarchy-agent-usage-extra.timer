@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh Antigravity and opencode usage for the Omarchy agents panel
+
+[Timer]
+OnStartupSec=20s
+OnUnitActiveSec=2min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target

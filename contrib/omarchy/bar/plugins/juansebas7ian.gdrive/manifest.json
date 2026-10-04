@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.gdrive",
+  "name": "Google Drive",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "Google Drive through the rclone mount at ~/GoogleDrive: mount switch, uploads in flight and queued, quota, recent files.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Google Drive",
+    "description": "Left = panel · right = open ~/GoogleDrive. ↑N = files waiting to upload; red = upload errors.",
+    "category": "Files",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

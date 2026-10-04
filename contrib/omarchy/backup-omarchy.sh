@@ -23,6 +23,11 @@ PATHS=(
   .local/share/applications
   .local/bin/nwg-dock-hyprland-dnd
   .cache/nwg-dock-pinned
+  # audio, opencode, colectores de la barra y validador de drivers
+  .config/wireplumber .config/opencode/opencode.json .config/opencode/tui.json
+  .local/bin/omarchy-agent-usage-antigravity .local/bin/omarchy-agent-usage-opencode
+  .local/bin/omarchy-agent-usage-extra .local/bin/omarchy-hwcheck
+  .local/state/omarchy-hwcheck
   .bashrc .bash_profile .profile
   # contexto, skill y agente de Claude para este equipo
   .claude/CLAUDE.md .claude/omarchy.md .claude/skills/omarchy-hardware .claude/agents

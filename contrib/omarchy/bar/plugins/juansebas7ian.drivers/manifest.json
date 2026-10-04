@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.drivers",
+  "name": "Drivers",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "Motherboard and driver health (omarchy-hwcheck), pending driver updates, and BIOS updates from ASUS.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Drivers",
+    "description": "Left = panel · right = check again. The number is pending driver + BIOS updates; red means a driver check failed.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

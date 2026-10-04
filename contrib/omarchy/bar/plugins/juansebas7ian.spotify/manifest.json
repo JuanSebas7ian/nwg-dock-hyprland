@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.spotify",
+  "name": "Spotify",
+  "version": "2.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "Spotify without the Spotify window: now playing, controls, devices (spotifyd), queue, recent, top tracks and playlists.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Spotify",
+    "description": "Left = panel · middle = play/pause · right = next · scroll = previous/next.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

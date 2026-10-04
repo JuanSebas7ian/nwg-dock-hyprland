@@ -1,0 +1,7 @@
+[Unit]
+Description=Antigravity and opencode usage records for the Omarchy agents panel
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omarchy-agent-usage-extra
+Nice=10
