@@ -32,6 +32,11 @@ def level(results, rid):
     return [l for l, i, _ in results if i == rid]
 
 
+class ElfDirs(unittest.TestCase):
+    def test_lib32_scanned(self):
+        self.assertIn("/usr/lib32/", compat.ELF_DIRS)
+
+
 class VersionHelpers(unittest.TestCase):
     def test_helpers(self):
         self.assertEqual(compat.upstream("1:26.2.2-1"), "1:26.2.2")
@@ -93,6 +98,8 @@ class KernelRules(unittest.TestCase):
         self.assertEqual(level(compat.rule_c09(ctx(up, boot=150)), "C09"), [compat.FAIL])
         self.assertEqual(level(compat.rule_c09(ctx({"linux-firmware-nvidia": "2-1"}, boot=150)), "C09"), [compat.FAIL])
         self.assertEqual(level(compat.rule_c09(ctx({"vim": "9-1"}, boot=10)), "C09"), [compat.OK])
+        for pkg in ("nvidia-open-dkms", "nvidia-utils", "mkinitcpio", "limine", "limine-snapper-sync", "amd-ucode"):
+            self.assertEqual(level(compat.rule_c09(ctx({pkg: "99-1"}, boot=150)), "C09"), [compat.FAIL], pkg)
 
     def test_c10(self):
         self.assertEqual(level(compat.rule_c10(ctx()), "C10"), [compat.OK])
@@ -101,8 +108,9 @@ class KernelRules(unittest.TestCase):
 
     def test_c11(self):
         self.assertEqual(level(compat.rule_c11(ctx({"vim": "9-1"})), "C11"), [compat.OK])
-        for pkg in ("hyprland", "quickshell", "omarchy"):
+        for pkg in ("hyprland", "quickshell", "omarchy", "omarchy-shell"):
             self.assertEqual(level(compat.rule_c11(ctx({pkg: "99-1"})), "C11"), [compat.WARN], pkg)
+        self.assertEqual(level(compat.rule_c11(ctx({"omarchy-nvim": "99-1"})), "C11"), [compat.OK])  # not a core package
 
 
 class CudaRules(unittest.TestCase):
@@ -129,6 +137,7 @@ class PostRules(unittest.TestCase):
         self.tmp.cleanup()
 
     def good(self):
+        put(os.path.join(self.t, "driver/nvidia/params"), "PreserveVideoMemoryAllocations: 1\nUseKernelSuspendNotifiers: 1\nOther: 0\n")
         put(os.path.join(self.t, "driver/nvidia/version"),
             "NVRM version: NVIDIA UNIX Open Kernel Module for x86_64  610.57.04  Release Build  (root@x)\nGCC version: gcc\n")
         c = compat.Ctx({"nvidia-utils": "610.57.04-1", "ollama": "0.33.3-1"})
@@ -162,7 +171,7 @@ class PostRules(unittest.TestCase):
     def test_all_good(self):
         lv = self.levels(self.good())
         self.assertTrue(all(v == compat.OK for v in lv.values()), lv)
-        self.assertEqual(sorted(lv), ["C13a", "C13b", "C13c", "C13d", "C13e", "C13f", "C13g", "C13h", "C13i"])
+        self.assertEqual(sorted(lv), ["C13a", "C13b", "C13c", "C13d", "C13e", "C13f", "C13g", "C13h", "C13i", "C13j"])
 
     def test_c13a_driver_mismatch_and_not_loaded(self):
         c = self.good()
@@ -196,6 +205,27 @@ class PostRules(unittest.TestCase):
 
     def test_c13f_vaapi(self):
         self.assertEqual(self.levels(self.broken("vainfo", 0, "vainfo: Mesa Gallium\nVAProfileH264Main\n"))["C13f"], compat.FAIL)
+
+    def test_c13j_sleep_params(self):
+        c = self.good()
+        put(os.path.join(self.t, "driver/nvidia/params"), "PreserveVideoMemoryAllocations: 0\nUseKernelSuspendNotifiers: 1\n")
+        self.assertEqual(self.levels(c)["C13j"], compat.FAIL)
+        os.remove(os.path.join(self.t, "driver/nvidia/params"))
+        self.assertEqual(self.levels(c)["C13j"], compat.FAIL)
+
+    def test_c13f_sets_libva_driver(self):
+        c = self.good()
+        seen = {}
+        base = c.run
+
+        def spy(cmd, timeout=15, env=None):
+            if cmd[0] == "vainfo":
+                seen.update(env or {})
+            return base(cmd, timeout)
+        c.run = spy
+        os.environ.pop("LIBVA_DRIVER_NAME", None)
+        compat.rule_c13(c)
+        self.assertEqual(seen.get("LIBVA_DRIVER_NAME"), "nvidia")
 
     def test_c13g_ollama(self):
         c = self.good()
@@ -299,7 +329,15 @@ class Cli(Sandbox):
         self.assertIn("FAIL C02", p.stdout)
         self.stub("checkupdates", "exit 1")
         p = self.sh([sys.executable, os.path.join(DRV, "compat.py"), "preflight"], STUB_INSTALLED=self.inst)
-        self.assertEqual(p.returncode, 2)
+        self.assertEqual(p.returncode, 3)  # offline / mirror down: cannot evaluate, not a FAIL
+        self.assertIn("WARN C00", p.stdout)
+        self.assertNotIn("FAIL", p.stdout)
+
+    def test_from_file_without_argument(self):
+        p = self.sh([sys.executable, os.path.join(DRV, "compat.py"), "preflight", "--from-file"], STUB_INSTALLED=self.inst)
+        self.assertEqual(p.returncode, 3)
+        self.assertIn("uso:", p.stderr)
+        self.assertNotIn("Traceback", p.stderr)
 
     def test_bad_usage(self):
         self.assertEqual(self.sh([sys.executable, os.path.join(DRV, "compat.py")]).returncode, 3)

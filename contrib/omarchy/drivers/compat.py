@@ -5,7 +5,7 @@
   compat.py post [--json]                         does everything work right now?
   compat.py hook                                  pacman PreTransaction hook: targets on stdin, never fails
 
-Output: "LEVEL ID text" per rule (OK, WARN, FAIL, SKIP). Exit 0 all OK, 1 warnings, 2 something would break.
+Output: "LEVEL ID text" per rule (OK, WARN, FAIL, SKIP). Exit 0 all OK, 1 warnings, 2 something would break, 3 could not evaluate (checkupdates failed, bad usage).
 Env: BOOT_PATH, ROOT_PATH, PROC_ROOT, STABLE_DIR (fakes for tests).
 """
 import ctypes
@@ -21,11 +21,12 @@ import urllib.request
 OK, WARN, FAIL, SKIP = "OK", "WARN", "FAIL", "SKIP"
 # Minimum NVIDIA driver (major branch) per CUDA major.
 CUDA_MIN_DRIVER = {12: 525, 13: 580}
-KERNEL_TRIGGERS = ("linux", "amd-ucode")
-SESSION_PKGS = ("hyprland", "quickshell")
+# Packages whose update rebuilds the UKI / writes to /boot.
+KERNEL_TRIGGERS = ("linux", "amd-ucode", "nvidia-open-dkms", "nvidia-utils", "mkinitcpio")
+SESSION_PKGS = ("hyprland", "quickshell", "omarchy-shell", "omarchy")
 BOOT_MIN_MB = 200
 ROOT_MIN_GB = 5
-ELF_DIRS = ("/usr/bin/", "/usr/lib/", "/opt/")  # where C12 looks for binaries of AUR packages
+ELF_DIRS = ("/usr/bin/", "/usr/lib/", "/usr/lib32/", "/opt/")  # where C12 looks for binaries of AUR packages
 
 FAMILIES = [  # id, level, members
     ("C01", FAIL, ["nvidia-utils", "lib32-nvidia-utils", "opencl-nvidia", "nvidia-open-dkms"]),
@@ -152,7 +153,7 @@ def rule_c06(ctx):
 
 
 def _kernelish(n):
-    return n in KERNEL_TRIGGERS or n.startswith("linux-firmware")
+    return n in KERNEL_TRIGGERS or n.startswith(("linux-firmware", "limine"))
 
 
 def rule_c09(ctx):
@@ -177,8 +178,7 @@ def rule_c10(ctx):
 
 
 def rule_c11(ctx):
-    hit = sorted(n for n in ctx.pending if ctx.changed(n) and
-                 (n in SESSION_PKGS or n == "omarchy" or n.startswith("omarchy-")))
+    hit = sorted(n for n in ctx.pending if ctx.changed(n) and n in SESSION_PKGS)
     if not hit:
         return [(OK, "C11", "ni Hyprland, Quickshell ni Omarchy cambian")]
     return [(WARN, "C11", "cambian %s: reinicia la sesión y ejecuta `omarchy restart shell` (plugins propios de la barra)"
@@ -274,7 +274,7 @@ def rule_c13(ctx):
         out.append((OK, "C13e", "vulkaninfo lista NVIDIA y RADV"))
     else:
         out.append((FAIL, "C13e", "vulkaninfo no lista NVIDIA y RADV (rc=%d)" % rc))
-    rc, o = ctx.run(["vainfo"], timeout=20)
+    rc, o = ctx.run(["vainfo"], timeout=20, env={"LIBVA_DRIVER_NAME": os.environ.get("LIBVA_DRIVER_NAME") or "nvidia"})
     low = o.lower()
     out.append((OK, "C13f", "vainfo con NVDEC") if "nvdec" in low or ("nvidia" in low and "vaprofile" in low)
                else (FAIL, "C13f", "vainfo sin NVDEC (rc=%d)" % rc))
@@ -287,6 +287,16 @@ def rule_c13(ctx):
                    else (FAIL, "C13h", "hyprctl configerrors: %s" % (o.strip().splitlines() or ["rc=%d" % rc])[0]))
     else:
         out.append((SKIP, "C13h", "sin sesión de Hyprland"))
+    try:
+        with open(os.path.join(ctx.proc_root, "driver/nvidia/params")) as f:
+            params = f.read()
+    except OSError:
+        params = ""
+    want = {"PreserveVideoMemoryAllocations": "1", "UseKernelSuspendNotifiers": "1"}
+    got = dict(re.findall(r"^(\w+):\s*(\S+)", params, re.M))
+    badp = ["%s=%s" % (k, got.get(k, "?")) for k, v in want.items() if got.get(k) != v]
+    out.append((OK, "C13j", "parámetros NVIDIA de suspensión correctos (Preserve=1, Notifiers=1)") if not badp
+               else (FAIL, "C13j", "parámetros NVIDIA de suspensión incorrectos: %s" % ", ".join(badp)))
     failed = []
     for cmd in (["systemctl", "--failed", "--no-legend", "--plain"], ["systemctl", "--user", "--failed", "--no-legend", "--plain"]):
         rc, o = ctx.run(cmd)
@@ -379,12 +389,17 @@ def report(res, as_json):
 
 def cmd_preflight(args):
     if "--from-file" in args:
-        text = open(args[args.index("--from-file") + 1]).read()
+        i = args.index("--from-file")
+        if i + 1 >= len(args) or args[i + 1].startswith("--"):
+            print("uso: compat.py preflight [--from-file FICHERO] [--json]", file=sys.stderr)
+            return 3
+        with open(args[i + 1]) as f:
+            text = f.read()
     else:
         rc, text = run(["checkupdates"], timeout=120)
         if rc not in (0, 2):
-            print("FAIL C00 checkupdates falló (rc=%d)" % rc)
-            return 2
+            print("WARN C00 checkupdates falló (rc=%d; ¿sin red o espejo caído?): no se pudo evaluar" % rc)
+            return 3
     ctx = Ctx(read_installed(), parse_updates(text))
     fill_space(ctx)
     if not ctx.pending:
@@ -411,15 +426,21 @@ def cmd_hook(_args):
             return 0
         inst = read_installed()
         rc, out = run(["pacman", "-Si"] + names, timeout=3)
-        pend, cur = {}, None
+        pend, cur, seen = {}, None, set()
         for line in out.splitlines():
             m = re.match(r"(Name|Version)\s*:\s*(\S+)", line)
             if m and m.group(1) == "Name":
                 cur = m.group(2)
+                if cur in seen:  # same name in several repos: the first block wins (pacman's choice)
+                    cur = None
+                seen.add(m.group(2))
             elif m and cur:
                 if inst.get(cur) != m.group(2):
                     pend[cur] = m.group(2)
                 cur = None
+        if not seen:
+            print("[omarchy-compat] no se pudo evaluar (pacman -Si sin datos; solo informativo)")
+            return 0
         ctx = Ctx(inst, pend)
         fill_space(ctx)
         res = [r for r in evaluate(ctx, [r for r in PREFLIGHT_RULES if r is not rule_c10]) if r[0] in (WARN, FAIL)]

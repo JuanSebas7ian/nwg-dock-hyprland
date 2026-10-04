@@ -5,6 +5,7 @@
 #   --dry-run    no root; print what a real run would do (exit 0)
 #   --hook-only  only the pacman hook (/etc/pacman.d/hooks + /usr/local/lib/omarchy)
 #   --groups     restrict the package step to some manifest groups (etc/services/DKMS are skipped)
+#   --allow-pending  go on even if checkupdates shows pending updates (a real run stops otherwise: no partial upgrades)
 #   --wait       ask for Enter before closing (visible terminal)
 # A real run needs sudo: snapshot pre, packages, etc files (backup .bak.<date> only if they differ), DKMS,
 # limine-update / mkinitcpio only if their inputs changed, services, snapshot post, compat.py post.
@@ -20,9 +21,9 @@ STATE=${OMARCHY_DRIVERS_STATE:-$HOME/.local/state/omarchy-drivers}
 KERNEL=${KERNEL_RELEASE:-$(uname -r)}
 COMPAT_CMD=${COMPAT_CMD:-python3 $HERE/compat.py post}
 DATE=$(date +%Y%m%d-%H%M%S)
-MODE=real; WAIT=0; GROUPS_SEL=""; HOOK_ONLY=0
+MODE=real; WAIT=0; ALLOW_PENDING=0; GROUPS_SEL=""; HOOK_ONLY=0
 
-usage() { echo "uso: $0 [--check|--dry-run|--hook-only] [--groups g1,g2] [--wait]" >&2; exit 3; }
+usage() { echo "uso: $0 [--check|--dry-run|--hook-only] [--groups g1,g2] [--allow-pending] [--wait]" >&2; exit 3; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --check) MODE=check ;;
@@ -30,6 +31,7 @@ while [ $# -gt 0 ]; do
         --hook-only) HOOK_ONLY=1 ;;
         --groups) [ $# -ge 2 ] || usage; GROUPS_SEL=$2; shift ;;
         --wait) WAIT=1 ;;
+        --allow-pending) ALLOW_PENDING=1 ;;
         -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
         *) usage ;;
     esac
@@ -55,7 +57,7 @@ for g in sorted(m["groups"]):
             print("PKG", g, kind, p, sep="\t")
 if not sel:
     for e in m["etc_files"]:
-        print("ETC", e["dest"], e["src"], e.get("mode", "644"), sep="\t")
+        print("ETC", e["dest"], e["src"], e.get("mode", "644"), e.get("policy", "own"), sep="\t")
     for k in ("system", "user"):
         for u in m["services"].get(k, []):
             print("SVC", k, u, sep="\t")
@@ -71,9 +73,10 @@ PY
 MISS_REPO=(); MISS_AUR=(); DIFF_ETC=(); BAD_SVC=(); BAD_DKMS=(); MISS_OWNED=(); DIFF_HOOK=()
 declare -A GRP_REPO GRP_AUR
 
-file_state() { # dest src mode -> prints "ok" or reason
-    local d=$ROOT$1 s=$2 mode=$3
+file_state() { # dest src mode [policy] -> prints "ok" or reason. Policy if-missing: Omarchy owns the file; never compared
+    local d=$ROOT$1 s=$2 mode=$3 policy=${4:-own}
     [ -e "$d" ] || { echo missing; return; }
+    [ "$policy" = if-missing ] && { echo ok; return; }
     cmp -s "$s" "$d" || { echo differs; return; }
     [ "$(stat -c %a "$d")" = "$mode" ] || { echo mode; return; }
     echo ok
@@ -88,7 +91,7 @@ collect() {
                  pacman -Q "$c" >/dev/null 2>&1 && continue
                  if [ "$b" = aur ]; then MISS_AUR+=("$c"); GRP_AUR[$a]+="$c "; else MISS_REPO+=("$c"); GRP_REPO[$a]+="$c "; fi ;;
             ETC) [ "$HOOK_ONLY" -eq 1 ] && continue
-                 st=$(file_state "$a" "$MAN_DIR/$b" "$c"); [ "$st" = ok ] || DIFF_ETC+=("$a|$b|$c|$st") ;;
+                 st=$(file_state "$a" "$MAN_DIR/$b" "$c" "$d"); [ "$st" = ok ] || DIFF_ETC+=("$a|$b|$c|$st") ;;
             SVC) [ "$HOOK_ONLY" -eq 1 ] && continue
                  if [ "$a" = user ]; then st=$(systemctl --user is-enabled "$b" 2>/dev/null); else st=$(systemctl is-enabled "$b" 2>/dev/null); fi
                  [ "$st" = enabled ] || BAD_SVC+=("$a|$b") ;;
@@ -141,7 +144,7 @@ install_file() { # dest src mode ; returns 0 and sets CHANGED_<kind> flags
 
 apply() {
     local fails=0 x g pk d s m st k u aurh="" rc
-    local c_limine=0 c_initcpio=0 c_systemd=0
+    local c_limine=0 c_rebuild=0 c_systemd=0 grp_fail=0 preset
     if [ "$MODE" != dry ]; then
         say ">>> Escribe tu contraseña de sudo. <<<"
         sudo -v || return 1
@@ -152,23 +155,27 @@ apply() {
     for g in $(printf '%s\n' "${!GRP_REPO[@]}" | sort); do
         say "== paquetes del grupo $g =="
         # shellcheck disable=SC2086
-        rt pacman -S --needed --noconfirm ${GRP_REPO[$g]} || fails=$((fails + 1))
+        rt pacman -S --needed --noconfirm ${GRP_REPO[$g]} || { fails=$((fails + 1)); grp_fail=1; }
     done
     if [ "${#MISS_AUR[@]}" -gt 0 ]; then
         say "== paquetes de AUR =="
         if command -v omarchy >/dev/null 2>&1 && [[ "$(omarchy pkg 2>&1)" == *"aur add"* ]]; then aurh="omarchy pkg aur add"
         elif command -v yay >/dev/null 2>&1; then aurh="yay -S --needed --noconfirm"
         elif command -v paru >/dev/null 2>&1; then aurh="paru -S --needed --noconfirm"; fi
-        if [ -z "$aurh" ]; then say "sin ayudante de AUR (omarchy pkg aur / yay / paru): ${MISS_AUR[*]}"; fails=$((fails + 1))
+        if [ -z "$aurh" ]; then say "sin ayudante de AUR (omarchy pkg aur / yay / paru): ${MISS_AUR[*]}"; fails=$((fails + 1)); grp_fail=1
         elif [ "$MODE" = dry ]; then say "    [dry] $aurh ${MISS_AUR[*]}"
-        else $aurh "${MISS_AUR[@]}" || fails=$((fails + 1)); fi
+        else $aurh "${MISS_AUR[@]}" || { fails=$((fails + 1)); grp_fail=1; }; fi
+    fi
+    if [ "$grp_fail" -eq 1 ]; then
+        say "OMITIDO: falló la instalación de paquetes; no se tocan los /etc, DKMS, initramfs ni servicios que dependen de ellos"
     fi
     for x in "${DIFF_ETC[@]}"; do
+        [ "$grp_fail" -eq 1 ] && break
         IFS='|' read -r d s m st <<<"$x"
         install_file "$d" "$MAN_DIR/$s" "$m" || { fails=$((fails + 1)); continue; }
         case "$d" in
             /etc/limine-entry-tool.d/*) c_limine=1 ;;
-            /etc/mkinitcpio.conf.d/*|/etc/modprobe.d/*) c_initcpio=1 ;;
+            /etc/mkinitcpio.conf.d/*|/etc/modprobe.d/*) c_rebuild=1 ;;
             /etc/systemd/*|/usr/local/lib/bt-guardian/*) c_systemd=1 ;;
         esac
     done
@@ -176,10 +183,16 @@ apply() {
         IFS='|' read -r d s m st <<<"$x"; install_file "$d" "$MAN_DIR/$s" "$m" || fails=$((fails + 1))
     done
     [ "$c_systemd" -eq 1 ] && { rt systemctl daemon-reload || fails=$((fails + 1)); }
-    if [ "${#BAD_DKMS[@]}" -gt 0 ]; then rt dkms autoinstall -k "$KERNEL" || fails=$((fails + 1)); fi
-    [ "$c_limine" -eq 1 ] && { rt limine-update || fails=$((fails + 1)); }
-    [ "$c_initcpio" -eq 1 ] && { rt mkinitcpio -P || fails=$((fails + 1)); }
+    if [ "${#BAD_DKMS[@]}" -gt 0 ] && [ "$grp_fail" -eq 0 ]; then rt dkms autoinstall -k "$KERNEL" || fails=$((fails + 1)); fi
+    # One rebuild only: limine-update regenerates the UKI (Omarchy has no mkinitcpio presets); mkinitcpio -P is the fallback
+    if [ "$c_limine" -eq 1 ] || [ "$c_rebuild" -eq 1 ]; then
+        preset=$(compgen -G "$ROOT/etc/mkinitcpio.d/*.preset")
+        if command -v limine-update >/dev/null 2>&1; then rt limine-update || fails=$((fails + 1))
+        elif [ -n "$preset" ]; then rt mkinitcpio -P || fails=$((fails + 1))
+        else say "no hay limine-update ni presets de mkinitcpio: reconstruye el initramfs a mano"; fails=$((fails + 1)); fi
+    fi
     for x in "${BAD_SVC[@]}"; do
+        [ "$grp_fail" -eq 1 ] && break
         IFS='|' read -r k u <<<"$x"
         if [ "$k" = user ]; then [ "$MODE" = dry ] && say "    [dry] systemctl --user enable --now $u" || systemctl --user enable --now "$u" || fails=$((fails + 1))
         elif [[ "$u" == *-resume.service ]]; then rt systemctl enable "$u" || fails=$((fails + 1))
@@ -196,10 +209,23 @@ apply() {
     return $((fails > 0 ? 1 : 0))
 }
 
+# Packages are installed with plain -S: refuse on a system with pending updates (partial upgrade) unless allowed.
+pending_guard() {
+    local out
+    [ "$MODE" = check ] && return 0
+    [ "$ALLOW_PENDING" -eq 1 ] || [ "$HOOK_ONLY" -eq 1 ] || [ $(( ${#MISS_REPO[@]} + ${#MISS_AUR[@]} )) -eq 0 ] && return 0
+    out=$(checkupdates 2>/dev/null); [ $? -eq 0 ] || return 0   # rc 2 = nothing pending; other failures: cannot tell, go on
+    say "AVISO: hay actualizaciones pendientes (ejecuta 'omarchy update' primero, o usa --allow-pending):"
+    printf '%s\n' "$out" | head -n 5 | sed 's/^/    /'
+    [ "$MODE" = dry ] && return 0
+    return 1
+}
+
 main() {
     local n
     collect
     n=$(problems)
+    pending_guard || { say "me detengo: sistema no sincronizado"; return 1; }
     case "$MODE" in
         check)
             report

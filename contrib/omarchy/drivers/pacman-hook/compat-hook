@@ -1,4 +1,4 @@
 #!/bin/sh
 # pacman PreTransaction hook: targets on stdin. Warns only; always exits 0, max 5 s.
-/usr/bin/timeout 5 /usr/bin/python3 /usr/local/lib/omarchy/compat.py hook 2>/dev/null
+/usr/bin/timeout -k 1 5 /usr/bin/python3 /usr/local/lib/omarchy/compat.py hook 2>/dev/null
 exit 0

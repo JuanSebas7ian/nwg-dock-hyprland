@@ -10,6 +10,7 @@ SYSFS_ROOT=${SYSFS_ROOT:-/sys}
 PROC_ROOT=${PROC_ROOT:-/proc}
 SMARTD_CONF=${SMARTD_CONF:-/etc/smartd.conf}
 DRIVERS_DIR=${DRIVERS_DIR:-$(cd "$(dirname "$0")/../drivers" && pwd)}
+HOOK_ETC=${HOOK_ETC:-/etc/pacman.d/hooks}; HOOK_LIB=${HOOK_LIB:-/usr/local/lib/omarchy}
 JSON=0
 ONLY=""
 while [ $# -gt 0 ]; do
@@ -153,6 +154,15 @@ if want DRIVERS02; then
     if [ "$drc" -ge 2 ]; then emit FAIL DRIVERS02 "drivers: compat.py post: $(grep -m1 '^FAIL' <<<"$dout")"
     elif [ "$drc" -eq 1 ]; then emit WARN DRIVERS02 "drivers: compat.py post con avisos: $(grep -m1 '^WARN' <<<"$dout")"
     else emit PASS DRIVERS02 "drivers: compat.py post sin fallos"; fi
+fi
+
+if want HOOK01; then  # not part of the reward: informational only
+    bad=""
+    [ -f "$HOOK_ETC/90-omarchy-compat.hook" ] && cmp -s "$DRIVERS_DIR/pacman-hook/90-omarchy-compat.hook" "$HOOK_ETC/90-omarchy-compat.hook" || bad="$bad hook"
+    [ -x "$HOOK_LIB/compat-hook" ] && cmp -s "$DRIVERS_DIR/pacman-hook/compat-hook" "$HOOK_LIB/compat-hook" || bad="$bad compat-hook"
+    [ -x "$HOOK_LIB/compat.py" ] && cmp -s "$DRIVERS_DIR/compat.py" "$HOOK_LIB/compat.py" || bad="$bad compat.py"
+    if [ -z "$bad" ]; then emit PASS HOOK01 "drivers: gancho de pacman instalado y al día"
+    else emit WARN HOOK01 "drivers: gancho de pacman ausente o desactualizado:$bad"; fi
 fi
 
 if [ "$JSON" -eq 1 ]; then

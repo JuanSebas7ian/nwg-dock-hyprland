@@ -33,15 +33,16 @@ class HookFile(unittest.TestCase):
         self.assertIn("NeedsTargets", act)
         self.assertNotIn("AbortOnFail", text)  # must never abort a transaction
         self.assertEqual(act["Exec"], "/usr/local/lib/omarchy/compat-hook")
-        for op in ("Install", "Upgrade", "Remove"):
+        for op in ("Install", "Upgrade"):
             self.assertIn("Operation = " + op, text)
+        self.assertNotIn("Operation = Remove", text)  # names only: a removal cannot be told from an upgrade
         self.assertIn("Target = *", text)
         self.assertIn("Type = Package", text)
 
     def test_wrapper_always_exits_zero(self):
         t = read(WRAPPER)
         self.assertTrue(t.rstrip().endswith("exit 0"))
-        self.assertIn("timeout 5", t)
+        self.assertIn("timeout -k 1 5", t)
 
 
 class HookRun(Sandbox):
@@ -80,6 +81,21 @@ class HookRun(Sandbox):
         self.stub("pacman", "exit 1")
         self.assertEqual(self.hook("linux\n").returncode, 0)
         self.stub("pacman", 'echo boom >&2; kill -9 $$')
+        self.assertEqual(self.hook("linux\n").returncode, 0)
+
+    def test_first_repo_block_wins(self):
+        self.stub("pacman", 'case "$1" in -Q) printf "%s" "$STUB_INSTALLED";; -Si) '
+                  'printf "Name : vulkan-tools\\nVersion : 1.4-1\\n\\nName : vulkan-tools\\nVersion : 9.9-1\\n\\n";; esac')
+        p = self.hook("vulkan-tools\n")
+        self.assertIn("0 avisos", p.stdout)  # the 9.9 block of the second repo is ignored
+
+    def test_unevaluable_says_so(self):
+        self.stub("pacman", 'case "$1" in -Q) printf "%s" "$STUB_INSTALLED";; *) exit 1;; esac')
+        p = self.hook("linux\n")
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("no se pudo evaluar", p.stdout)
+        self.assertNotIn("0 avisos", p.stdout)
+        self.stub("pacman", "exec sleep 30")
         self.assertEqual(self.hook("linux\n").returncode, 0)
 
     def test_python_missing_or_broken_compat_py_still_zero(self):

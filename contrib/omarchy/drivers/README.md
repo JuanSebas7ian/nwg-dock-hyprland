@@ -18,7 +18,16 @@ python3 compat.py post             # ¿funciona todo ahora? (driver, DKMS, nvidi
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 ```
 
-`compat.py`: salida `OK|WARN|FAIL|SKIP <id> <texto>`; código 0 todo bien, 1 avisos, 2 rompería algo. Reglas C01-C14 en `PLAN.md`.
+`compat.py`: salida `OK|WARN|FAIL|SKIP <id> <texto>`; código 0 todo bien, 1 avisos, 2 rompería algo, 3 no se pudo evaluar (sin red / `checkupdates` falló, o uso incorrecto). Reglas C01-C14 en `PLAN.md`.
+
+## Reinstalar con seguridad
+
+- **Ejecútalo en un sistema totalmente sincronizado** (`omarchy update` antes). `install.sh` usa `pacman -S --needed`, nunca `-Sy`;
+  si hay actualizaciones pendientes y faltan paquetes, una ejecución real se detiene (`--allow-pending` lo salta; `--dry-run` solo avisa).
+- Si falla la instalación de paquetes, se omiten los `/etc`, DKMS, initramfs y servicios (todos, no por grupo) y se informa.
+- Una sola reconstrucción del initramfs/UKI: `limine-update` (Omarchy no tiene presets de mkinitcpio; `mkinitcpio -P` solo si existen).
+- Los archivos con `"policy": "if-missing"` los genera Omarchy (nvidia.conf de modprobe y mkinitcpio, blacklist-xpad, xpadneo): solo se
+  instalan si faltan, nunca se sobrescriben ni se comparan.
 
 ## Manifiesto
 
@@ -31,7 +40,7 @@ Sin versiones: Arch es rolling; las versiones exactas quedan en `drivers-state.j
 
 `pacman-hook/90-omarchy-compat.hook` (`PreTransaction`, `NeedsTargets`, sin `AbortOnFail`) llama a `compat-hook`, que corre
 `compat.py hook` con `timeout 5` y sale siempre con 0. Imprime `[omarchy-compat] ...` con los avisos y un resumen. Limitación:
-pacman pasa solo nombres, así que una desinstalación se evalúa como si fuera una actualización a la versión de los repos.
+pacman pasa solo nombres, así que el gancho solo se activa para `Install`/`Upgrade` (no para `Remove`). Si `pacman -Si` no responde imprime "no se pudo evaluar".
 
 ## Equipo nuevo
 

@@ -114,19 +114,22 @@
       "dest": "/etc/mkinitcpio.conf.d/nvidia.conf",
       "mode": "644",
       "owner": "root:root",
-      "src": "etc/mkinitcpio.conf.d/nvidia.conf"
+      "src": "etc/mkinitcpio.conf.d/nvidia.conf",
+      "policy": "if-missing"
     },
     {
       "dest": "/etc/modprobe.d/blacklist-xpad.conf",
       "mode": "644",
       "owner": "root:root",
-      "src": "etc/modprobe.d/blacklist-xpad.conf"
+      "src": "etc/modprobe.d/blacklist-xpad.conf",
+      "policy": "if-missing"
     },
     {
       "dest": "/etc/modprobe.d/nvidia.conf",
       "mode": "644",
       "owner": "root:root",
-      "src": "etc/modprobe.d/nvidia.conf"
+      "src": "etc/modprobe.d/nvidia.conf",
+      "policy": "if-missing"
     },
     {
       "dest": "/etc/modules-load.d/claude-nct6775.conf",
@@ -138,7 +141,8 @@
       "dest": "/etc/modules-load.d/xpadneo.conf",
       "mode": "644",
       "owner": "root:root",
-      "src": "etc/modules-load.d/xpadneo.conf"
+      "src": "etc/modules-load.d/xpadneo.conf",
+      "policy": "if-missing"
     },
     {
       "dest": "/etc/smartd.conf",

@@ -16,7 +16,9 @@ FILES = {  # dest -> (content, mode)
     "/etc/systemd/system/ollama.service.d/context.conf": ("[Service]\nEnvironment=X=1\n", "644"),
     "/usr/local/lib/omarchy/tool": ("#!/bin/sh\n", "755"),
     "/etc/conf.d/misc": ("A=1\n", "644"),
+    "/etc/modprobe.d/omarchy-made.conf": ("options omarchy=1\n", "644"),
 }
+OMARCHY_FILES = {"/etc/modprobe.d/omarchy-made.conf"}  # policy if-missing: never overwritten
 
 
 def src_of(dest):
@@ -33,7 +35,8 @@ class InstallBase(Sandbox):
         man = {
             "version": 1,
             "groups": {"nvidia": {"repo": ["pkg-a", "pkg-b"], "aur": []}, "cuda": {"repo": ["pkg-c"], "aur": ["aur-d"]}},
-            "etc_files": [{"dest": d, "src": src_of(d), "mode": m, "owner": "root:root"} for d, (c, m) in FILES.items()],
+            "etc_files": [{"dest": d, "src": src_of(d), "mode": m, "owner": "root:root",
+                          **({"policy": "if-missing"} if d in OMARCHY_FILES else {})} for d, (c, m) in FILES.items()],
             "services": {"system": ["svc-a", "svc-resume.service"], "user": []},
             "dkms": ["nvidia"],
             "omarchy_owned": ["/etc/omarchy-owned.conf"],
@@ -58,7 +61,9 @@ class InstallBase(Sandbox):
         self.stub("sudo", 'echo "sudo $*" >> "$STUB_LOG"; case "$1" in -v) exit 0;; -n) exit 0;; esac; exec "$@"')
         self.stub("snapper", 'echo "snapper $*" >> "$STUB_LOG"; echo 42')
         self.stub("limine-update", 'echo "limine-update" >> "$STUB_LOG"')
-        self.stub("mkinitcpio", 'echo "mkinitcpio $*" >> "$STUB_LOG"')
+        # like Omarchy's wrapper without presets: interactive, so it fails here
+        self.stub("mkinitcpio", 'echo "mkinitcpio $*" >> "$STUB_LOG"; exit 1')
+        self.stub("checkupdates", '[ -n "$STUB_PENDING" ] && { echo "$STUB_PENDING"; exit 0; }; exit 2')
         self.stub("yay", 'echo "yay $*" >> "$STUB_LOG"')
         self.stub("omarchy", 'echo "omarchy-stub $*" >> "$STUB_LOG"; echo "no pkg here"')
 
@@ -158,11 +163,13 @@ class RealRunTest(InstallBase):
         p = self.inst(STUB_MISSING="pkg-b", STUB_SVC_OFF="svc-a svc-resume.service", STUB_DKMS="")
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         calls = self.calls()
-        for s in ("sudo pacman -S --needed --noconfirm pkg-b", "sudo limine-update", "sudo mkinitcpio -P", "sudo systemctl daemon-reload",
+        for s in ("sudo pacman -S --needed --noconfirm pkg-b", "sudo limine-update", "sudo systemctl daemon-reload",
                   "sudo dkms autoinstall -k 7.2.3-arch1-3", "sudo systemctl enable --now svc-a", "sudo systemctl enable svc-resume.service",
                   "snapper -c root create -t pre", "snapper -c root create -t post --pre-number 42"):
             self.assertIn(s, calls)
         self.assertNotIn("enable --now svc-resume", calls)
+        self.assertNotIn("mkinitcpio", calls)  # no presets: limine-update is the only rebuild
+        self.assertEqual(calls.splitlines().count("limine-update"), 1)
         self.assertEqual(read(self.root + "/etc/modprobe.d/nvidia.conf"), FILES["/etc/modprobe.d/nvidia.conf"][0])
         baks = [f for f in os.listdir(self.root + "/etc/modprobe.d") if ".bak." in f]
         self.assertEqual(len(baks), 1)
@@ -185,6 +192,68 @@ class RealRunTest(InstallBase):
         self.assertNotIn("limine-update", calls)
         self.assertNotIn("mkinitcpio", calls)
         self.assertNotIn("dkms autoinstall", calls)
+
+    def test_rebuild_exactly_once_when_limine_and_modprobe_change(self):
+        put(self.root + "/etc/limine-entry-tool.d/claude-x.conf", "old\n", 0o644)
+        put(self.root + "/etc/modprobe.d/nvidia.conf", "old\n", 0o644)
+        put(self.root + "/etc/mkinitcpio.d/linux.preset", "x\n")  # presets present: still only one rebuild
+        p = self.inst()
+        self.assertEqual(p.returncode, 0, p.stdout)
+        calls = self.calls()
+        self.assertEqual(calls.splitlines().count("limine-update"), 1)
+        self.assertNotIn("mkinitcpio", calls)
+
+    def test_modprobe_change_alone_rebuilds_once(self):
+        put(self.root + "/etc/modprobe.d/nvidia.conf", "old\n", 0o644)
+        self.inst()
+        self.assertEqual(self.calls().splitlines().count("limine-update"), 1)
+
+    def test_omarchy_owned_files_never_overwritten(self):
+        path = self.root + "/etc/modprobe.d/omarchy-made.conf"
+        put(path, "omarchy changed this\n", 0o644)
+        p = self.inst("--check")
+        self.assertEqual(p.returncode, 0)
+        self.assertNotIn("omarchy-made", p.stdout)
+        os.remove(self.root + "/etc/conf.d/misc")  # force a real run
+        p = self.inst()
+        self.assertEqual(p.returncode, 0)
+        self.assertEqual(read(path), "omarchy changed this\n")
+        self.assertEqual([f for f in os.listdir(self.root + "/etc/modprobe.d") if "bak" in f], [])
+        os.remove(path)  # missing: it is installed
+        p = self.inst("--check")
+        self.assertIn("DIFIERE archivo: /etc/modprobe.d/omarchy-made.conf (missing)", p.stdout)
+        self.assertEqual(self.inst().returncode, 0)
+        self.assertEqual(read(path), FILES["/etc/modprobe.d/omarchy-made.conf"][0])
+
+    def test_group_failure_skips_dependents(self):
+        self.stub("pacman", 'echo "pacman $*" >> "$STUB_LOG"; case "$1" in -Q) [[ " $STUB_MISSING " == *" $2 "* ]] && exit 1; exit 0;; -S) exit 1;; esac')
+        put(self.root + "/etc/limine-entry-tool.d/claude-x.conf", "old\n", 0o644)
+        p = self.inst(STUB_MISSING="pkg-a", STUB_SVC_OFF="svc-a", STUB_DKMS="")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("OMITIDO", p.stdout)
+        calls = self.calls()
+        for bad in ("limine-update", "enable --now svc-a", "dkms autoinstall"):
+            self.assertNotIn(bad, calls)
+        self.assertEqual(read(self.root + "/etc/limine-entry-tool.d/claude-x.conf"), "old\n")
+
+    def test_pending_updates_stop_a_real_run(self):
+        p = self.inst(STUB_MISSING="pkg-a", STUB_PENDING="foo 1-1 -> 2-1")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("actualizaciones pendientes", p.stdout)
+        self.assertNotIn("sudo", self.calls())
+        p = self.inst("--allow-pending", STUB_MISSING="pkg-a", STUB_PENDING="foo 1-1 -> 2-1")
+        self.assertEqual(p.returncode, 0, p.stdout)
+        self.assertIn("pacman -S --needed --noconfirm pkg-a", self.calls())
+
+    def test_pending_only_warns_in_dry_run_and_ignored_by_check_and_without_package_work(self):
+        p = self.inst("--dry-run", STUB_MISSING="pkg-a", STUB_PENDING="foo 1-1 -> 2-1")
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("actualizaciones pendientes", p.stdout)
+        p = self.inst("--check", STUB_MISSING="pkg-a", STUB_PENDING="foo 1-1 -> 2-1")
+        self.assertNotIn("actualizaciones pendientes", p.stdout)
+        os.remove(self.root + "/etc/conf.d/misc")  # etc-only work: no package install, no partial-upgrade risk
+        p = self.inst(STUB_PENDING="foo 1-1 -> 2-1")
+        self.assertEqual(p.returncode, 0, p.stdout)
 
     def test_failure_is_reported(self):
         self.stub("pacman", 'echo "pacman $*" >> "$STUB_LOG"; case "$1" in -Q) [[ " $STUB_MISSING " == *" $2 "* ]] && exit 1; exit 0;; -S) exit 1;; esac')
