@@ -138,6 +138,12 @@
       "src": "etc/modules-load.d/claude-nct6775.conf"
     },
     {
+      "dest": "/etc/modules-load.d/claude-xpad.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/modules-load.d/claude-xpad.conf"
+    },
+    {
       "dest": "/etc/modules-load.d/xpadneo.conf",
       "mode": "644",
       "owner": "root:root",

@@ -28,6 +28,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 - Una sola reconstrucción del initramfs/UKI: `limine-update` (Omarchy no tiene presets de mkinitcpio; `mkinitcpio -P` solo si existen).
 - Los archivos con `"policy": "if-missing"` los genera Omarchy (nvidia.conf de modprobe y mkinitcpio, blacklist-xpad, xpadneo): solo se
   instalan si faltan, nunca se sobrescriben ni se comparan.
+- `modules-load.d/claude-xpad.conf` carga `xpad` aunque Omarchy deje `blacklist xpad` (la lista negra solo impide la carga
+  automática): `xpadneo` solo maneja Bluetooth, y sin `xpad` los controles Xbox con cable (p. ej. Xbox 360, `045e:028e`) no tienen driver.
 
 ## Manifiesto
 
