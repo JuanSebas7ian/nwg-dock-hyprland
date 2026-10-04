@@ -27,7 +27,8 @@ WIDGETS=(
   "juansebas7ian.spotify:omarchy.tray"
   "juansebas7ian.gdrive:omarchy.dropbox"
   "juansebas7ian.ollama:omarchy.agents"
-  "juansebas7ian.sysmon:juansebas7ian.ollama"
+  "juansebas7ian.sysmon:juansebas7ian.cooling"
+  "juansebas7ian.cooling:juansebas7ian.ollama"
   "juansebas7ian.storage:juansebas7ian.sysmon"
   "juansebas7ian.nvidia:juansebas7ian.storage"
   "juansebas7ian.drivers:juansebas7ian.nvidia"
@@ -194,6 +195,8 @@ if $HOST; then
       "$CONFIG/wireplumber/wireplumber.conf.d/51-disable-nexigo-webcam-mic.conf" 644 &&
       systemctl --user restart wireplumber || true
   fi
+  # Fan names measured on this PC (fan 2/5 = CPU cooler, fan 7 = AIO pump); never overwrite edits.
+  [[ -e $CONFIG/omarchy-sysmon/fans.json ]] || install -D -m 644 "$HERE/host/fans.json" "$CONFIG/omarchy-sysmon/fans.json"
   if ! cmp -s "$HERE/host/claude-nct6775.conf" /etc/modules-load.d/claude-nct6775.conf 2>/dev/null; then
     say "  sensores de la placa: cargar nct6775 al arrancar (sudo)"
     sudo install -D -m 644 "$HERE/host/claude-nct6775.conf" /etc/modules-load.d/claude-nct6775.conf

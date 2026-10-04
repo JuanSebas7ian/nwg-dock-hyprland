@@ -8,7 +8,8 @@ spotify-player runs as an API-only daemon (spotify-player.service, no streaming)
 and its CLI lists playlists, albums, top tracks and devices.
 
   spotify.py setup-state            is spotify-player installed, authenticated, using its own client ID
-  spotify.py library [--force]      playlists, top tracks, saved albums (cached 10 min)
+  spotify.py library [--force]      recently played, playlists, saved albums, top tracks (Web API with the
+                                    user's own token cached by spotify-player; cached 10 min)
   spotify.py devices                Spotify Connect devices
   spotify.py local-play             play on this PC with nothing running (daemon, connect, resume)
   spotify.py play-uri spotify:<playlist|album|artist|track>:<id>   on this PC (spotifyd)
@@ -99,7 +100,46 @@ def image(images, want=64):
   return min(images, key=lambda i: abs((i.get("width") or want) - want)).get("url", "")
 
 
+def web_token():
+  """Access token of the user's app, as cached by spotify-player (it refreshes it)."""
+  path = SP_CACHE / "user_client_token.json"
+  for attempt in range(2):
+    try:
+      tok = json.loads(path.read_text())
+      expires = tok.get("expires_at", "")
+      from datetime import datetime, timezone
+      exp = datetime.fromisoformat(expires.replace("Z", "+00:00")) if expires else None
+      if tok.get("access_token") and (exp is None or exp.timestamp() - time.time() > 60):
+        return tok["access_token"]
+    except (OSError, ValueError):
+      pass
+    if attempt == 0:
+      ensure_daemon()
+      sp("get", "key", "devices")  # any call makes spotify-player refresh and re-cache its token
+  return None
+
+
+def api(path, params=None):
+  import urllib.error
+  import urllib.parse
+  import urllib.request
+  tok = web_token()
+  if not tok:
+    raise RuntimeError("Spotify is not connected: run Connect (spotify-bar-setup)")
+  url = "https://api.spotify.com/v1" + path + ("?" + urllib.parse.urlencode(params) if params else "")
+  req = urllib.request.Request(url, headers={"Authorization": "Bearer " + tok})
+  try:
+    with urllib.request.urlopen(req, timeout=15) as r:
+      return json.loads(r.read() or b"{}")
+  except urllib.error.HTTPError as e:
+    if e.code == 429:
+      raise RuntimeError("Spotify rate limit (429), try again in a minute")
+    raise RuntimeError(f"Spotify API error {e.code}")
+
+
 def library(force):
+  """Playlists, saved albums, top tracks and recently played, straight from the Web API
+  with the user's token. Tolerant of fields Spotify drops (spotify-player 0.24.1 is not)."""
   path = CACHE / "library.json"
   if not force:
     try:
@@ -108,45 +148,55 @@ def library(force):
         return
     except OSError:
       pass
-  if not ensure_daemon():
-    out({"error": "spotify-player daemon is not running (systemctl --user status spotify-player)"})
-    return
-  playlists, err1 = sp_json("get", "key", "user-playlists")
-  top, err2 = sp_json("get", "key", "user-top-tracks")
-  albums, err3 = sp_json("get", "key", "user-saved-albums")
-  error = next((e for e in (err1, err2, err3) if e), "")
-  if playlists is None and top is None and albums is None:
-    try:
-      cached = json.loads(path.read_text())
-      cached["stale"] = error
-      out(cached)
-    except (OSError, ValueError):
-      out({"error": error})
-    return
 
   def track(t):
     t = t or {}
-    return {"id": t.get("id", ""), "name": t.get("name", ""),
+    return {"uri": t.get("uri") or f"spotify:track:{t.get('id', '')}", "name": t.get("name", ""),
             "artist": ", ".join(a.get("name", "") for a in t.get("artists") or []),
-            "image": image((t.get("album") or {}).get("images")), "duration": t.get("duration_ms", 0),
-            "uri": f"spotify:track:{t.get('id', '')}"}
+            "image": image((t.get("album") or {}).get("images")), "duration": t.get("duration_ms", 0)}
 
-  data = {
-    "playlists": [{"id": p.get("id"), "uri": f"spotify:playlist:{p.get('id')}", "name": p.get("name", ""), "image": image(p.get("images")),
-                   "sub": f"{(p.get('tracks') or p.get('items') or {}).get('total', '')} songs · "
-                          f"{(p.get('owner') or {}).get('display_name', '')}".strip(" ·")}
-                  for p in (playlists or []) if p],
-    "top": [track(t) for t in (top or [])][:30],
-    "albums": [{"id": (a.get("album") or a).get("id"), "uri": f"spotify:album:{(a.get('album') or a).get('id')}",
-                "name": (a.get("album") or a).get("name", ""),
-                "image": image((a.get("album") or a).get("images")),
-                "sub": ", ".join(x.get("name", "") for x in (a.get("album") or a).get("artists") or [])}
-               for a in (albums or [])][:40],
-    "error": error,
-    "updatedAt": int(time.time()),
-  }
-  CACHE.mkdir(parents=True, exist_ok=True)
-  path.write_text(json.dumps(data))
+  data, errors = {}, []
+  try:
+    pl = api("/me/playlists", {"limit": 50}).get("items") or []
+    data["playlists"] = [{"uri": p.get("uri"), "name": p.get("name", ""), "image": image(p.get("images")),
+                          "sub": " · ".join(x for x in [
+                            f"{(p.get('tracks') or p.get('items') or {}).get('total')} songs" if (p.get('tracks') or p.get('items') or {}).get('total') is not None else "",
+                            (p.get("owner") or {}).get("display_name", "")] if x)}
+                         for p in pl if p and p.get("uri")]
+  except RuntimeError as exc:
+    errors.append(str(exc))
+  try:
+    al = api("/me/albums", {"limit": 50}).get("items") or []
+    data["albums"] = [{"uri": a["album"].get("uri"), "name": a["album"].get("name", ""), "image": image(a["album"].get("images")),
+                       "sub": ", ".join(x.get("name", "") for x in a["album"].get("artists") or [])}
+                      for a in al if a.get("album") and a["album"].get("uri")]
+  except RuntimeError as exc:
+    errors.append(str(exc))
+  try:
+    data["top"] = [track(t) for t in api("/me/top/tracks", {"limit": 30, "time_range": "short_term"}).get("items") or []]
+  except RuntimeError as exc:
+    errors.append(str(exc))
+  try:
+    recent = api("/me/player/recently-played", {"limit": 40}).get("items") or []
+    seen, contexts = set(), []
+    for it in recent:
+      c = it.get("context") or {}
+      uri = c.get("uri")
+      if uri and uri not in seen and c.get("type") in ("playlist", "album", "artist"):
+        seen.add(uri)
+        contexts.append(uri)
+    known = {e["uri"]: e for e in data.get("playlists", []) + data.get("albums", [])}
+    data["recent"] = [dict(known[u], sub="Played recently · " + known[u]["sub"]) for u in contexts if u in known]
+    data["recent"] += [dict(track(it.get("track")), sub=track(it.get("track"))["artist"]) for it in recent[:25] if it.get("track")]
+  except RuntimeError as exc:
+    errors.append(str(exc))
+  for key in ("playlists", "albums", "top", "recent"):
+    data.setdefault(key, [])
+  data["error"] = errors[0] if errors and not any(data[k] for k in ("playlists", "albums", "top", "recent")) else ""
+  data["updatedAt"] = int(time.time())
+  if not data["error"]:
+    CACHE.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data))
   out(data)
 
 

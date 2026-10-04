@@ -1,0 +1,8 @@
+{
+  "1": "Case fan",
+  "2": "CPU cooler fan 1",
+  "5": "CPU cooler fan 2",
+  "7": "AIO pump",
+  "_roles": {"pump": ["7"], "cpu": ["2", "5"]},
+  "_note": "Inferred 2026-10-03 with a 40 s all-core load: fans 2 and 5 followed Tctl (900 to 2000 RPM), fan 1 the same curve slower, fan 7 stayed at ~5530 RPM. Edit names freely."
+}

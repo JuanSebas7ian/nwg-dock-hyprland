@@ -27,7 +27,7 @@ Panel {
   property var lib: null
   property var devs: []
   property var setup: null
-  property string tab: "playlists"
+  property string tab: "recent"
   property string message: ""
   property bool busy: false
 
@@ -50,7 +50,7 @@ Panel {
     ? String(player.metadata["mpris:trackid"] || player.metadata["xesam:url"] || "") : ""
   onTrackKeyChanged: if (trackKey !== "") Quickshell.execDetached(["python3", backend, "remember", trackKey])
 
-  readonly property var listModel: !lib ? [] : tab === "albums" ? (lib.albums || [])
+  readonly property var listModel: !lib ? [] : tab === "recent" ? (lib.recent || []) : tab === "albums" ? (lib.albums || [])
     : tab === "top" ? (lib.top || []).map(function(t) { return { uri: t.uri, name: t.name, sub: t.artist, image: t.image } })
     : (lib.playlists || [])
 
@@ -386,6 +386,7 @@ Panel {
           // ------------------------------------------------ lists
           Row {
             spacing: Style.space(4)
+            Chip { label: "Recent"; on: root.tab === "recent"; onClicked: root.tab = "recent" }
             Chip { label: "Playlists"; on: root.tab === "playlists"; onClicked: root.tab = "playlists" }
             Chip { label: "Albums"; on: root.tab === "albums"; onClicked: root.tab = "albums" }
             Chip { label: "Top this month"; on: root.tab === "top"; onClicked: root.tab = "top" }
