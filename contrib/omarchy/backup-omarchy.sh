@@ -29,7 +29,7 @@ PATHS=(
   .local/bin/omarchy-agent-usage-extra .local/bin/omarchy-hwcheck
   .local/state/omarchy-hwcheck
   # spotify, sesión, sensores y respaldo (sin la contraseña de restic)
-  .config/spotify-player/app.toml .config/omarchy-sysmon .config/omarchy-session
+  .config/spotify-player/app.toml .config/omarchy-sysmon .config/omarchy-session .config/gamemode.ini .config/MangoHud
   .config/omarchy-backup/config .config/omarchy-backup/excludes
   .local/bin/omarchy-session .local/bin/omarchy-backup .local/bin/omarchy-restore
   .local/bin/bt-pair-keyboard .local/bin/spotify-bar-setup
