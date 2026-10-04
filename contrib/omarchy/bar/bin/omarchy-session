@@ -1,0 +1,452 @@
+#!/usr/bin/python3
+"""Save and restore the Hyprland session: open windows, their workspaces and
+floating geometry, and the active workspace.
+
+  omarchy-session daemon            restore the last session, then keep saving it (systemd user service)
+  omarchy-session save              snapshot now
+  omarchy-session restore [--dry-run]
+  omarchy-session show              what would be restored
+
+How a window comes back, in order of preference:
+  1. terminals (foot, alacritty, kitty, ghostty): reopened in the same directory,
+     re-running the program in front if it is in `rerun` (btop, nvim, lazygit...);
+  2. Omarchy web apps (class chrome-<host>...): omarchy-launch-webapp <url>;
+  3. a .desktop entry whose StartupWMClass or name matches the window class;
+  4. the process's own command line.
+Apps with several windows in one process (browsers) launch once; every new
+window is then sent to the next saved workspace of its class as it appears.
+
+Saving is event driven (Hyprland socket2) with a debounce. Omarchy closes every
+window before logout, reboot and shutdown; a mass close freezes saving, so the
+session on disk stays the one from before.
+
+Config (optional): ~/.config/omarchy-session/config.json
+  {"enabled": true, "restore": true, "exclude": ["class", ...], "rerun": ["btop", ...]}
+State: ~/.local/state/omarchy-session/session.json (+ session.prev.json)
+"""
+
+import json
+import os
+import re
+import shlex
+import shutil
+import socket
+import subprocess
+import sys
+import time
+from configparser import ConfigParser
+from pathlib import Path
+
+HOME = Path.home()
+STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / "omarchy-session"
+SESSION = STATE / "session.json"
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "omarchy-session" / "config.json"
+TERMINALS = {"foot": "foot", "footclient": "foot", "alacritty": "alacritty", "kitty": "kitty",
+             "com.mitchellh.ghostty": "ghostty"}
+DEFAULTS = {
+  "enabled": True,
+  "restore": True,
+  # Started by autostart or not worth restoring.
+  "exclude": ["", "polkit-gnome-authentication-agent-1", "org.omarchy.osd", "xdg-desktop-portal-gtk",
+              "Omarchy", "org.omarchy.menu", "zenity", "pinentry", "1Password"],
+  "rerun": ["btop", "htop", "nvtop", "nvim", "vim", "lazygit", "lazydocker", "yazi", "ranger", "mc",
+            "tmux", "zellij", "ncdu", "impala", "wiremix", "bluetui"],
+}
+
+
+def log(*a):
+  print("omarchy-session:", *a, file=sys.stderr, flush=True)
+
+
+def config():
+  cfg = dict(DEFAULTS)
+  try:
+    cfg.update(json.loads(CONFIG.read_text()))
+  except (OSError, ValueError):
+    pass
+  return cfg
+
+
+def hypr(*args):
+  out = subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=10).stdout
+  return out
+
+
+def hypr_json(what):
+  try:
+    return json.loads(hypr(what, "-j"))
+  except ValueError:
+    return []
+
+
+def dispatch(lua):
+  # Lua-mode hyprctl prints "expected a dispatcher" even when it works.
+  subprocess.run(["hyprctl", "dispatch", lua], capture_output=True, text=True, timeout=10)
+
+
+def lua_str(s):
+  return '"' + str(s).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+# ------------------------------------------------------------------ processes
+
+def proc_cmdline(pid):
+  try:
+    return [a.decode(errors="replace") for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
+  except OSError:
+    return []
+
+
+def proc_cwd(pid):
+  try:
+    return os.readlink(f"/proc/{pid}/cwd")
+  except OSError:
+    return ""
+
+
+def children_map():
+  kids = {}
+  for p in Path("/proc").iterdir():
+    if not p.name.isdigit():
+      continue
+    try:
+      stat = (p / "stat").read_text()
+      ppid = int(stat.rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+      continue
+    kids.setdefault(ppid, []).append(int(p.name))
+  return kids
+
+
+def terminal_state(pid, kids, rerun):
+  """cwd of the shell inside a terminal, and the program in front if it is re-runnable."""
+  shells = sorted(kids.get(pid, []))
+  if not shells:
+    return proc_cwd(pid), None
+  shell = shells[0]
+  cwd = proc_cwd(shell)
+  front = None
+  for child in sorted(kids.get(shell, [])):
+    cmd = proc_cmdline(child)
+    if cmd and os.path.basename(cmd[0]) in rerun:
+      front = cmd
+      cwd = proc_cwd(child) or cwd
+      break
+  return cwd, front
+
+
+# ------------------------------------------------------------------ desktop entries
+
+def desktop_entries():
+  dirs = [HOME / ".local/share/applications", Path("/usr/share/applications"),
+          HOME / ".local/share/flatpak/exports/share/applications", Path("/var/lib/flatpak/exports/share/applications")]
+  entries = {}
+  for d in dirs:
+    if not d.is_dir():
+      continue
+    for f in d.glob("*.desktop"):
+      if f.name in entries:
+        continue
+      cp = ConfigParser(interpolation=None, strict=False)
+      try:
+        cp.read(f, encoding="utf-8")
+        e = cp["Desktop Entry"]
+      except Exception:
+        continue
+      if e.get("NoDisplay", "false").lower() == "true" and not e.get("StartupWMClass"):
+        continue
+      entries[f.name] = {"wmclass": e.get("StartupWMClass", ""), "exec": e.get("Exec", "")}
+  return entries
+
+
+def desktop_for(cls, entries):
+  low = cls.lower()
+  for name, e in entries.items():
+    if e["wmclass"] and e["wmclass"].lower() == low:
+      return name
+  for name in entries:
+    stem = name[:-8].lower()
+    if stem == low or stem.split(".")[-1] == low:
+      return name
+  return None
+
+
+WEBAPP = re.compile(r"^(?:chrome|brave|msedge)-([^_]+)__(.*)-(?:Default|Profile_\d+)$")
+
+
+def webapp_url(cls):
+  m = WEBAPP.match(cls)
+  if not m:
+    return None
+  path = m.group(2).replace("_", "/")
+  return f"https://{m.group(1)}/{path}".rstrip("/") + "/"
+
+
+# ------------------------------------------------------------------ snapshot
+
+def snapshot():
+  cfg = config()
+  exclude = set(cfg["exclude"])
+  rerun = set(cfg["rerun"])
+  kids = children_map()
+  entries = desktop_entries()
+  windows = []
+  for c in hypr_json("clients"):
+    if not c.get("mapped") or c.get("hidden"):
+      continue
+    cls = c.get("class") or c.get("initialClass") or ""
+    if cls in exclude:
+      continue
+    pid = c.get("pid", -1)
+    w = {
+      "class": cls, "title": c.get("title", ""), "workspace": (c.get("workspace") or {}).get("name", ""),
+      "monitor": c.get("monitor"), "floating": c.get("floating", False), "at": c.get("at"),
+      "size": c.get("size"), "fullscreen": c.get("fullscreen", 0), "pinned": c.get("pinned", False),
+      "focusHistoryID": c.get("focusHistoryID", 99),
+    }
+    term = TERMINALS.get(cls.lower())
+    url = webapp_url(cls)
+    if term:
+      cwd, front = terminal_state(pid, kids, rerun)
+      w["launch"] = {"kind": "terminal", "terminal": term, "cwd": cwd, "run": front}
+    elif url:
+      w["launch"] = {"kind": "webapp", "url": url}
+    else:
+      desk = desktop_for(cls, entries)
+      if desk:
+        w["launch"] = {"kind": "desktop", "id": desk}
+      else:
+        cmd = proc_cmdline(pid)
+        if cmd and shutil.which(cmd[0]) or (cmd and os.path.exists(cmd[0])):
+          w["launch"] = {"kind": "cmd", "argv": cmd}
+        else:
+          w["launch"] = None
+    windows.append(w)
+  active = hypr_json("activeworkspace") or {}
+  return {"version": 1, "savedAt": int(time.time()), "activeWorkspace": active.get("name", "1"),
+          "workspaces": [{"name": w.get("name"), "monitor": w.get("monitor")} for w in hypr_json("workspaces")],
+          "windows": windows}
+
+
+def write_session(snap):
+  STATE.mkdir(parents=True, exist_ok=True)
+  if SESSION.exists():
+    try:
+      if json.loads(SESSION.read_text()).get("windows") != snap["windows"]:
+        SESSION.replace(STATE / "session.prev.json")
+    except (OSError, ValueError):
+      pass
+  tmp = SESSION.with_suffix(".tmp")
+  tmp.write_text(json.dumps(snap, indent=1))
+  tmp.replace(SESSION)
+
+
+# ------------------------------------------------------------------ restore
+
+def launch_command(spec):
+  k = spec["kind"]
+  if k == "terminal":
+    term, cwd, run = spec["terminal"], spec.get("cwd") or str(HOME), spec.get("run")
+    if term == "foot":
+      cmd = ["foot", "--working-directory", cwd]
+    elif term == "kitty":
+      cmd = ["kitty", "--directory", cwd]
+    else:  # alacritty and ghostty
+      cmd = [term, "--working-directory=" + cwd] if term == "ghostty" else [term, "--working-directory", cwd]
+    if run:
+      cmd += ["-e"] + run
+    return shlex.join(cmd)
+  if k == "webapp":
+    return shlex.join(["omarchy-launch-webapp", spec["url"]])
+  if k == "desktop":
+    return spec["id"]  # uwsm-app runs desktop entry ids
+  if k == "cmd":
+    return shlex.join(spec["argv"])
+  return None
+
+
+def running_cmdlines():
+  out = set()
+  for p in Path("/proc").iterdir():
+    if p.name.isdigit():
+      cmd = proc_cmdline(p.name)
+      if cmd:
+        out.add(shlex.join(cmd))
+        out.add(os.path.basename(cmd[0]))
+  return out
+
+
+def socket2():
+  sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+  run = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+  s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+  s.connect(f"{run}/hypr/{sig}/.socket2.sock")
+  return s
+
+
+def restore(dry_run=False):
+  try:
+    snap = json.loads(SESSION.read_text())
+  except (OSError, ValueError):
+    log("no saved session")
+    return
+  windows = sorted(snap.get("windows", []), key=lambda w: -w.get("focusHistoryID", 0))
+  already = {c.get("class") for c in hypr_json("clients")}
+  running = running_cmdlines()
+
+  # Placement queues per class, and one launch per distinct command.
+  queues, launches, seen = {}, [], set()
+  for w in windows:
+    queues.setdefault(w["class"], []).append(w)
+    spec = w.get("launch")
+    cmd = launch_command(spec) if spec else None
+    if not cmd or cmd in seen:
+      continue
+    seen.add(cmd)
+    if spec["kind"] == "terminal":
+      launches.append((cmd, w))  # every terminal window is its own launch
+      seen.discard(cmd)
+      continue
+    if w["class"] in already or (spec["kind"] == "cmd" and cmd in running):
+      continue
+    launches.append((cmd, w))
+
+  if dry_run:
+    for cmd, w in launches:
+      print(f"ws {w['workspace']:>4}  {w['class']:<28} {cmd}")
+    print(f"\nactive workspace: {snap.get('activeWorkspace')}")
+    return
+
+  try:
+    events = socket2()
+    events.settimeout(1.0)
+  except OSError as exc:
+    log("no Hyprland event socket:", exc)
+    events = None
+
+  for cmd, w in launches:
+    dispatch(f"hl.exec_cmd({lua_str('uwsm-app -- ' + cmd)}, {{ workspace = {lua_str(w['workspace'] + ' silent')} }})")
+    time.sleep(0.25)
+
+  # Send each new window to the next saved place of its class.
+  deadline = time.time() + 45
+  buf = b""
+  pending = sum(len(q) for q in queues.values())
+  while events and pending > 0 and time.time() < deadline:
+    try:
+      chunk = events.recv(65536)
+    except socket.timeout:
+      continue
+    if not chunk:
+      break
+    buf += chunk
+    *lines, buf = buf.split(b"\n")
+    for line in lines:
+      ev, _, data = line.decode(errors="replace").partition(">>")
+      if ev != "openwindow":
+        continue
+      addr, ws, cls, title = (data.split(",", 3) + ["", "", "", ""])[:4]
+      queue = queues.get(cls)
+      if not queue:
+        continue
+      target = next((t for t in queue if t["title"] == title), queue[0])
+      queue.remove(target)
+      pending -= 1
+      place(f"address:0x{addr}", ws, target)
+  if events:
+    events.close()
+  dispatch(f"hl.dsp.focus({{ workspace = {lua_str(snap.get('activeWorkspace', '1'))} }})")
+  log(f"restored {len(launches)} app(s)")
+
+
+def place(window, current_ws, target):
+  if target["workspace"] and target["workspace"] != current_ws:
+    dispatch(f"hl.dsp.window.move({{ workspace = {lua_str(target['workspace'])}, follow = false, window = {lua_str(window)} }})")
+  if target.get("floating"):
+    dispatch(f"hl.dsp.window.float({{ action = \"enable\", window = {lua_str(window)} }})")
+    if target.get("size"):
+      w, h = target["size"]
+      dispatch(f"hl.dsp.window.resize({{ x = {w}, y = {h}, window = {lua_str(window)} }})")
+    if target.get("at"):
+      x, y = target["at"]
+      dispatch(f"hl.dsp.window.move({{ x = {x}, y = {y}, window = {lua_str(window)} }})")
+
+
+# ------------------------------------------------------------------ daemon
+
+def daemon():
+  cfg = config()
+  if not cfg["enabled"]:
+    log("disabled in config")
+    return
+  # Restore once per Hyprland instance: a service restart must not reopen everything.
+  marker = STATE / "restored-instance"
+  instance = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+  try:
+    done = marker.read_text().strip() == instance
+  except OSError:
+    done = False
+  if cfg["restore"] and not done:
+    time.sleep(4)  # let autostart apps (and their windows) come up first
+    restore()
+  STATE.mkdir(parents=True, exist_ok=True)
+  marker.write_text(instance)
+  windows_now = len(snapshot()["windows"])
+  last_change = None
+  closes = []
+  frozen_until = 0.0
+  save_and_count = lambda: write_session(snapshot())
+  save_and_count()
+  events = socket2()
+  events.settimeout(1.0)
+  buf = b""
+  while True:
+    try:
+      chunk = events.recv(65536)
+      if not chunk:
+        return  # Hyprland is gone: keep the last saved session
+      buf += chunk
+      *lines, buf = buf.split(b"\n")
+      for line in lines:
+        ev = line.decode(errors="replace").partition(">>")[0]
+        if ev in ("openwindow", "closewindow", "movewindow", "movewindowv2", "changefloatingmode",
+                  "workspace", "workspacev2", "fullscreen", "windowtitlev2"):
+          if ev == "closewindow":
+            closes.append(time.time())
+          last_change = time.time()
+    except socket.timeout:
+      pass
+    now = time.time()
+    closes = [t for t in closes if now - t < 10]
+    # Mass close (logout/reboot/shutdown, close-all): stop saving for a while.
+    if len(closes) >= 3 and len(closes) >= 0.5 * max(1, windows_now):
+      frozen_until = now + 30
+      closes.clear()
+      log("mass close: keeping the saved session")
+    if last_change and now - last_change >= 3 and now >= frozen_until:
+      snap = snapshot()
+      windows_now = len(snap["windows"])
+      write_session(snap)
+      last_change = None
+
+
+def main(argv):
+  cmd = argv[1] if len(argv) > 1 else "show"
+  if cmd == "daemon":
+    daemon()
+  elif cmd == "save":
+    snap = snapshot()
+    write_session(snap)
+    print(f"saved {len(snap['windows'])} window(s) to {SESSION}")
+  elif cmd == "restore":
+    restore(dry_run="--dry-run" in argv)
+  elif cmd == "show":
+    restore(dry_run=True)
+  else:
+    print(__doc__)
+    return 2
+  return 0
+
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv))

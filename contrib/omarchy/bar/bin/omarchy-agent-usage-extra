@@ -1,0 +1,27 @@
+#!/bin/bash
+# Run the user's own agent usage collectors (~/.local/bin/omarchy-agent-usage-*,
+# today antigravity and opencode) and write their records where the packaged
+# omarchy.agents bar panel watches. The packaged omarchy-agent-usage-update only
+# runs collectors from $OMARCHY_PATH/bin, so this is driven by the systemd user
+# timer omarchy-agent-usage-extra.timer instead.
+# Usage: omarchy-agent-usage-extra [agent...]   (default: all)
+
+USAGE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/agents/usage"
+mkdir -p "$USAGE_DIR"
+self_dir=$(dirname "$(readlink -f "$0")")
+
+status=0
+for collector in "$self_dir"/omarchy-agent-usage-*; do
+  agent="${collector##*/omarchy-agent-usage-}"
+  [[ -x $collector && $agent != extra && $agent != update ]] || continue
+  if (($# > 0)) && [[ " $* " != *" $agent "* ]]; then continue; fi
+  if ! record=$(timeout 30 "$collector") || ! jq -e . >/dev/null 2>&1 <<<"$record"; then
+    echo "omarchy-agent-usage-extra: $agent collector failed" >&2
+    status=1
+    continue
+  fi
+  tmp=$(mktemp "$USAGE_DIR/.$agent.XXXXXX")
+  printf '%s\n' "$record" >"$tmp"
+  mv "$tmp" "$USAGE_DIR/$agent.json"
+done
+exit $status

@@ -1,0 +1,302 @@
+#!/usr/bin/python3
+"""Print the Antigravity usage record for the Omarchy agents bar panel.
+
+User collector, not part of the omarchy package: the systemd user timer
+`omarchy-agent-usage-extra.timer` writes its output to
+~/.local/state/omarchy/agents/usage/antigravity.json, where the packaged
+`omarchy.agents` widget picks it up like any other agent.
+
+Local stats: every conversation database of Antigravity and Antigravity IDE
+(~/.gemini/antigravity*/conversations/*.db). Each generation row in
+`gen_metadata` is a protobuf that carries the model name, the timestamp and
+a ModelUsageStats message (input, output, cache, thinking tokens).
+
+Limits: the per-model quota (remaining fraction and reset time) from the
+local language server's GetUserStatus RPC. It only answers while Antigravity
+is open, so the last answer is cached and shown, marked as stale, otherwise.
+Read-only; no credentials are read or stored.
+"""
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import ssl
+import subprocess
+import sys
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+AGENT_ID = "antigravity"
+AGENT_NAME = "Antigravity"
+HOME = Path.home()
+ROOTS = [HOME / ".gemini" / "antigravity", HOME / ".gemini" / "antigravity-ide"]
+STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / "omarchy" / "agents"
+QUOTA_CACHE = STATE / "cache" / "antigravity-quota.json"
+RPC_PATH = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
+
+
+# ------------------------------------------------------------ protobuf
+
+def varint(buf, pos):
+  result = shift = 0
+  while True:
+    byte = buf[pos]
+    pos += 1
+    result |= (byte & 0x7F) << shift
+    if not byte & 0x80:
+      return result, pos
+    shift += 7
+
+
+def fields(buf):
+  """Yield (number, wire_type, value) for one protobuf message, schemaless."""
+  pos, end = 0, len(buf)
+  while pos < end:
+    key, pos = varint(buf, pos)
+    num, wire = key >> 3, key & 7
+    if wire == 0:
+      value, pos = varint(buf, pos)
+    elif wire == 1:
+      value, pos = buf[pos:pos + 8], pos + 8
+    elif wire == 2:
+      size, pos = varint(buf, pos)
+      value, pos = buf[pos:pos + size], pos + size
+    elif wire == 5:
+      value, pos = buf[pos:pos + 4], pos + 4
+    else:
+      raise ValueError("unsupported wire type")
+    yield num, wire, value
+
+
+def first(buf, num, wire=None):
+  for n, w, v in fields(buf):
+    if n == num and (wire is None or w == wire):
+      return v
+  return None
+
+
+def parse_generation(blob):
+  """gen_metadata row -> (unix seconds, model, input, output, cache_read, cache_write)."""
+  meta = first(blob, 1, 2)
+  if meta is None:
+    return None
+  usage = first(meta, 4, 2)
+  if usage is None:
+    return None
+  u = {n: v for n, w, v in fields(usage) if w == 0}
+  model = first(meta, 19, 2)
+  model = model.decode("utf-8", "replace") if model else ""
+  ts = None
+  timing = first(meta, 9, 2)
+  if timing is not None:
+    stamp = first(timing, 4, 2)
+    if stamp is not None:
+      ts = first(stamp, 1, 0)
+  # ModelUsageStats: 2 input, 3 output (thinking + response), 4 cache write,
+  # 5 cache read.
+  return ts, model or "unknown", u.get(2, 0), u.get(3, 0), u.get(5, 0), u.get(4, 0)
+
+
+# ------------------------------------------------------------ local stats
+
+now = datetime.now()
+today = now.strftime("%Y-%m-%d")
+recent_dates = [(now - timedelta(days=d)).strftime("%Y-%m-%d") for d in range(6, -1, -1)]
+
+
+def local_stats():
+  recent = {d: {"date": d, "messageCount": 0} for d in recent_dates}
+  model_usage, today_by_model = {}, {}
+  sessions, today_sessions, active = set(), set(), set()
+  prompts = today_prompts = today_tokens = 0
+
+  for root in ROOTS:
+    for db in sorted((root / "conversations").glob("*.db")):
+      try:
+        conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+        rows = conn.execute("SELECT data FROM gen_metadata").fetchall()
+        conn.close()
+      except sqlite3.Error:
+        continue
+      session = f"{root.name}:{db.stem}"
+      for (blob,) in rows:
+        try:
+          parsed = parse_generation(bytes(blob or b""))
+        except (ValueError, IndexError):
+          continue
+        if not parsed or parsed[0] is None:
+          continue
+        ts, model, inp, out, cread, cwrite = parsed
+        total = inp + out + cread + cwrite
+        if not total:
+          continue
+        day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        prompts += 1
+        sessions.add(session)
+        active.add(day)
+        b = model_usage.setdefault(model, {"inputTokens": 0, "outputTokens": 0,
+                                           "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0})
+        b["inputTokens"] += inp
+        b["outputTokens"] += out
+        b["cacheReadInputTokens"] += cread
+        b["cacheCreationInputTokens"] += cwrite
+        if day in recent:
+          recent[day]["messageCount"] += total
+        if day == today:
+          today_prompts += 1
+          today_sessions.add(session)
+          today_tokens += total
+          today_by_model[model] = today_by_model.get(model, 0) + total
+
+  return {
+    "todayPrompts": today_prompts,
+    "todaySessions": len(today_sessions),
+    "todayTotalTokens": today_tokens,
+    "todayTokensByModel": today_by_model,
+    "recentDays": [recent[d] for d in recent_dates],
+    "totalPrompts": prompts,
+    "totalSessions": len(sessions),
+    "activeDays": len(active),
+    "activeDates": sorted(active),
+    "modelUsage": model_usage,
+  }
+
+
+# ------------------------------------------------------------ limits
+
+def language_servers():
+  """(pid, csrf token) for every running Antigravity language server."""
+  out = []
+  for proc in Path("/proc").iterdir():
+    if not proc.name.isdigit():
+      continue
+    try:
+      args = (proc / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+      continue
+    if not args or b"language_server" not in Path(args[0].decode(errors="replace")).name.encode():
+      continue
+    token = None
+    for i, arg in enumerate(args):
+      a = arg.decode(errors="replace")
+      if a.startswith("--csrf_token="):
+        token = a.split("=", 1)[1]
+      elif a == "--csrf_token" and i + 1 < len(args):
+        token = args[i + 1].decode(errors="replace")
+    if token:
+      out.append((int(proc.name), token))
+  return out
+
+
+def listening_ports(pid):
+  try:
+    text = subprocess.run(["ss", "-Htlnp"], capture_output=True, text=True, timeout=3).stdout
+  except Exception:
+    return []
+  ports = []
+  for line in text.splitlines():
+    if f"pid={pid}," in line:
+      m = re.search(r":(\d+)\s", line.split()[3] + " ")
+      if m:
+        ports.append(int(m.group(1)))
+  return sorted(set(ports))
+
+
+def call_rpc(port, token):
+  body = json.dumps({"metadata": {"ideName": "antigravity", "extensionName": "antigravity",
+                                  "locale": "en"}}).encode()
+  ctx = ssl.create_default_context()
+  ctx.check_hostname = False
+  ctx.verify_mode = ssl.CERT_NONE  # the language server uses a self-signed cert on 127.0.0.1
+  for scheme in ("https", "http"):
+    req = urllib.request.Request(f"{scheme}://127.0.0.1:{port}{RPC_PATH}", data=body, method="POST",
+                                 headers={"Content-Type": "application/json",
+                                          "Connect-Protocol-Version": "1",
+                                          "X-Codeium-Csrf-Token": token})
+    try:
+      with urllib.request.urlopen(req, timeout=3, context=ctx if scheme == "https" else None) as r:
+        return json.loads(r.read())
+    except Exception:
+      continue
+  return None
+
+
+def quota_from_status(status):
+  user = (status or {}).get("userStatus") or {}
+  configs = ((user.get("cascadeModelConfigData") or {}).get("clientModelConfigs")) or []
+  limits = []
+  for cfg in configs:
+    quota = cfg.get("quotaInfo") or {}
+    if "remainingFraction" not in quota and "resetTime" not in quota:
+      continue
+    remaining = float(quota.get("remainingFraction", 0) or 0)
+    label = str(cfg.get("label") or (cfg.get("modelOrAlias") or {}).get("model") or "Model")
+    limits.append({"label": label, "title": label,
+                   "percent": round(min(1.0, max(0.0, 1.0 - remaining)), 4),
+                   "resetsAt": str(quota.get("resetTime") or "")})
+  limits.sort(key=lambda l: -l["percent"])
+  plan = ((user.get("planStatus") or {}).get("planInfo") or {}).get("planName") or ""
+  return {"limits": limits, "tierLabel": str(plan)}
+
+
+def fetch_quota():
+  for pid, token in language_servers():
+    for port in listening_ports(pid):
+      status = call_rpc(port, token)
+      if status and status.get("userStatus"):
+        q = quota_from_status(status)
+        q["fetchedAt"] = datetime.now(timezone.utc).isoformat()
+        try:
+          QUOTA_CACHE.parent.mkdir(parents=True, exist_ok=True)
+          tmp = QUOTA_CACHE.with_suffix(".tmp")
+          tmp.write_text(json.dumps(q))
+          tmp.replace(QUOTA_CACHE)
+        except OSError:
+          pass
+        return q, True
+  try:
+    return json.loads(QUOTA_CACHE.read_text()), False
+  except (OSError, ValueError):
+    return None, False
+
+
+def not_reset(reset_at, utcnow):
+  if not reset_at:
+    return True
+  try:
+    return datetime.fromisoformat(str(reset_at).replace("Z", "+00:00")) > utcnow
+  except ValueError:
+    return True
+
+
+def main():
+  parser = argparse.ArgumentParser()
+  parser.add_argument("--force", action="store_true")
+  parser.add_argument("--limits-only", action="store_true")
+  parser.parse_args()
+
+  record = {"schemaVersion": 1, "id": AGENT_ID, "name": AGENT_NAME,
+            "updatedAt": datetime.now(timezone.utc).isoformat(),
+            "ready": True, "hasLocalStats": True,
+            "limits": [], "tierLabel": "", "usageStatusText": "",
+            "authHelpText": "Open Antigravity to refresh the model quotas."}
+  record.update(local_stats())
+
+  quota, live = fetch_quota()
+  if quota:
+    # A cached window that already reset says nothing about now.
+    utcnow = datetime.now(timezone.utc)
+    fresh = [l for l in quota.get("limits", []) if live or not_reset(l.get("resetsAt"), utcnow)]
+    record["limits"] = fresh
+    record["tierLabel"] = quota.get("tierLabel", "")
+    if not live and fresh:
+      when = quota.get("fetchedAt", "")[:16].replace("T", " ")
+      record["usageStatusText"] = f"Quotas from {when} UTC (Antigravity closed)"
+  print(json.dumps(record, separators=(",", ":")))
+
+
+if __name__ == "__main__":
+  main()

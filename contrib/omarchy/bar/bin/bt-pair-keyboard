@@ -1,0 +1,157 @@
+#!/usr/bin/python3
+"""Pair a Bluetooth LE keyboard that asks for a passkey (Logitech Wave Keys, MX Keys, K380...).
+
+  bt-pair-keyboard ["Wave Keys"]
+
+These keyboards only finish pairing after you TYPE a 6-digit code on them and
+press Enter. If nothing shows that code, the link stays unencrypted, BlueZ
+cannot read the HID service ("Request attribute has encountered an unlikely
+error") and the keyboard never works. This runs bluetoothctl with a
+KeyboardDisplay agent, shows the code big, then trusts and connects.
+"""
+
+import os
+import pty
+import re
+import select
+import sys
+import time
+
+NAME = sys.argv[1] if len(sys.argv) > 1 else "Wave Keys"
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x01|\x02")
+
+
+class Ctl:
+  def __init__(self):
+    self.pid, self.fd = pty.fork()
+    if self.pid == 0:
+      os.execvp("bluetoothctl", ["bluetoothctl", "--agent", "KeyboardDisplay"])
+    self.buf = ""
+
+  def send(self, line):
+    os.write(self.fd, (line + "\n").encode())
+
+  def read(self, timeout):
+    end = time.time() + timeout
+    out = ""
+    while time.time() < end:
+      r, _, _ = select.select([self.fd], [], [], max(0, end - time.time()))
+      if not r:
+        break
+      try:
+        chunk = os.read(self.fd, 4096).decode(errors="replace")
+      except OSError:
+        break
+      out += ANSI.sub("", chunk)
+    return out
+
+  def wait_for(self, pattern, timeout, on_line=None):
+    rx = re.compile(pattern)
+    end = time.time() + timeout
+    while time.time() < end:
+      text = self.read(0.5)
+      if not text:
+        continue
+      self.buf += text
+      if on_line:
+        on_line(text)
+      m = rx.search(self.buf)
+      if m:
+        return m
+    return None
+
+
+def big(code):
+  print("\n" + "=" * 46)
+  print(f"   ESCRIBE EN EL TECLADO:   {code}   y luego Enter")
+  print("=" * 46 + "\n", flush=True)
+
+
+def main():
+  print(f"Emparejar «{NAME}»\n")
+  print("1. Pon el teclado en modo emparejamiento: mantén pulsada una tecla Easy-Switch")
+  print("   (1, 2 o 3) unos 3 segundos, hasta que su luz parpadee RÁPIDO.")
+  print("   Usa un canal libre, o el que antes usabas en Windows (este lo reemplaza).\n")
+  input("   Cuando parpadee rápido, pulsa Enter aquí... ")
+
+  ctl = Ctl()
+  ctl.read(1.5)
+  ctl.send("power on")
+  ctl.send("pairable on")
+  ctl.send("default-agent")
+  ctl.read(1)
+
+  # Forget stale, half-paired entries with this name (the address can change per channel).
+  ctl.send("devices")
+  listing = ctl.read(1.5)
+  for mac in re.findall(r"Device ([0-9A-F:]{17}) " + re.escape(NAME), listing):
+    print(f"   Quitando el registro anterior {mac}")
+    ctl.send(f"remove {mac}")
+    ctl.read(1.5)
+
+  print("\n2. Buscando el teclado (hasta 90 s)...", flush=True)
+  ctl.buf = ""
+  ctl.send("scan le")
+  # LE devices often show up by address first and get their name a moment
+  # later ("[CHG] Device X Name: ..."), so watch both and poll the list.
+  name_rx = re.compile(r"Device ([0-9A-F:]{17}) (?:Name: |Alias: )?" + re.escape(NAME))
+  mac = None
+  end = time.time() + 90
+  while time.time() < end and not mac:
+    ctl.buf += ctl.read(3)
+    m = name_rx.search(ctl.buf)
+    if not m:
+      ctl.send("devices")
+      ctl.buf += ctl.read(1)
+      m = name_rx.search(ctl.buf)
+    if m:
+      mac = m.group(1)
+  if not mac:
+    ctl.send("scan off")
+    print("   No apareció. ¿La luz parpadeaba rápido? Vuelve a intentarlo.")
+    seen = sorted({f"{mac} {name.strip()}" for mac, name in re.findall(r"Device ([0-9A-F:]{17}) ([^\r\n]*)", ctl.buf)})
+    print("   Dispositivos vistos:", ", ".join(seen[:8]) or "ninguno")
+    print("   Si tienes el receptor Logi Bolt, prueba otro canal Easy-Switch (el 1 suele estar ligado al receptor)")
+    print("   o vincúlalo al receptor con: solaar pair")
+    return 1
+  print(f"   Encontrado: {mac}")
+  ctl.send("scan off")
+  ctl.read(1)
+
+  print("\n3. Emparejando...", flush=True)
+  ctl.buf = ""
+  ctl.send(f"pair {mac}")
+  shown = set()
+
+  def watch(text):
+    for code in re.findall(r"Passkey:?\s*(\d{6})", text) + re.findall(r"Confirm passkey (\d{6})", text):
+      if code not in shown:
+        shown.add(code)
+        big(code)
+      if "Confirm passkey" in text:
+        ctl.send("yes")
+
+  res = ctl.wait_for(r"Pairing successful|Failed to pair[^\n]*|AuthenticationFailed|AuthenticationCanceled", 90, watch)
+  if not res or "successful" not in res.group(0):
+    print(f"\n   No se emparejó: {res.group(0) if res else 'se agotó el tiempo'}")
+    print("   Repite: luz parpadeando rápido, y escribe el código en el teclado + Enter a tiempo.")
+    ctl.send("quit")
+    return 1
+  print("   Emparejado.")
+  ctl.send(f"trust {mac}")
+  ctl.read(1)
+  ctl.send(f"connect {mac}")
+  ctl.wait_for(r"Connection successful|Failed to connect", 20)
+  ctl.buf = ""
+  ctl.send(f"info {mac}")
+  info = ctl.read(2)
+  ctl.send("quit")
+  paired = "Paired: yes" in info and "Bonded: yes" in info
+  connected = "Connected: yes" in info
+  print(f"\n   Paired/Bonded: {'sí' if paired else 'NO'} · Conectado: {'sí' if connected else 'NO'}")
+  print("   Escribe algo con el teclado para probarlo." if paired and connected else "   Revisa: journalctl -u bluetooth -b")
+  return 0 if paired else 1
+
+
+if __name__ == "__main__":
+  sys.exit(main())

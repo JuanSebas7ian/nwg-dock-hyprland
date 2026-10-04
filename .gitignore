@@ -18,3 +18,5 @@ bin
 # vendor/
 
 /.idea
+# helper scripts of the Omarchy bar extras (not build output)
+!contrib/omarchy/bar/bin/
