@@ -106,6 +106,12 @@
       "src": "etc/limine-entry-tool.d/claude-bluetooth-mt7925.conf"
     },
     {
+      "dest": "/etc/limine-entry-tool.d/claude-usb-autosuspend.conf",
+      "mode": "644",
+      "owner": "root:root",
+      "src": "etc/limine-entry-tool.d/claude-usb-autosuspend.conf"
+    },
+    {
       "dest": "/etc/limine-entry-tool.d/claude-usb-fast-timeout.conf",
       "mode": "644",
       "owner": "root:root",
