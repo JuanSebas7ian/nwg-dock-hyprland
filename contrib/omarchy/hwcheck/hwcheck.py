@@ -744,7 +744,20 @@ def check_module_options(f):
 def check_builtin_options(f):
     options, _ = f.modprobe_config()
     builtin = set(f.builtin)
-    ignored = sorted({f"{mod}.{k}={v} en {src}" for mod, k, v, src in options if mod in builtin})
+    on_cmdline = {(norm_mod(k.split(".", 1)[0]), k.split(".", 1)[1]): v
+                  for k, v in cmdline_params(f.cmdline).items() if "." in k}
+    ignored, covered = set(), set()
+    for mod, k, v, src in options:
+        if mod not in builtin:
+            continue
+        if on_cmdline.get((mod, k)) == v:  # the same value is already passed on the kernel command line
+            covered.add(f"{mod}.{k}={v} en {src} (ya está en la línea de arranque)")
+        else:
+            ignored.add(f"{mod}.{k}={v} en {src}")
+    ignored = sorted(ignored)
+    if not ignored and covered:
+        return Finding("CF05", "conflicts", INFO,
+                       "Opciones de modprobe.d para módulos integrados, aplicadas por la línea de arranque", sorted(covered))
     if ignored:
         return Finding("CF05", "conflicts", WARN,
                        "Opciones en modprobe.d para módulos integrados en el kernel: no tienen efecto", ignored,

@@ -367,6 +367,14 @@ class Conflicts(unittest.TestCase):
         self.assertEqual(f.level, hc.WARN)
         self.assertIn("usbcore.autosuspend=-1", f.details[0])
 
+    def test_builtin_option_covered_by_cmdline(self):
+        s = healthy()
+        s.files["/etc/modprobe.d/omarchy-usb-autosuspend.conf"] = "options usbcore autosuspend=-1\n"
+        s.files["/proc/cmdline"] = s.files["/proc/cmdline"].rstrip("\n") + " usbcore.autosuspend=-1\n"
+        self.assertEqual(scan(s)["CF05"].level, hc.INFO)
+        s.files["/proc/cmdline"] = s.files["/proc/cmdline"].replace("usbcore.autosuspend=-1", "usbcore.autosuspend=5")
+        self.assertEqual(scan(s)["CF05"].level, hc.WARN)
+
     def test_effective_param_mismatch(self):
         s = healthy()
         s.files["/sys/module/btusb/parameters/enable_autosuspend"] = "Y\n"
