@@ -3,6 +3,9 @@ Description=iCloud Photos (rclone remote "icloud:", read-only) mounted at ~/iClo
 Documentation=man:rclone(1)
 Wants=network-online.target
 After=network-online.target rclone-icloud.service
+# A rejected sign-in fails every start: stop after 3 tries instead of asking Apple forever.
+StartLimitIntervalSec=15min
+StartLimitBurst=3
 
 [Service]
 Type=notify

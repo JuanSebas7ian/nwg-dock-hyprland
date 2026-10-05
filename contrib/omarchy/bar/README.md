@@ -65,7 +65,9 @@ terminan si escribes en ellos un código de 6 dígitos: lo muestra en grande, y 
   `rclone-icloud-photos.service` (opcional, desde el panel o `icloud-setup photos`): iCloud Fotos **solo lectura** en `~/iCloudPhotos`.
   Se instalan siempre; el montaje se activa cuando existe el remoto. Limitaciones de Apple: contraseña normal (no las de app),
   "Acceder a los datos de iCloud en la web" activado en el iPhone, y la sesión caduca a los 30 días (`icloud-setup reconnect`;
-  la fecha queda en `~/.local/state/omarchy-icloud/authenticated`). Pruebas: `python3 -m unittest tests.test_icloud`.
+  la fecha queda en `~/.local/state/omarchy-icloud/authenticated`). Con Protección de datos avanzada, `Missing X-APPLE-WEBAUTH-TOKEN cookie`
+  suele ser que hay condiciones de iCloud sin aceptar: entrar en icloud.com, aceptarlas y `icloud-setup reconnect` (rclone #9658/#9919).
+  Tras 3 fallos en 15 min el montaje deja de reintentar (no insiste ante Apple). Pruebas: `python3 -m unittest tests.test_icloud`.
 - `spotifyd.service` (del paquete `spotifyd`): reproductor de Spotify Connect, configurado en
   `~/.config/spotifyd/spotifyd.conf`.
 

@@ -20,6 +20,39 @@ finish() {
   exit "${2:-0}"
 }
 
+# Drives rclone's question/answer protocol: each step prints JSON with the next
+# question (Option) and a State to pass back with the answer. Ends when State is empty.
+answer_loop() {
+  local out=$1 state name help error answer secret
+  while :; do
+    if ! state=$(jq -er '.State // ""' <<<"$out" 2>/dev/null); then
+      # Not JSON: rclone failed (wrong password, network...). Show only its error.
+      error=$(grep -m1 -E '^Error: ' <<<"$out" || true)
+      printf '\nApple/rclone respondió: %s\n' "${error#Error: }"
+      [[ $out == *"incorrect username or password"* ]] && echo "→ Apple ID o contraseña incorrectos (no sirven las contraseñas de app)."
+      return 1
+    fi
+    error=$(jq -r '.Error // ""' <<<"$out")
+    [[ -n $error ]] && printf '\nApple/rclone respondió: %s\n' "$error"
+    [[ -z $state ]] && { [[ -z $error ]]; return; }
+    name=$(jq -r '.Option.Name // ""' <<<"$out")
+    help=$(jq -r '.Option.Help // ""' <<<"$out")
+    secret=$(jq -r '.Option.IsPassword // false' <<<"$out")
+    case $name in
+    config_2fa) printf '\nCódigo de verificación: en el iPhone toca "Permitir" y escribe aquí los 6 dígitos\n(o escribe sms para recibirlo por mensaje).\n' ;;
+    *) printf '\n%s\n' "$help" ;;
+    esac
+    if [[ $secret == true ]]; then
+      read -rsp "$name: " answer
+      echo
+    else
+      read -rp "$name: " answer
+    fi
+    [[ -z $answer && $name == config_2fa ]] && { echo "El código no puede ir vacío."; continue; }
+    out=$(rclone config update "$REMOTE" --continue --state "$state" --result "$answer" --non-interactive 2>&1)
+  done
+}
+
 command -v rclone >/dev/null || finish "Falta rclone: omarchy pkg add rclone" 1
 backends=$(rclone help backends 2>/dev/null)
 [[ $backends == *iclouddrive* ]] || finish "Este rclone no trae iCloud (hace falta 1.69 o más nuevo)." 1
@@ -48,8 +81,20 @@ La contraseña se guarda ofuscada en ~/.config/rclone/rclone.conf, como la de Go
 EOF
 
 if $exists; then
-  say "Renovando la sesión de $REMOTE: (escribe el código 2FA cuando lo pida)"
-  rclone config reconnect "$REMOTE:" || finish "No se pudo renovar la sesión." 1
+  # Recreate the remote with the saved Apple ID and password: a fresh sign-in
+  # (new 2FA code, new trust token and web cookies) through the same loop.
+  say "Renovando la sesión de $REMOTE: (solo hará falta el código 2FA)"
+  conf=$(rclone config dump 2>/dev/null)
+  apple_id=$(jq -r --arg r "$REMOTE" '.[$r].apple_id // ""' <<<"$conf")
+  obscured=$(jq -r --arg r "$REMOTE" '.[$r].password // ""' <<<"$conf")
+  unset conf
+  [[ -n $apple_id && -n $obscured ]] || finish "El remoto $REMOTE: no tiene Apple ID o contraseña: bórralo (rclone config delete $REMOTE) y ejecuta icloud-setup." 1
+  rclone config delete "$REMOTE"
+  if ! answer_loop "$(rclone config create "$REMOTE" iclouddrive service=drive apple_id="$apple_id" \
+    password="$obscured" --no-obscure --non-interactive 2>&1)"; then
+    rclone config delete "$REMOTE" >/dev/null 2>&1
+    finish "No se pudo renovar la sesión. Ejecuta icloud-setup para empezar de cero." 1
+  fi
 else
   [[ $mode == reconnect ]] && finish "No existe el remoto $REMOTE:; ejecuta icloud-setup sin argumentos." 1
   read -rp $'\nApple ID (correo): ' apple_id
@@ -59,16 +104,28 @@ else
   [[ -n $pw ]] || finish "Sin contraseña, no se hizo nada." 1
   obscured=$(printf '%s' "$pw" | rclone obscure -)
   unset pw
-  say "Creando el remoto $REMOTE: (escribe el código 2FA cuando lo pida)"
-  if ! rclone config create "$REMOTE" iclouddrive service=drive apple_id="$apple_id" password="$obscured" --no-obscure; then
+  say "Iniciando sesión en Apple"
+  # Without --non-interactive, 'config create' answers the 2FA question with its
+  # (empty) default and fails ("2FA codes can't be blank"); this asks each one.
+  if ! answer_loop "$(rclone config create "$REMOTE" iclouddrive service=drive apple_id="$apple_id" \
+    password="$obscured" --no-obscure --non-interactive 2>&1)"; then
     rclone config delete "$REMOTE" >/dev/null 2>&1
-    finish "No se pudo iniciar sesión. Revisa la contraseña y el ajuste de la web en el iPhone." 1
+    finish "No se pudo iniciar sesión. Revisa la contraseña, el código y el ajuste de la web en el iPhone." 1
   fi
 fi
 
 say "Comprobando el acceso"
-if ! timeout 120 rclone lsd "$REMOTE:" --max-depth 1 >/dev/null; then
-  finish "rclone no pudo leer iCloud Drive. Vuelve a intentarlo con: icloud-setup reconnect" 1
+if ! check=$(timeout 120 rclone lsd "$REMOTE:" --max-depth 1 2>&1); then
+  printf '%s\n' "$check" | grep -E 'ERROR|CRITICAL|NOTICE' | tail -3
+  if [[ $check == *requestPCS* || $check == *WEBAUTH-TOKEN* || $check == *PCS* ]]; then
+    cat <<'EOF'
+
+Tu cuenta tiene Protección de datos avanzada y Apple no dio acceso web a iCloud Drive.
+En el iPhone: Ajustes > [tu nombre] > iCloud > "Acceder a los datos de iCloud en la web" = activado
+(y aprueba el aviso si aparece). Después: icloud-setup reconnect (solo pide el código nuevo).
+EOF
+  fi
+  finish "rclone no pudo leer iCloud Drive." 1
 fi
 mkdir -p "$STATE"
 date +%s >"$STATE/authenticated"
