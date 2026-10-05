@@ -1,0 +1,27 @@
+[Unit]
+Description=iCloud Drive (rclone remote "icloud:") mounted at ~/iCloud
+Documentation=man:rclone(1)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=notify
+ExecStartPre=/usr/bin/mkdir -p %h/iCloud
+ExecStartPre=/usr/bin/rm -f %t/rclone-icloud.sock
+# Like the Google Drive mount: full VFS cache (documents opened or written here
+# stay on disk) and a private remote-control socket (in $XDG_RUNTIME_DIR, mode
+# 0700) that the bar widget reads. iCloud has no change feed: folders are
+# re-read every 5 min.
+ExecStart=/usr/bin/rclone mount icloud: %h/iCloud \
+  --vfs-cache-mode full \
+  --vfs-cache-max-age 168h \
+  --vfs-cache-max-size 20G \
+  --dir-cache-time 5m \
+  --rc --rc-addr unix://%t/rclone-icloud.sock --rc-no-auth \
+  --log-level NOTICE
+ExecStop=/usr/bin/fusermount3 -uz %h/iCloud
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

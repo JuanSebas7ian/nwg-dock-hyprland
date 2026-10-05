@@ -1,0 +1,27 @@
+[Unit]
+Description=iCloud Photos (rclone remote "icloud:", read-only) mounted at ~/iCloudPhotos
+Documentation=man:rclone(1)
+Wants=network-online.target
+After=network-online.target rclone-icloud.service
+
+[Service]
+Type=notify
+ExecStartPre=/usr/bin/mkdir -p %h/iCloudPhotos
+# Flags recommended by rclone for iCloud Photos (read-only; album listings are
+# cached on disk, the first listing of a big library takes minutes).
+ExecStart=/usr/bin/rclone mount icloud: %h/iCloudPhotos \
+  --iclouddrive-service photos \
+  --read-only \
+  --vfs-refresh \
+  --vfs-cache-mode full \
+  --vfs-cache-max-age 72h \
+  --vfs-cache-max-size 10G \
+  --dir-cache-time 1h \
+  --attr-timeout 1m \
+  --log-level NOTICE
+ExecStop=/usr/bin/fusermount3 -uz %h/iCloudPhotos
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

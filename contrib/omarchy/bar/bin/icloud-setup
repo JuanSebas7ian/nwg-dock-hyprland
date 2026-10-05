@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Conecta iCloud Drive con rclone (remoto "icloud:") y lo monta en ~/iCloud.
+#
+#   icloud-setup             primera vez: Apple ID + contraseña + código 2FA; si ya existe, renueva la sesión
+#   icloud-setup reconnect   renueva la sesión (Apple la caduca a los 30 días)
+#   icloud-setup photos      además monta iCloud Fotos (solo lectura) en ~/iCloudPhotos
+#
+# Requisitos de Apple: contraseña normal (no sirven las de app) y, en el iPhone,
+# Ajustes > [tu nombre] > iCloud > "Acceder a los datos de iCloud en la web" activado.
+# Con Protección de datos avanzada, además hay que aprobar el aviso en un dispositivo de confianza.
+set -uo pipefail
+
+REMOTE=icloud
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-icloud
+
+say() { printf '\n==> %s\n' "$*"; }
+finish() {
+  printf '\n%s\nPulsa Enter para cerrar.' "$1"
+  read -r _ || true
+  exit "${2:-0}"
+}
+
+command -v rclone >/dev/null || finish "Falta rclone: omarchy pkg add rclone" 1
+backends=$(rclone help backends 2>/dev/null)
+[[ $backends == *iclouddrive* ]] || finish "Este rclone no trae iCloud (hace falta 1.69 o más nuevo)." 1
+
+remotes=$(rclone listremotes 2>/dev/null)
+exists=false
+[[ $'\n'$remotes$'\n' == *$'\n'$REMOTE:$'\n'* ]] && exists=true
+
+mode=${1:-}
+if [[ $mode == photos ]]; then
+  $exists || finish "Primero conecta iCloud Drive: icloud-setup" 1
+  systemctl --user daemon-reload
+  if systemctl --user enable --now rclone-icloud-photos.service; then
+    finish "iCloud Fotos montado (solo lectura) en ~/iCloudPhotos. La primera vez, listar la fototeca puede tardar minutos."
+  fi
+  finish "No arrancó: journalctl --user -u rclone-icloud-photos" 1
+fi
+
+cat <<'EOF'
+iCloud Drive en Omarchy
+=======================
+Antes de seguir, en el iPhone:
+  Ajustes > [tu nombre] > iCloud > "Acceder a los datos de iCloud en la web" = activado.
+Apple pedirá un código de 6 dígitos en tus dispositivos (o escribe "sms" para recibirlo por mensaje).
+La contraseña se guarda ofuscada en ~/.config/rclone/rclone.conf, como la de Google Drive.
+EOF
+
+if $exists; then
+  say "Renovando la sesión de $REMOTE: (escribe el código 2FA cuando lo pida)"
+  rclone config reconnect "$REMOTE:" || finish "No se pudo renovar la sesión." 1
+else
+  [[ $mode == reconnect ]] && finish "No existe el remoto $REMOTE:; ejecuta icloud-setup sin argumentos." 1
+  read -rp $'\nApple ID (correo): ' apple_id
+  [[ -n $apple_id ]] || finish "Sin Apple ID, no se hizo nada." 1
+  read -rsp 'Contraseña de Apple ID (no se muestra): ' pw
+  echo
+  [[ -n $pw ]] || finish "Sin contraseña, no se hizo nada." 1
+  obscured=$(printf '%s' "$pw" | rclone obscure -)
+  unset pw
+  say "Creando el remoto $REMOTE: (escribe el código 2FA cuando lo pida)"
+  if ! rclone config create "$REMOTE" iclouddrive service=drive apple_id="$apple_id" password="$obscured" --no-obscure; then
+    rclone config delete "$REMOTE" >/dev/null 2>&1
+    finish "No se pudo iniciar sesión. Revisa la contraseña y el ajuste de la web en el iPhone." 1
+  fi
+fi
+
+say "Comprobando el acceso"
+if ! timeout 120 rclone lsd "$REMOTE:" --max-depth 1 >/dev/null; then
+  finish "rclone no pudo leer iCloud Drive. Vuelve a intentarlo con: icloud-setup reconnect" 1
+fi
+mkdir -p "$STATE"
+date +%s >"$STATE/authenticated"
+
+say "Montando iCloud Drive en ~/iCloud"
+systemctl --user daemon-reload
+systemctl --user enable rclone-icloud.service >/dev/null 2>&1
+systemctl --user restart rclone-icloud.service || finish "El montaje no arrancó: journalctl --user -u rclone-icloud" 1
+systemctl --user is-active -q rclone-icloud-photos.service && systemctl --user restart rclone-icloud-photos.service
+
+finish "Listo: iCloud Drive está en ~/iCloud. Apple pedirá renovar la sesión en 30 días (el widget avisa)."

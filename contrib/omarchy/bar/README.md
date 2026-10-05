@@ -16,6 +16,7 @@ contrib/omarchy/bar/install.sh --remove   # quita los widgets y colectores
 |---|---|---|---|
 | `juansebas7ian.spotify` | Spotify | izq. panel · central pausa · der. siguiente · rueda | **Independiente de la app de Spotify.** La reproducción es spotifyd (dispositivo "Omarchy") por MPRIS: canción con carátula, progreso, aleatorio, repetir, volumen; en frío despierta a spotifyd (`TransferPlayback`) y reanuda o pone la última canción; abrir una lista, álbum o canción usa `OpenUri` de spotifyd (sin API). Pestañas Recientes, Listas, Álbumes y Top del mes leídas de la API con el token de tu propia app (`spotify-bar-setup`), que spotify-player guarda y renueva; se leen directamente porque spotify-player 0.24.1 no tolera los campos que Spotify quitó en 2026 (`tracks`, `popularity`) |
 | `juansebas7ian.gdrive` | Drive (↑N = archivos por subir) | izq. panel · der. abrir carpeta | Interruptor de montaje, espacio (Drive · Gmail/Fotos · papelera), caché local, transferencias y cola de subida en vivo, archivos recientes de este PC |
+| `juansebas7ian.icloud` | iCloud (↑N = archivos por subir; rojo = error o sesión por caducar) | izq. panel · der. abrir carpeta | Conectar (Apple ID + 2FA) y renovar la sesión de 30 días, interruptor de montaje, espacio, caché local, transferencias y cola de subida, **documentos con su estado** (☁ solo en iCloud, ◐ en parte, ✓ en este PC, ⏳ por subir, ↑ subiendo; clic en carpeta = entrar, en archivo = abrir, 󰇚 = descargar a este PC), recientes, montar iCloud Fotos |
 | `juansebas7ian.ollama` | 󰧑 (% mientras descarga) | izq. panel · der. ollama.com | Modelos descargados y cargados, espacio real en disco, buscar en la biblioteca de ollama.com, descargar `nombre:tag`, chatear en terminal, borrar, liberar memoria |
 | `juansebas7ian.sysmon` | 󰍛 (rojo si CPU ≥ 85 °C, GPU ≥ 83 °C o RAM ≥ 90 %) | izq. panel · der. btop | CPU (uso, frecuencia, temperatura, carga), RAM y swap, DDR5, ventiladores y temperaturas de la placa (`nct6775`; nombres en `~/.config/omarchy-sysmon/fans.json`), NVIDIA vía NVML (núcleo, ancho de banda de memoria, VRAM, consumo, temperatura, ventilador, PCIe Gen/ancho y tráfico, codificador/decodificador, procesos y su uso), Radeon integrada, NVMe, disco y red |
 | `juansebas7ian.storage` | 󰋊 (rojo con < 10 % libre o un aviso de salud) | izq. panel · der. `dua` | Cada disco con sus particiones y la salud NVMe por UDisks2 sin root; qué usa el disco del sistema con clic para entrar en carpetas; **Steam por juego** (juego, prefijo de Proton, shaders, última partida) y herramientas; **salud y firmware** ("Samsung Magician" para Linux): firmware instalado frente al último de Samsung (su página de herramientas) o de LVFS (fwupd), TBW consumidos frente a los garantizados, apagados inseguros, autoprueba SMART (pide contraseña por polkit) y enlace al ISO de firmware; lo disponible; lo que se puede liberar |
@@ -59,6 +60,12 @@ terminan si escribes en ellos un código de 6 dígitos: lo muestra en grande, y 
 - `rclone-gdrive.service`: monta el remoto `rclone:` en `~/GoogleDrive` con caché VFS completa y un socket
   de control privado (`$XDG_RUNTIME_DIR/rclone-gdrive.sock`) que lee el widget. Otro nombre de remoto:
   `RCLONE_REMOTE=midrive: install.sh`.
+- `rclone-icloud.service`: monta el remoto `icloud:` (tipo `iclouddrive`, rclone ≥ 1.69) en `~/iCloud`, caché VFS completa
+  (máx. 20 GB, 7 días) y socket `$XDG_RUNTIME_DIR/rclone-icloud.sock`. iCloud no avisa de cambios: las carpetas se releen cada 5 min.
+  `rclone-icloud-photos.service` (opcional, desde el panel o `icloud-setup photos`): iCloud Fotos **solo lectura** en `~/iCloudPhotos`.
+  Se instalan siempre; el montaje se activa cuando existe el remoto. Limitaciones de Apple: contraseña normal (no las de app),
+  "Acceder a los datos de iCloud en la web" activado en el iPhone, y la sesión caduca a los 30 días (`icloud-setup reconnect`;
+  la fecha queda en `~/.local/state/omarchy-icloud/authenticated`). Pruebas: `python3 -m unittest tests.test_icloud`.
 - `spotifyd.service` (del paquete `spotifyd`): reproductor de Spotify Connect, configurado en
   `~/.config/spotifyd/spotifyd.conf`.
 

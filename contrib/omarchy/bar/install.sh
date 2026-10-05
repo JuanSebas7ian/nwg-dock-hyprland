@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Instala los extras de la barra de Omarchy: widgets de Spotify, Google Drive,
+# Instala los extras de la barra de Omarchy: widgets de Spotify, Google Drive, iCloud Drive,
 # Ollama, monitor del sistema y drivers, más los colectores de uso de
 # Antigravity y opencode para el panel de agentes.
 #
@@ -26,6 +26,7 @@ RCLONE_REMOTE=${RCLONE_REMOTE:-rclone:}
 WIDGETS=(
   "juansebas7ian.spotify:omarchy.tray"
   "juansebas7ian.gdrive:omarchy.dropbox"
+  "juansebas7ian.icloud:juansebas7ian.gdrive"
   "juansebas7ian.ollama:omarchy.agents"
   "juansebas7ian.sysmon:juansebas7ian.cooling"
   "juansebas7ian.cooling:juansebas7ian.ollama"
@@ -33,7 +34,7 @@ WIDGETS=(
   "juansebas7ian.nvidia:juansebas7ian.storage"
   "juansebas7ian.drivers:juansebas7ian.nvidia"
 )
-COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup icloud-setup)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }
@@ -97,8 +98,8 @@ remove_all() {
   done
   rm -f "${XDG_STATE_HOME:-$HOME/.local/state}"/omarchy/agents/usage/{antigravity,opencode}.json
   systemctl --user daemon-reload
-  say "El montaje de Drive (rclone-gdrive.service) y spotifyd se dejan como están."
-  say "Para quitarlos: systemctl --user disable --now rclone-gdrive.service spotifyd.service"
+  say "Los montajes de Drive e iCloud (rclone-gdrive, rclone-icloud, rclone-icloud-photos) y spotifyd se dejan como están."
+  say "Para quitarlos: systemctl --user disable --now rclone-gdrive.service rclone-icloud.service rclone-icloud-photos.service spotifyd.service"
   omarchy restart shell >/dev/null 2>&1 || true
 }
 
@@ -145,6 +146,16 @@ if command -v rclone >/dev/null && remote_exists; then
     say "  sin cambios: $UNITS/rclone-gdrive.service"
 else
   warn "sin el remoto rclone '$RCLONE_REMOTE': configúralo con 'rclone config' y vuelve a ejecutar (o RCLONE_REMOTE=nombre: $0)"
+fi
+
+# --------------------------------------------------------------- iCloud Drive
+# The units are always installed (the widget offers "connect" when the remote
+# is missing); the mount is only enabled once icloud-setup created "icloud:".
+if command -v rclone >/dev/null; then
+  say "iCloud Drive: montaje de icloud: en ~/iCloud (y Fotos en ~/iCloudPhotos, opcional)"
+  for unit in rclone-icloud.service rclone-icloud-photos.service; do
+    install_file "$HERE/systemd/$unit" "$UNITS/$unit" 644 || say "  sin cambios: $UNITS/$unit"
+  done
 fi
 
 # --------------------------------------------------------------- Spotify
@@ -227,6 +238,9 @@ systemctl --user enable --now omarchy-session.service >/dev/null
 if [[ -e $UNITS/rclone-gdrive.service ]]; then
   systemctl --user enable --now rclone-gdrive.service >/dev/null || warn "el montaje de Drive no arrancó: journalctl --user -u rclone-gdrive"
 fi
+if [[ -e $UNITS/rclone-icloud.service ]] && RCLONE_REMOTE=icloud: remote_exists; then
+  systemctl --user enable --now rclone-icloud.service >/dev/null || warn "el montaje de iCloud no arrancó: journalctl --user -u rclone-icloud (¿sesión caducada? icloud-setup reconnect)"
+fi
 if command -v spotifyd >/dev/null && compgen -G "$HOME/.cache/spotifyd/oauth/*" >/dev/null; then
   systemctl --user enable --now spotifyd.service >/dev/null || true
 fi
@@ -255,5 +269,7 @@ Listo. Pasos que solo puedes hacer tú (una vez):
   - Spotify en este PC sin abrir la app (Premium): spotifyd authenticate && systemctl --user enable --now spotifyd
   - Listas de Spotify en el panel: spotify-bar-setup (o "Connect" en el panel) guía la creación de tu app
     de Spotify, guarda el Client ID y autoriza spotify-player.
+  - iCloud Drive: icloud-setup (o "Connect" en el panel de iCloud): Apple ID, contraseña y código 2FA.
+    Apple caduca la sesión a los 30 días: icloud-setup reconnect (el widget avisa 3 días antes).
 Respaldos de lo reemplazado: ${BACKUPS}
 EOF
