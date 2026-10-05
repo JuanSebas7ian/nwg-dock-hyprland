@@ -385,6 +385,20 @@ class Facts:
                     kernels[rel] = out.strip()
         return kernels
 
+    def intentional_loads(self):
+        """Modules a udev rule loads explicitly (`RUN+="/usr/bin/modprobe <mod>"`): {module: rule file}."""
+        found = {}
+        for d in ("/usr/lib/udev/rules.d", "/etc/udev/rules.d"):
+            for name in sorted(self.sys.listdir(d)):
+                if not name.endswith(".rules"):
+                    continue
+                for line in (self.sys.read(f"{d}/{name}") or "").splitlines():
+                    if line.lstrip().startswith("#") or "RUN" not in line:
+                        continue
+                    for m in re.findall(r"modprobe\s+(?:-\S+\s+)*([A-Za-z0-9_-]+)", line):
+                        found[norm_mod(m)] = f"{d}/{name}"
+        return found
+
     def modprobe_config(self):
         """Archivos efectivos de modprobe.d (un nombre en /etc tapa al mismo nombre en /usr/lib)."""
         chosen = {}
@@ -768,10 +782,20 @@ def check_effective_params(f):
 def check_blacklisted_loaded(f):
     _, blacklist = f.modprobe_config()
     loaded = set(f.loaded)
-    bad = sorted({f"{m} (lista negra en {src})" for m, src in blacklist if m in loaded})
+    wanted = f.intentional_loads()
+    bad, meant = set(), set()
+    for m, src in blacklist:
+        if m not in loaded:
+            continue
+        if m in wanted:
+            meant.add(f"{m} (lista negra en {src}; lo carga a propósito {wanted[m]})")
+        else:
+            bad.add(f"{m} (lista negra en {src})")
     if bad:
-        return Finding("CF07", "conflicts", FAIL, "Módulos en lista negra que igual están cargados", bad,
-                       "Probablemente vienen del initramfs: `sudo mkinitcpio -P` (o `limine-update`) y reinicia.")
+        return Finding("CF07", "conflicts", FAIL, "Módulos en lista negra que igual están cargados", sorted(bad),
+                       "Probablemente vienen del initramfs: `sudo limine-update` y reinicia.")
+    if meant:
+        return Finding("CF07", "conflicts", INFO, "Módulos en lista negra cargados a propósito", sorted(meant))
     return Finding("CF07", "conflicts", OK, "Ningún módulo en lista negra está cargado")
 
 

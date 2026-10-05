@@ -377,6 +377,20 @@ class Conflicts(unittest.TestCase):
         s.files["/proc/modules"] += "nouveau 16384 0 - Live 0x0\n"
         self.assertEqual(scan(s)["CF07"].level, hc.FAIL)
 
+    def test_blacklisted_but_loaded_on_purpose(self):
+        s = healthy()
+        s.files["/etc/modprobe.d/blacklist-xpad.conf"] = "blacklist xpad\n"
+        s.files["/proc/modules"] += "xpad 53248 0 - Live 0x0\n"
+        self.assertEqual(scan(s)["CF07"].level, hc.FAIL)
+        s.files["/etc/udev/rules.d/70-claude-xpad.rules"] = (
+            '# a comment that says modprobe nouveau does not count\n'
+            'ACTION=="add", SUBSYSTEM=="usb", RUN+="/usr/bin/modprobe xpad"\n')
+        r = scan(s)["CF07"]
+        self.assertEqual(r.level, hc.INFO)
+        s.files["/proc/modules"] += "nouveau 16384 0 - Live 0x0\n"
+        s.files["/etc/modprobe.d/blacklist-nouveau.conf"] = "blacklist nouveau\n"
+        self.assertEqual(scan(s)["CF07"].level, hc.FAIL)
+
     def test_conflicting_packages(self):
         s = healthy()
         set_package(s, "nvidia-dkms", "610.57.04-1")
