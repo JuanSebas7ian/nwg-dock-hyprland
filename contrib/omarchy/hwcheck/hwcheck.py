@@ -313,7 +313,7 @@ class Facts:
         self.pci = self._pci()
         self.usb = self._usb()
         self.net = self._net()
-        self.bt_adapters = [d for d in s.listdir("/sys/class/bluetooth") if d.startswith("hci")]
+        self.bt_adapters = [d for d in s.listdir("/sys/class/bluetooth") if d.startswith("hci") and ":" not in d]  # hciN:H = a connection, not an adapter
         self.rfkill = self._rfkill()
         self.kernels = self._kernels()
         rc, out = s.run("dkms", "status")

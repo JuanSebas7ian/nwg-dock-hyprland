@@ -199,6 +199,13 @@ class Hardware(unittest.TestCase):
         del s.files["/sys/class/bluetooth/hci0/x"]
         self.assertEqual(scan(s)["HW06"].level, hc.WARN)
 
+    def test_bt_connection_is_not_an_adapter(self):
+        # /sys/class/bluetooth/hci0:50 is an ACL connection to a paired device, not a second adapter
+        s = healthy()
+        s.files["/sys/class/bluetooth/hci0:50/x"] = ""
+        self.assertEqual(hc.Facts(s).bt_adapters, ["hci0"])
+        self.assertEqual(hc.diff_states(hc.collect_state(hc.Facts(healthy())), hc.collect_state(hc.Facts(s))), [])
+
     def test_rfkill_hard_block(self):
         s = healthy()
         s.files["/sys/class/rfkill/rfkill0/hard"] = "1\n"

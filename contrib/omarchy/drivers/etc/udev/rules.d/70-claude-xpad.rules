@@ -1,0 +1,5 @@
+# Load xpad for wired Xbox pads (Omarchy blacklists xpad for xpadneo, which only drives Bluetooth pads).
+# systemd-modules-load honours that blacklist, so load it on demand: an explicit "modprobe xpad" ignores it.
+# Matches xpad's own aliases: Xbox 360 wired (ff/5d/01) and Xbox One wired (ff/47/d0).
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="ff", ATTR{bInterfaceSubClass}=="5d", ATTR{bInterfaceProtocol}=="01", RUN+="/usr/bin/modprobe xpad"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="ff", ATTR{bInterfaceSubClass}=="47", ATTR{bInterfaceProtocol}=="d0", RUN+="/usr/bin/modprobe xpad"

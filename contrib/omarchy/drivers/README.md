@@ -28,8 +28,9 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 - Una sola reconstrucción del initramfs/UKI: `limine-update` (Omarchy no tiene presets de mkinitcpio; `mkinitcpio -P` solo si existen).
 - Los archivos con `"policy": "if-missing"` los genera Omarchy (nvidia.conf de modprobe y mkinitcpio, blacklist-xpad, xpadneo): solo se
   instalan si faltan, nunca se sobrescriben ni se comparan.
-- `modules-load.d/claude-xpad.conf` carga `xpad` aunque Omarchy deje `blacklist xpad` (la lista negra solo impide la carga
-  automática): `xpadneo` solo maneja Bluetooth, y sin `xpad` los controles Xbox con cable (p. ej. Xbox 360, `045e:028e`) no tienen driver.
+- `udev/rules.d/70-claude-xpad.rules` carga `xpad` al conectar un control Xbox con cable (360 u One) aunque Omarchy deje
+  `blacklist xpad`: `xpadneo` solo maneja Bluetooth. Un `modules-load.d` no sirve, porque `systemd-modules-load` respeta la lista
+  negra ("Module 'xpad' is deny-listed"); un `modprobe xpad` explícito la ignora.
 
 ## Manifiesto
 
@@ -52,7 +53,7 @@ luego `contrib/omarchy/drivers/install.sh --wait` y reiniciar.
 
 ## Control Xbox 360 con cable: `xpad` y `pad-keepalive`
 
-- `etc/modules-load.d/claude-xpad.conf` carga `xpad` (ver arriba): sin él, el control con cable (`045e:028e`) no tiene driver.
+- `etc/udev/rules.d/70-claude-xpad.rules` carga `xpad` (ver arriba): sin ella, el control con cable (`045e:028e`) no tiene driver.
 - **Cortes USB jugando** (2026-10-04, ELDEN RING): el puerto del chipset (`usb6-port2`, `xhci-pci-prom21`) registraba
   `disabled by hub (EMI?), re-enabling...` y desconexiones limpias, cada ~2 min y solo con el juego abierto. Se descartaron el driver,
   el autosuspend (`power/control = on`), la vibración (20 s al máximo y 3.000 órdenes en 30 s) y el cable (30 s doblándolo).
