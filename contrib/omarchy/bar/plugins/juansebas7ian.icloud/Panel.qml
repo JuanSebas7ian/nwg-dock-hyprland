@@ -430,7 +430,8 @@ Panel {
                   }
                   Text {
                     width: parent.width
-                    text: docRow.modelData.dir ? "folder · " + root.ago(docRow.modelData.mtime)
+                    // iCloud gives folders no date: rclone reports 2000-01-01, so it is hidden.
+                    text: docRow.modelData.dir ? "folder" + (docRow.modelData.mtime > 978307200 ? " · " + root.ago(docRow.modelData.mtime) : "")
                       : root.bytes(docRow.modelData.size) + " · " + root.ago(docRow.modelData.mtime) + " · " + root.stateText(docRow.modelData.state)
                     color: root.dim
                     font.family: root.fontFamily
