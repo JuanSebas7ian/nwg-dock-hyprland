@@ -1038,6 +1038,7 @@ func setupPinnedDnd(box *gtk.Box, button *gtk.Button, ID string, pinIdx int) {
 }
 
 func dndDragStart(item *dndItem) {
+	trace("drag start: %s", item.id)
 	dndDragged = item
 	dndDragActive = true
 	cancelClose()
@@ -1103,6 +1104,7 @@ func moveItem(items []*dndItem, item *dndItem, target int) ([]*dndItem, bool) {
 
 // Ends the drag; the new order is saved if `commit` is set and the pointer is still over the dock
 func dndDragFinish(commit bool) {
+	trace("drag finish (commit=%v)", commit)
 	inside := pointerInsideDock()
 
 	dndDragged.box.SetOpacity(1)
@@ -1211,15 +1213,24 @@ func startHangWatchdog() {
 
 	go func() {
 		last := time.Now()
+		var stalls stallTracker
 		for {
 			time.Sleep(2 * time.Second)
 			now := time.Now()
 			stalled, hung := mainLoopHung(now, last, time.Unix(0, beat.Load()), limit)
+			resumed := now.Sub(last) > 5*time.Second
 			last = now
 			if hung {
 				log.Errorf("Main loop unresponsive for %s, exiting so that the dock gets restarted", stalled.Round(time.Second))
+				path, err := writeHangReport("hang", stalled, stalls.snap, stalls.snapAt, goroutineDump())
+				if err != nil {
+					log.Errorf("Couldn't write the hang report: %s", err)
+				} else {
+					log.Errorf("Hang report: %s", path)
+				}
 				os.Exit(2)
 			}
+			stalls.check(now, stalled, resumed)
 		}
 	}()
 }

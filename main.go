@@ -688,8 +688,10 @@ func main() {
 			glib.TimeoutAdd(0, func() bool {
 				// Rebuilding would destroy the widget being dragged; dndDragEnd runs it later
 				if dndDeferRefresh() {
+					trace("rebuild deferred (dragging)")
 					return false
 				}
+				trace("rebuild: %d clients", len(clients))
 				buildMainBox()
 				oldClients = clients
 				return false
@@ -797,6 +799,7 @@ func main() {
 			}
 
 			s := string(buf[:n])
+			trace("hyprland: %s", strings.ReplaceAll(strings.TrimSpace(s[:min(len(s), 160)]), "\n", " | "))
 			if strings.Contains(s, "activewindowv2") {
 				winAddr := strings.TrimSpace(strings.Split(s, "activewindowv2>>")[1])
 				if winAddr != lastWinAddr && !strings.Contains(winAddr, ">>") {

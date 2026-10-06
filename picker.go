@@ -175,6 +175,7 @@ func addAppMenuItem(menu *gtk.Menu) {
 }
 
 func openPicker() {
+	trace("picker open")
 	if pickerOpen() {
 		pickerWin.Present()
 		return
@@ -381,6 +382,7 @@ func cancelPickerClose() {
 }
 
 func closePicker() {
+	trace("picker close")
 	if !pickerOpen() {
 		return
 	}

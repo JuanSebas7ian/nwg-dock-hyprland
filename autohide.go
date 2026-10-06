@@ -42,6 +42,7 @@ func trackMenu(menu *gtk.Menu) {
 		return
 	}
 	openMenus = append(openMenus, menu)
+	trace("menu tracked (%d open)", len(openMenus))
 	menu.AddEvents(int(gdk.PointerMotionMask))
 	menu.Connect("enter-notify-event", func() bool {
 		pointerInMenu = true
@@ -70,6 +71,7 @@ func trackMenu(menu *gtk.Menu) {
 }
 
 func popdownMenus() {
+	trace("menus popped down")
 	for _, m := range openMenus {
 		if m.IsVisible() {
 			m.Popdown()
@@ -175,6 +177,7 @@ func setupIdleHide() {
 }
 
 func hideIdleDock() {
+	trace("hiding idle dock")
 	cancelClose()
 	pointerInDock = false
 	mouseInsideDock = false

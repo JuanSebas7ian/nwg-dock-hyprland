@@ -26,6 +26,7 @@ Sin `-dnd`, el dock se comporta igual que la versión oficial 0.4.11.
 | Sin arrastre de Wayland | El compositor nunca entra en modo arrastre, así que no puede quedar atrapado esperando un drop. |
 | Teclado "on-demand" | El selector de apps solo recibe el teclado cuando le haces clic; nunca lo captura en exclusiva. |
 | Vigilante interno | Si el bucle de GTK se cuelga 10 s, el dock sale con código 2. Ignora la vuelta de una suspensión. |
+| Informes de cuelgue | Guarda en memoria los últimos 200 eventos (Hyprland, menús, ocultado, arrastre, selector). Si el bucle se traba más de 4 s captura las pilas de todas las goroutines; al cuelgue (10 s) escribe `~/.local/state/nwg-dock/hangs/hang-<fecha>.txt` antes de salir, y si se recupera, `stall-<fecha>.txt`. Se guardan los 10 más recientes; `dock.log` dice la ruta. |
 | `launch-dock.sh` | Relanza el dock cuando se cae y espera más entre intentos si falla seguido. Tras 5 fallos rápidos con `-dnd`, vuelve al dock oficial. |
 | Scope de systemd | El dock corre con `MemoryMax=400M` y `CPUQuota=80%`. Si se descontrola, solo muere el dock. |
 | Atajo de emergencia | `SUPER+CTRL+SHIFT+D` lo mata con `kill -9`; el script lo relanza. |
