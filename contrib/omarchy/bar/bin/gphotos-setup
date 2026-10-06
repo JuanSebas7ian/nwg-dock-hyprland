@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Conecta Google Fotos con rclone (remoto "gphotos:") para que gphotos-sync suba tus carpetas.
+#
+#   gphotos-setup             primera vez (o reconectar): pide tu client ID propio y abre el navegador
+#   gphotos-setup reconnect   solo renueva el permiso (si Google lo revocó)
+#
+# Por qué un client ID propio: el compartido de rclone para Google Fotos deja de funcionar en 2026
+# y su cuota diaria se reparte entre todos los usuarios de rclone.
+set -uo pipefail
+
+REMOTE=gphotos
+
+say() { printf '\n==> %s\n' "$*"; }
+finish() {
+  printf '\n%s\nPulsa Enter para cerrar.' "$1"
+  read -r _ || true
+  exit "${2:-0}"
+}
+
+command -v rclone >/dev/null || finish "Falta rclone: omarchy pkg add rclone" 1
+remotes=$(rclone listremotes 2>/dev/null)
+
+if [[ ${1:-} == reconnect ]]; then
+  [[ $'\n'$remotes == *$'\n'$REMOTE:* ]] || finish "No existe el remoto $REMOTE: ejecuta gphotos-setup sin argumentos." 1
+  say "Se abrirá el navegador: entra con tu cuenta de Google y acepta."
+  rclone config reconnect "$REMOTE:" --auto-confirm || finish "No se pudo renovar el permiso." 1
+else
+  cat <<'EOF'
+Google Fotos: crear tu client ID (una sola vez, ~5 minutos, gratis)
+
+ 1. Proyecto: https://console.cloud.google.com/projectcreate
+    (nombre, por ejemplo, "omarchy-fotos"; o usa uno que ya tengas)
+ 2. Activa la API:  https://console.cloud.google.com/apis/library/photoslibrary.googleapis.com
+    → "Habilitar"
+ 3. Pantalla de consentimiento: https://console.cloud.google.com/auth/overview
+    → "Comenzar": nombre de la app "rclone fotos", tu correo, público "Externo".
+ 4. Publícala: https://console.cloud.google.com/auth/audience → "Publicar app".
+    (En modo "Prueba" Google corta el permiso cada 7 días. Publicada sin verificar,
+    al conectar verás "Google no verificó esta app": pulsa "Configuración avanzada" → "Ir a …".)
+ 5. Credenciales: https://console.cloud.google.com/auth/clients → "Crear cliente"
+    → tipo "App de escritorio" → copia el ID de cliente y el secreto.
+EOF
+  printf '\n'
+  read -rp "ID de cliente (termina en .apps.googleusercontent.com): " client_id
+  [[ $client_id == *.apps.googleusercontent.com ]] || finish "Ese no parece un ID de cliente de Google." 1
+  read -rsp "Secreto del cliente: " client_secret
+  echo
+  [[ -n $client_secret ]] || finish "El secreto no puede ir vacío." 1
+
+  if [[ $'\n'$remotes == *$'\n'$REMOTE:* ]]; then
+    say "Ya existe el remoto $REMOTE: se reemplaza su client ID"
+    rclone config delete "$REMOTE"
+  fi
+  say "Se abrirá el navegador: entra con tu cuenta de Google y acepta subir fotos."
+  rclone config create "$REMOTE" googlephotos client_id="$client_id" client_secret="$client_secret" \
+    read_only=false include_archived=false ||
+    finish "rclone no pudo crear el remoto. Revisa el ID, el secreto y que la API esté habilitada." 1
+fi
+
+say "Probando la conexión"
+if ! rclone lsd "$REMOTE:album" >/dev/null 2>&1; then
+  finish "La conexión no responde. Prueba: rclone lsd $REMOTE:album -vv" 1
+fi
+echo "Conectado."
+
+mkdir -p "$HOME/GoogleFotos"
+systemctl --user daemon-reload
+systemctl --user enable --now gphotos-sync.timer gphotos-sync.path >/dev/null 2>&1
+say "Lo que se va a subir (puedes desactivar orígenes desde el widget)"
+"$HOME/.local/bin/gphotos-sync" plan
+systemctl --user start --no-block gphotos-sync.service
+finish "Listo: la primera subida ya empezó; sigue el progreso en el ícono de Google Fotos de la barra."

@@ -1,0 +1,13 @@
+[Unit]
+Description=Upload photos to Google Photos (gphotos-sync)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# let a copy into ~/GoogleFotos finish before scanning
+ExecStartPre=/usr/bin/sleep 10
+ExecStart=%h/.local/bin/gphotos-sync run
+Nice=10
+IOSchedulingClass=idle
+# the first upload of ~36 GB takes hours; a timeout would only restart it
+TimeoutStartSec=infinity

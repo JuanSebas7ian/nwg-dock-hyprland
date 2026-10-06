@@ -1,0 +1,484 @@
+#!/usr/bin/python3
+"""Upload local and Google Drive photos to Google Photos with rclone (remote "gphotos:").
+
+  gphotos-sync run [--rescan]      upload everything not uploaded yet (the systemd service runs this)
+  gphotos-sync status              JSON for the bar widget: state, progress, sources, recent uploads
+  gphotos-sync pause|resume        stop/allow uploads (pause also stops a running sync)
+  gphotos-sync source ID on|off    enable or disable one source
+  gphotos-sync plan                what would be uploaded, per album (no uploads)
+
+Why a ledger: since 2025-03-31 the Google Photos API only shows media this app uploaded,
+so "already there?" cannot be asked of Google for anything else, and listing albums on every
+run is slow. Each uploaded file is recorded once (source + relative path) in
+~/.local/state/gphotos-sync/uploaded.jsonl and never sent again, even if renamed in Photos.
+
+Albums: every source maps a top-level folder to an album ("Cámara 2014", "Drive · Viajes");
+files at the source root go to the source's root album. Config: ~/.config/gphotos-sync/config.json
+(created with defaults on first run).
+"""
+
+import fcntl
+import hashlib
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+from pathlib import Path
+
+ENV = os.environ.get
+HOME = Path.home()
+CONFIG_DIR = Path(ENV("XDG_CONFIG_HOME") or HOME / ".config") / "gphotos-sync"
+STATE = Path(ENV("XDG_STATE_HOME") or HOME / ".local/state") / "gphotos-sync"
+CACHE = Path(ENV("XDG_CACHE_HOME") or HOME / ".cache")
+CONFIG = CONFIG_DIR / "config.json"
+LEDGER = STATE / "uploaded.jsonl"
+STATUS = STATE / "status.json"
+RECENT = STATE / "recent.json"
+LOCK = STATE / "run.lock"
+RCLONE = ENV("GPHOTOS_RCLONE", "rclone")
+SERVICE = "gphotos-sync.service"
+
+# What Google Photos accepts (photos up to 200 MB, videos up to 20 GB).
+PHOTO_EXT = {"jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "bmp", "tif", "tiff", "ico",
+             "avif", "dng", "cr2", "cr3", "nef", "arw", "orf", "rw2", "raf"}
+VIDEO_EXT = {"mp4", "mov", "m4v", "3gp", "3g2", "avi", "mpg", "mpeg", "wmv", "mkv", "mts", "m2ts", "asf", "divx", "mod", "tod"}
+PHOTO_MAX = 200 * 1024 * 1024
+VIDEO_MAX = 20 * 1024 ** 3
+
+DEFAULT_CONFIG = {
+  "remote": "gphotos:",
+  "paused": False,
+  # daytime cap so photos never saturate the ~4 MB/s uplink; "off" = no limit
+  "bwlimit": "08:00,2.5M 23:30,off",
+  "transfers": 4,
+  "drive_rescan_hours": 6,
+  "sources": [
+    {"id": "googlefotos", "name": "~/GoogleFotos", "path": "~/GoogleFotos",
+     "album": "{top}", "root_album": "GoogleFotos", "enabled": True},
+    {"id": "screenshots", "name": "Capturas de pantalla", "path": "~/Pictures", "recursive": False,
+     "album": "Capturas de pantalla", "root_album": "Capturas de pantalla", "enabled": True},
+    {"id": "camera", "name": "Cargas de cámara (Dropbox)", "path": "~/Dropbox/Cargas de cámara",
+     "album": "Cámara {top}", "root_album": "Cámara", "enabled": True},
+    {"id": "drive", "name": "Fotos de Google Drive", "remote": "rclone:",
+     "album": "Drive · {top}", "root_album": "Drive", "exclude": ["Backups/"], "enabled": True},
+  ],
+}
+
+QUOTA_ERR = re.compile(r"quota|rate.?limit|RESOURCE_EXHAUSTED|429|too many requests", re.I)
+AUTH_ERR = re.compile(r"invalid_grant|unauthori[sz]ed|401|token (has been )?(expired|revoked)|couldn't find section|didn't find section|not found in config", re.I)
+
+
+# ----------------------------------------------------------------- small helpers
+
+def now():
+  return int(time.time())
+
+
+def write_json(path, data):
+  path.parent.mkdir(parents=True, exist_ok=True)
+  fd, tmp = tempfile.mkstemp(dir=path.parent, prefix="." + path.name)
+  with os.fdopen(fd, "w") as f:
+    json.dump(data, f, ensure_ascii=False)
+  os.replace(tmp, path)
+
+
+def read_json(path, default):
+  try:
+    return json.loads(path.read_text())
+  except (OSError, ValueError):
+    return default
+
+
+def load_config():
+  cfg = read_json(CONFIG, None)
+  if not isinstance(cfg, dict):
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    write_json(CONFIG, cfg)
+  for k, v in DEFAULT_CONFIG.items():
+    cfg.setdefault(k, v)
+  return cfg
+
+
+def media_kind(name):
+  ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+  if ext in PHOTO_EXT:
+    return "photo"
+  if ext in VIDEO_EXT:
+    return "video"
+  return None
+
+
+def acceptable(name, size):
+  kind = media_kind(name)
+  if kind == "photo":
+    return 0 < size <= PHOTO_MAX
+  if kind == "video":
+    return 0 < size <= VIDEO_MAX
+  return False
+
+
+def album_for(src, rel):
+  parts = rel.split("/")
+  if len(parts) == 1:
+    return clean_album(src.get("root_album") or src["name"])
+  return clean_album(src["album"].replace("{top}", parts[0]))
+
+
+def clean_album(name):
+  # "/" would be read by rclone as a sub-path of album/
+  return re.sub(r"\s+", " ", name.replace("/", "-")).strip() or "Omarchy"
+
+
+def excluded(src, rel):
+  return any(rel == e.rstrip("/") or rel.startswith(e if e.endswith("/") else e + "/")
+             for e in src.get("exclude", []))
+
+
+def thumb_for(path):
+  """Freedesktop thumbnail (Nautilus already made them for Dropbox), else the image itself."""
+  uri = "file://" + urllib.parse.quote(str(path))
+  digest = hashlib.md5(uri.encode()).hexdigest()
+  for size in ("large", "x-large", "normal"):
+    t = CACHE / "thumbnails" / size / (digest + ".png")
+    if t.exists():
+      return str(t)
+  if media_kind(str(path)) == "photo" and str(path).lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")):
+    return str(path)
+  return ""
+
+
+# ----------------------------------------------------------------- ledger
+
+def load_ledger():
+  done = {}
+  try:
+    with LEDGER.open() as f:
+      for line in f:
+        try:
+          e = json.loads(line)
+          done[e["k"]] = e
+        except (ValueError, KeyError):
+          continue
+  except OSError:
+    pass
+  return done
+
+
+def record(entry):
+  LEDGER.parent.mkdir(parents=True, exist_ok=True)
+  with LEDGER.open("a") as f:
+    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+  recent = read_json(RECENT, [])
+  recent.insert(0, entry)
+  write_json(RECENT, recent[:24])
+
+
+# ----------------------------------------------------------------- scanning
+
+def scan_local(src):
+  root = Path(os.path.expanduser(src["path"]))
+  out = []
+  if not root.is_dir():
+    return out
+  if src.get("recursive", True):
+    walker = os.walk(root)
+  else:
+    walker = [(str(root), [], [p.name for p in root.iterdir() if p.is_file()])]
+  for d, dirs, files in walker:
+    dirs[:] = [x for x in dirs if not x.startswith(".")]
+    for name in files:
+      if name.startswith("."):
+        continue
+      p = Path(d) / name
+      try:
+        size = p.stat().st_size
+      except OSError:
+        continue
+      rel = str(p.relative_to(root))
+      if acceptable(name, size) and not excluded(src, rel):
+        out.append({"rel": rel, "size": size})
+  return out
+
+
+def scan_remote(src, rescan_hours, force):
+  cache = STATE / f"scan-{src['id']}.json"
+  cached = read_json(cache, None)
+  if cached and not force and now() - cached.get("t", 0) < rescan_hours * 3600:
+    return cached["files"]
+  exts = sorted(PHOTO_EXT | VIDEO_EXT)
+  include = "*.{" + ",".join(exts + [e.upper() for e in exts]) + "}"
+  r = subprocess.run([RCLONE, "lsjson", "-R", "--files-only", "--no-mimetype", "--no-modtime",
+                      "--include", include, src["remote"]], capture_output=True, text=True, timeout=1800)
+  if r.returncode != 0:
+    raise RuntimeError("no se pudo listar " + src["remote"] + ": " + (r.stderr.strip().splitlines() or ["?"])[-1])
+  files = [{"rel": e["Path"], "size": e.get("Size", 0)} for e in json.loads(r.stdout or "[]")
+           if acceptable(e["Name"], e.get("Size", 0)) and not excluded(src, e["Path"])]
+  write_json(cache, {"t": now(), "files": files})
+  return files
+
+
+def plan(cfg, ledger, force=False, only_enabled=True):
+  """[(src, summary, pending groups {(album, dir): [file...]})]"""
+  result = []
+  for src in cfg["sources"]:
+    if only_enabled and not src.get("enabled", True):
+      continue
+    summary = {"id": src["id"], "name": src["name"], "enabled": src.get("enabled", True),
+               "total": 0, "uploaded": 0, "pending": 0, "pendingBytes": 0, "error": ""}
+    groups = {}
+    try:
+      files = scan_remote(src, cfg["drive_rescan_hours"], force) if src.get("remote") else scan_local(src)
+    except (RuntimeError, OSError, subprocess.TimeoutExpired, ValueError) as e:
+      summary["error"] = str(e)[:300]
+      result.append((src, summary, groups))
+      continue
+    for f in files:
+      summary["total"] += 1
+      if f"{src['id']}:{f['rel']}" in ledger:
+        summary["uploaded"] += 1
+        continue
+      summary["pending"] += 1
+      summary["pendingBytes"] += f["size"]
+      d, _, name = f["rel"].rpartition("/")
+      groups.setdefault((album_for(src, f["rel"]), d), []).append({"name": name, "rel": f["rel"], "size": f["size"]})
+    result.append((src, summary, groups))
+  return result
+
+
+# ----------------------------------------------------------------- uploading
+
+class Status:
+  def __init__(self, sources):
+    self.data = {"state": "running", "started": now(), "updated": now(), "sources": sources,
+                 "filesDone": 0, "filesTotal": sum(s["pending"] for s in sources),
+                 "bytesTotal": sum(s["pendingBytes"] for s in sources), "bytesDone": 0,
+                 "speed": 0, "eta": None, "album": "", "transferring": [], "error": ""}
+    self.base_bytes = 0
+    self.save()
+
+  def save(self, **kw):
+    self.data.update(kw, updated=now())
+    write_json(STATUS, self.data)
+
+
+def upload_group(cfg, src, album, d, files, status):
+  """Run one rclone copy for the files of one folder into one album. Returns ("ok"|"quota"|"auth"|"error", msg)."""
+  if src.get("remote"):
+    base = src["remote"] + d
+    local_root = None
+  else:
+    root = Path(os.path.expanduser(src["path"]))
+    base = str(root / d) if d else str(root)
+    local_root = root
+  by_name = {f["name"]: f for f in files}
+  with tempfile.NamedTemporaryFile("w", delete=False, prefix="gphotos-", suffix=".lst") as lst:
+    lst.write("\n".join(by_name) + "\n")
+  cmd = [RCLONE, "copy", base, cfg["remote"] + "album/" + album,
+         "--files-from-raw", lst.name, "--no-traverse", "--no-check-dest",
+         "--transfers", str(cfg["transfers"]), "--use-json-log", "-v", "--stats", "2s",
+         "--low-level-retries", "10", "--retries", "1"]  # a full retry would re-send what already went up
+  if cfg.get("bwlimit") and cfg["bwlimit"] != "off":
+    cmd += ["--bwlimit", cfg["bwlimit"]]
+  verdict, msg = "ok", ""
+  errors = 0
+  proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+  try:
+    for line in proc.stderr:
+      try:
+        ev = json.loads(line)
+      except ValueError:
+        continue
+      text = str(ev.get("msg", ""))
+      obj = ev.get("object") or ""
+      if "stats" in ev:
+        s = ev["stats"]
+        status.save(bytesDone=status.base_bytes + int(s.get("bytes", 0)), speed=int(s.get("speed", 0)),
+                    eta=s.get("eta"), album=album,
+                    transferring=[{"name": t.get("name", ""), "percent": int(t.get("percentage", 0)),
+                                   "speed": int(t.get("speed", 0))} for t in (s.get("transferring") or [])])
+      elif text.startswith("Copied") and obj:
+        name = obj.rsplit("/", 1)[-1]
+        f = by_name.get(name) or by_name.get(obj)
+        if f:
+          local = str(local_root / f["rel"]) if local_root else ""
+          record({"k": f"{src['id']}:{f['rel']}", "t": now(), "album": album, "src": src["id"],
+                  "rel": f["rel"], "size": f["size"], "kind": media_kind(name),
+                  "path": local, "thumb": thumb_for(local) if local else ""})
+          status.save(filesDone=status.data["filesDone"] + 1)
+      elif ev.get("level") == "error":
+        errors += 1
+        msg = (obj + ": " if obj else "") + text
+        if QUOTA_ERR.search(text):
+          verdict = "quota"
+          proc.terminate()
+        elif AUTH_ERR.search(text):
+          verdict = "auth"
+          proc.terminate()
+  finally:
+    proc.wait()
+    os.unlink(lst.name)
+  status.base_bytes = status.data["bytesDone"]
+  if verdict == "ok" and (proc.returncode != 0 or errors):
+    verdict = "error"
+  return verdict, msg[:400]
+
+
+def remote_configured(cfg):
+  r = subprocess.run([RCLONE, "listremotes"], capture_output=True, text=True)
+  return cfg["remote"] in r.stdout.split()
+
+
+def cmd_run(force):
+  STATE.mkdir(parents=True, exist_ok=True)
+  lock = LOCK.open("w")
+  try:
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  except BlockingIOError:
+    print("gphotos-sync: ya hay una sincronización en marcha")
+    return 0
+  cfg = load_config()
+  prev = read_json(STATUS, {})
+  if cfg["paused"]:
+    write_json(STATUS, dict(prev, state="paused", updated=now(), transferring=[]))
+    print("gphotos-sync: en pausa")
+    return 0
+  if not remote_configured(cfg):
+    write_json(STATUS, dict(prev, state="setup", updated=now(), transferring=[],
+                            error="Falta conectar Google Fotos: ejecuta gphotos-setup"))
+    print("gphotos-sync: falta el remoto " + cfg["remote"] + " (gphotos-setup)")
+    return 0
+  ledger = load_ledger()
+  planned = plan(cfg, ledger, force)
+  status = Status([s for _, s, _ in planned])
+  stopped = {"why": ""}
+
+  def on_term(*_):
+    stopped["why"] = "stopped"
+    raise KeyboardInterrupt
+  signal.signal(signal.SIGTERM, on_term)
+
+  final, err = "idle", ""
+  try:
+    for src, summary, groups in planned:
+      for (album, d), files in sorted(groups.items()):
+        verdict, msg = upload_group(cfg, src, album, d, files, status)
+        if verdict in ("quota", "auth"):
+          final, err = verdict, msg
+          raise StopIteration
+        if verdict == "error":
+          err = msg
+  except StopIteration:
+    pass
+  except KeyboardInterrupt:
+    final = "paused" if load_config()["paused"] else "idle"
+  # recount after uploading
+  ledger = load_ledger()
+  sources = []
+  for src, summary, _ in planned:
+    if not summary["error"]:
+      done = sum(1 for k in ledger if k.startswith(src["id"] + ":"))
+      summary["uploaded"] = min(done, summary["total"])
+      summary["pending"] = max(0, summary["total"] - summary["uploaded"])
+    sources.append(summary)
+  status.save(state=final, error=err, transferring=[], speed=0, eta=None, sources=sources,
+              lastRun=now(), lastOk=now() if final == "idle" and not err else prev.get("lastOk"))
+  print(f"gphotos-sync: {status.data['filesDone']} subidos, estado {final}" + (f", {err}" if err else ""))
+  return 0
+
+
+# ----------------------------------------------------------------- commands for the widget
+
+def service_active():
+  r = subprocess.run(["systemctl", "--user", "is-active", SERVICE], capture_output=True, text=True)
+  return r.stdout.strip() in ("active", "activating")
+
+
+def cmd_status():
+  cfg = load_config()
+  st = read_json(STATUS, {})
+  running = service_active()
+  if not running and st.get("state") == "running":
+    st["state"] = "idle"   # killed without a chance to write its final state
+  if cfg["paused"] and not running:
+    st["state"] = "paused"
+  if not st.get("state"):
+    st["state"] = "idle" if remote_configured(cfg) else "setup"
+  enabled = {s["id"]: s.get("enabled", True) for s in cfg["sources"]}
+  known = {s["id"]: s for s in st.get("sources", [])}
+  st["sources"] = [dict(known.get(s["id"], {"id": s["id"], "name": s["name"], "total": 0, "uploaded": 0,
+                                            "pending": 0, "pendingBytes": 0, "error": ""}),
+                        enabled=enabled[s["id"]], name=s["name"]) for s in cfg["sources"]]
+  st["running"] = running
+  st["paused"] = cfg["paused"]
+  st["recent"] = [r for r in read_json(RECENT, [])[:12]]
+  for r in st["recent"]:
+    if r.get("path") and not r.get("thumb"):
+      r["thumb"] = thumb_for(r["path"])
+  st["uploadedTotal"] = sum(s.get("uploaded", 0) for s in st["sources"])
+  st["pendingTotal"] = sum(s.get("pending", 0) for s in st["sources"] if s["enabled"])
+  print(json.dumps(st, ensure_ascii=False))
+  return 0
+
+
+def set_paused(value):
+  cfg = load_config()
+  cfg["paused"] = value
+  write_json(CONFIG, cfg)
+  if value:
+    subprocess.run(["systemctl", "--user", "stop", SERVICE])
+  else:
+    subprocess.run(["systemctl", "--user", "start", "--no-block", SERVICE])
+  return 0
+
+
+def cmd_source(sid, on):
+  cfg = load_config()
+  hit = [s for s in cfg["sources"] if s["id"] == sid]
+  if not hit:
+    print("fuente desconocida: " + sid, file=sys.stderr)
+    return 3
+  hit[0]["enabled"] = on
+  write_json(CONFIG, cfg)
+  return 0
+
+
+def cmd_plan():
+  cfg = load_config()
+  for src, summary, groups in plan(cfg, load_ledger(), only_enabled=False):
+    flag = "" if summary["enabled"] else " (desactivada)"
+    print(f"{summary['name']}{flag}: {summary['total']} archivos, {summary['uploaded']} subidos, "
+          f"{summary['pending']} pendientes ({summary['pendingBytes'] / 1e9:.1f} GB)" +
+          (f" ERROR {summary['error']}" if summary["error"] else ""))
+    albums = {}
+    for (album, _), files in groups.items():
+      albums[album] = albums.get(album, 0) + len(files)
+    for album, n in sorted(albums.items()):
+      print(f"    {album}: {n}")
+  return 0
+
+
+def main(argv):
+  cmd = argv[1] if len(argv) > 1 else "status"
+  if cmd == "run":
+    return cmd_run("--rescan" in argv)
+  if cmd == "status":
+    return cmd_status()
+  if cmd == "pause":
+    return set_paused(True)
+  if cmd == "resume":
+    return set_paused(False)
+  if cmd == "source" and len(argv) == 4 and argv[3] in ("on", "off"):
+    return cmd_source(argv[2], argv[3] == "on")
+  if cmd == "plan":
+    return cmd_plan()
+  print(__doc__, file=sys.stderr)
+  return 3
+
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv))

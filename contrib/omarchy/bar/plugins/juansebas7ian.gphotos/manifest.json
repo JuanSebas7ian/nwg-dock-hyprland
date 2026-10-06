@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.gphotos",
+  "name": "Google Fotos",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "Uploads ~/GoogleFotos, screenshots, Dropbox camera uploads and Google Drive photos to Google Photos (gphotos-sync): progress, sources, recent uploads.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Google Fotos",
+    "description": "Left = panel · right = open photos.google.com. ↑N = photos left to upload; red = upload problem.",
+    "category": "Files",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

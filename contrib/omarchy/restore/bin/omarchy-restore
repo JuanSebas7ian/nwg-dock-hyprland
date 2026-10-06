@@ -27,11 +27,11 @@ QUIET=false
 HEAL_PATHS=(
   .config/hypr .config/omarchy/shell.json .config/omarchy/plugins .config/omarchy/hooks .config/omarchy/extensions
   .config/systemd/user .config/nwg-dock-hyprland .config/wireplumber .config/spotifyd .config/spotify-player/app.toml
-  .config/rclone/rclone.conf .config/omarchy-backup .config/omarchy-sysmon .config/omarchy-session
+  .config/rclone/rclone.conf .config/gphotos-sync .config/omarchy-backup .config/omarchy-sysmon .config/omarchy-session
   .config/opencode/opencode.json .config/uwsm .config/environment.d .config/git
   .local/bin/nwg-dock-hyprland-dnd .local/bin/omarchy-hwcheck .local/bin/omarchy-session .local/bin/omarchy-backup
   .local/bin/omarchy-restore .local/bin/omarchy-agent-usage-extra .local/bin/omarchy-agent-usage-antigravity
-  .local/bin/omarchy-agent-usage-opencode .local/bin/bt-pair-keyboard .local/bin/pad-keepalive .local/bin/bt-autopower .local/bin/spotify-bar-setup
+  .local/bin/omarchy-agent-usage-opencode .local/bin/bt-pair-keyboard .local/bin/pad-keepalive .local/bin/bt-autopower .local/bin/gphotos-sync .local/bin/gphotos-setup .local/bin/spotify-bar-setup
   .cache/nwg-dock-pinned .claude/CLAUDE.md .claude/omarchy.md .claude/agents .claude/skills/omarchy-hardware
   .ssh .gnupg
 )

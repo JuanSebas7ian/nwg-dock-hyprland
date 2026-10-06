@@ -1,0 +1,11 @@
+[Unit]
+Description=Upload to Google Photos as soon as something lands in ~/GoogleFotos or the screenshot folder
+
+[Path]
+PathChanged=%h/GoogleFotos
+PathChanged=%h/Pictures
+MakeDirectory=true
+Unit=gphotos-sync.service
+
+[Install]
+WantedBy=default.target

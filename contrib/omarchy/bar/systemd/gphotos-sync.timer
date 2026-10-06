@@ -1,0 +1,10 @@
+[Unit]
+Description=Upload new photos to Google Photos every 30 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=30min
+Persistent=false
+
+[Install]
+WantedBy=timers.target
