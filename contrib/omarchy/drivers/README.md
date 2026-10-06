@@ -77,3 +77,13 @@ luego `contrib/omarchy/drivers/install.sh --wait` y reiniciar.
 
 `sudo rm /etc/pacman.d/hooks/90-omarchy-compat.hook /usr/local/lib/omarchy/compat-hook /usr/local/lib/omarchy/compat.py`.
 Una reinstalación real deja `<archivo>.bak.<fecha>` junto a cada archivo de `/etc` que reemplaza, y el snapshot `pre` en Limine.
+
+## Bluetooth encendido al arrancar: `bt-autopower`
+
+El MT7925 tarda ~17 s en cargar su firmware; el `AutoEnable` de `bluetoothd` intenta encenderlo antes y falla
+(`Failed to set mode: Failed (0x03)`), así que el adaptador quedaba apagado en cada arranque hasta encenderlo a mano.
+`bt-autopower/` (usuario, sin root) revisa cada 5 s: si el adaptador existe, no tiene bloqueo rfkill (el "apagado" de
+Omarchy) y está apagado, lo enciende; tras cada encendido lo deja **visible** (`DiscoverableTimeout 0`) y emparejable.
+Configuración opcional en `~/.config/bt-autopower.conf` (`DISCOVERABLE=no` para no anunciarse).
+Instalar: `bt-autopower/install.sh`; quitar: `--remove`. Registro: `journalctl --user -u bt-autopower`.
+Pruebas (bluetoothctl/rfkill falsos): `cd bt-autopower && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest test_bt_autopower` (6).

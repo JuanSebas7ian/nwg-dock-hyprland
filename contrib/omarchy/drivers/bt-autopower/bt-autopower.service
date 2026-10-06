@@ -1,0 +1,13 @@
+[Unit]
+Description=Power the Bluetooth adapter on when it appears (MT7925 AutoEnable race)
+After=graphical-session.target
+PartOf=graphical-session.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=%h/.local/bin/bt-autopower
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

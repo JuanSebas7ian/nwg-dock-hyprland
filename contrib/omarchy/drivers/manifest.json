@@ -254,6 +254,11 @@
       "name": "pad-keepalive",
       "note": "mando virtual permanente para el control Xbox 360 con cable (sobrevive a cortes USB); usuario, sin root; lo ejecuta omarchy-restore full",
       "path": "contrib/omarchy/drivers/pad-keepalive/install.sh"
+    },
+    {
+      "name": "bt-autopower",
+      "note": "enciende el Bluetooth MT7925 cuando aparece (AutoEnable de bluetoothd falla por su arranque lento de ~17 s) y lo deja visible y emparejable; respeta el apagado de Omarchy (rfkill); usuario, sin root; lo ejecuta omarchy-restore full",
+      "path": "contrib/omarchy/drivers/bt-autopower/install.sh"
     }
   ]
 }

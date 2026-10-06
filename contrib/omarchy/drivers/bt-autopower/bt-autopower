@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Keep the Bluetooth adapter powered on (and optionally discoverable) whenever it is present.
+#
+# Why: on this board the MediaTek MT7925 needs ~17 s of firmware setup; bluetoothd's AutoEnable fires
+# before it is ready ("Failed to set mode: Failed (0x03)") and the adapter stays Powered: no until
+# someone turns it on by hand. This loop retries until it comes up, and again after every reset
+# (resume, bt-guardian, unplug).
+#
+# Respects Omarchy's off switch: omarchy-bluetooth-power turns Bluetooth off with an rfkill soft
+# block, so a blocked adapter is left alone.
+#
+# Config (optional): ~/.config/bt-autopower.conf  DISCOVERABLE=yes|no  PAIRABLE=yes|no  INTERVAL=5
+# BT_AUTOPOWER_ONCE=1 runs a single tick (tests).
+set -uo pipefail
+
+DISCOVERABLE=yes
+PAIRABLE=yes
+INTERVAL=5
+CONF=${BT_AUTOPOWER_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/bt-autopower.conf}
+# shellcheck disable=SC1090
+[ -r "$CONF" ] && . "$CONF"
+
+log() { echo "bt-autopower: $*"; }
+btctl() { timeout 5s bluetoothctl "$@" 2>/dev/null; }
+
+applied=0   # discoverable/pairable already applied for the current power-up
+
+tick() {
+    local list show rf
+    list=$(btctl list)
+    [[ $list == *Controller* ]] || { applied=0; return 0; }
+
+    rf=$(rfkill list bluetooth 2>/dev/null)
+    if [[ $rf == *"Soft blocked: yes"* ]]; then applied=0; return 0; fi
+
+    show=$(btctl show)
+    if [[ $show != *"Powered: yes"* ]]; then
+        applied=0
+        if btctl power on >/dev/null; then log "adapter powered on"; else log "power on failed, retrying"; fi
+        return 0
+    fi
+
+    if [ "$applied" = 0 ]; then
+        if [ "$PAIRABLE" = yes ] && [[ $show != *"Pairable: yes"* ]]; then btctl pairable on >/dev/null; fi
+        if [ "$DISCOVERABLE" = yes ]; then
+            btctl discoverable-timeout 0 >/dev/null
+            [[ $show == *"Discoverable: yes"* ]] || btctl discoverable on >/dev/null
+        fi
+        log "ready (discoverable=$DISCOVERABLE pairable=$PAIRABLE)"
+        applied=1
+    fi
+}
+
+if [ "${BT_AUTOPOWER_ONCE:-0}" = 1 ]; then tick; exit 0; fi
+while :; do tick; sleep "$INTERVAL"; done

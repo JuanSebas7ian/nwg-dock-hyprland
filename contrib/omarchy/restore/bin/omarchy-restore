@@ -31,7 +31,7 @@ HEAL_PATHS=(
   .config/opencode/opencode.json .config/uwsm .config/environment.d .config/git
   .local/bin/nwg-dock-hyprland-dnd .local/bin/omarchy-hwcheck .local/bin/omarchy-session .local/bin/omarchy-backup
   .local/bin/omarchy-restore .local/bin/omarchy-agent-usage-extra .local/bin/omarchy-agent-usage-antigravity
-  .local/bin/omarchy-agent-usage-opencode .local/bin/bt-pair-keyboard .local/bin/pad-keepalive .local/bin/spotify-bar-setup
+  .local/bin/omarchy-agent-usage-opencode .local/bin/bt-pair-keyboard .local/bin/pad-keepalive .local/bin/bt-autopower .local/bin/spotify-bar-setup
   .cache/nwg-dock-pinned .claude/CLAUDE.md .claude/omarchy.md .claude/agents .claude/skills/omarchy-hardware
   .ssh .gnupg
 )
@@ -183,6 +183,7 @@ cmd_full() {
   # drivers first (packages, /etc files, DKMS, services, pacman hook), then the rest; a failure in one does not stop the others
   (cd "$REPO_DIR" && { contrib/omarchy/drivers/install.sh || echo "drivers/install.sh reported problems; see ~/.local/state/omarchy-drivers/"; } &&
     { contrib/omarchy/drivers/pad-keepalive/install.sh || echo "pad-keepalive/install.sh failed (python-evdev?); the rest continues"; } &&
+    { contrib/omarchy/drivers/bt-autopower/install.sh || echo "bt-autopower/install.sh failed; the rest continues"; } &&
     contrib/omarchy/install.sh && contrib/omarchy/hwcheck/install.sh && contrib/omarchy/bar/install.sh --host) || true
   echo "== 7. services"
   systemctl --user daemon-reload
