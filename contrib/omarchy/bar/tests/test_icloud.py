@@ -1,4 +1,4 @@
-"""Tests for plugins/juansebas7ian.icloud/icloud.py without iCloud or a mount:
+"""Tests for plugins/juansebas7ian.cloud/backend/icloud.py without iCloud or a mount:
 sync state from the VFS cache, path confinement, the 30-day sign-in count and
 auth-error detection.
 
@@ -16,7 +16,7 @@ from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from unittest import mock
 
-HELPER = Path(__file__).resolve().parent.parent / "plugins" / "juansebas7ian.icloud" / "icloud.py"
+HELPER = Path(__file__).resolve().parent.parent / "plugins" / "juansebas7ian.cloud" / "backend" / "icloud.py"
 
 
 def load(tmp):

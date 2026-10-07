@@ -15,18 +15,41 @@ contrib/omarchy/bar/install.sh --remove   # quita los widgets y colectores
 | Plugin | Ícono | Clics | Qué muestra |
 |---|---|---|---|
 | `juansebas7ian.spotify` | Spotify | izq. panel · central pausa · der. siguiente · rueda | **Independiente de la app de Spotify.** La reproducción es spotifyd (dispositivo "Omarchy") por MPRIS: canción con carátula, progreso, aleatorio, repetir, volumen; en frío despierta a spotifyd (`TransferPlayback`) y reanuda o pone la última canción; abrir una lista, álbum o canción usa `OpenUri` de spotifyd (sin API). Pestañas Recientes, Listas, Álbumes y Top del mes leídas de la API con el token de tu propia app (`spotify-bar-setup`), que spotify-player guarda y renueva; se leen directamente porque spotify-player 0.24.1 no tolera los campos que Spotify quitó en 2026 (`tracks`, `popularity`) |
-| `juansebas7ian.gdrive` | Drive (↑N = archivos por subir) | izq. panel · der. abrir carpeta | Interruptor de montaje, espacio (Drive · Gmail/Fotos · papelera), caché local, transferencias y cola de subida en vivo, archivos recientes de este PC |
-| `juansebas7ian.icloud` | iCloud (↑N = archivos por subir; rojo = error o sesión por caducar) | izq. panel · der. abrir carpeta | Conectar (Apple ID + 2FA) y renovar la sesión de 30 días, interruptor de montaje, espacio, caché local, transferencias y cola de subida, **documentos con su estado** (☁ solo en iCloud, ◐ en parte, ✓ en este PC, ⏳ por subir, ↑ subiendo; clic en carpeta = entrar, en archivo = abrir, 󰇚 = descargar a este PC), recientes, montar iCloud Fotos |
-| `juansebas7ian.gphotos` | Google Fotos (↑N = fotos por subir; rojo = error o permiso retirado) | izq. panel · der. abrir photos.google.com | Conectar (`gphotos-setup`), pausa, progreso en vivo (álbum, bytes, velocidad, tiempo restante), **orígenes** con interruptor (subidas/total/pendientes), cuadrícula de **subidas recientes** con miniatura, sincronizar ahora, abrir `~/GoogleFotos` |
+| `juansebas7ian.cloud` | 󰅟 (↑N = archivos por subir en total; rojo = un servicio falló o la sesión de Apple caduca en ≤ 3 días) | izq. panel · der. abrir `~/GoogleDrive` | **Pestañas** Resumen (avisos y una tarjeta por servicio) · **Drive** (interruptor de montaje, espacio Drive · Gmail/Fotos · papelera, caché, transferencias y cola de subida, recientes) · **iCloud** (conectar y renovar la sesión de 30 días, montaje, documentos con su estado ☁ ◐ ✓ ⏳ ↑ y descarga, iCloud Fotos, recientes) · **Photos** (Google Fotos: pausa, progreso, orígenes con interruptor, subidas recientes) · **Dropbox** (pausa, espacio, recientes; sustituye a `omarchy.dropbox`). `backend/cloud.py status` consulta los cuatro en un proceso (~0,5 s); las acciones van a cada CLI (`gdrive.py`, `icloud.py`, `gphotos-sync`, `dropbox-cli`) |
 | `juansebas7ian.ollama` | 󰧑 (% mientras descarga) | izq. panel · der. ollama.com | Modelos descargados y cargados, espacio real en disco, buscar en la biblioteca de ollama.com, descargar `nombre:tag`, chatear en terminal, borrar, liberar memoria |
-| `juansebas7ian.sysmon` | 󰍛 (rojo si CPU ≥ 85 °C, GPU ≥ 83 °C o RAM ≥ 90 %) | izq. panel · der. btop | CPU (uso, frecuencia, temperatura, carga), RAM y swap, DDR5, ventiladores y temperaturas de la placa (`nct6775`; nombres en `~/.config/omarchy-sysmon/fans.json`), NVIDIA vía NVML (núcleo, ancho de banda de memoria, VRAM, consumo, temperatura, ventilador, PCIe Gen/ancho y tráfico, codificador/decodificador, procesos y su uso), Radeon integrada, NVMe, disco y red |
-| `juansebas7ian.storage` | 󰋊 (rojo con < 10 % libre o un aviso de salud) | izq. panel · der. `dua` | Cada disco con sus particiones y la salud NVMe por UDisks2 sin root; qué usa el disco del sistema con clic para entrar en carpetas; **Steam por juego** (juego, prefijo de Proton, shaders, última partida) y herramientas; **salud y firmware** ("Samsung Magician" para Linux): firmware instalado frente al último de Samsung (su página de herramientas) o de LVFS (fwupd), TBW consumidos frente a los garantizados, apagados inseguros, autoprueba SMART (pide contraseña por polkit) y enlace al ISO de firmware; lo disponible; lo que se puede liberar |
-| `juansebas7ian.cooling` | 󰔏 + temperatura de la CPU en vivo (rojo a 90 °C o si la bomba se detiene) | izq. panel · der. btop | Gráficas de 2 min de temperatura de la CPU, carga y RPM del enfriador; carga y reloj por hilo; bomba AIO y ventiladores con su papel (`fans.json` → `_roles`: `pump`, `cpu`); Tctl, CCD, socket, placa, DDR5 y GPU. **Notificación crítica si la bomba baja de 500 RPM** |
-| `juansebas7ian.nvidia` | GPU (N = actualizaciones de NVIDIA/CUDA/kernel; rojo si falla el driver o CUDA) | izq. panel · der. revisar | Módulo cargado (open/propietario) frente a los paquetes, DKMS por kernel, firmware GSP, modeset; CUDA probado en vivo con `libcuda` (cuInit, dispositivo, compute capability), toolkit y su compatibilidad, cuDNN; actualizaciones de los repos con **notificación** la primera vez que aparecen |
-| `juansebas7ian.drivers` | (N = actualizaciones de drivers + BIOS; rojo si falla un driver) | izq. panel · der. revisar de nuevo | Placa y BIOS instalada frente a la última de ASUS (con notas y enlace), salud de `omarchy-hwcheck`, paquetes de drivers con actualización (`checkupdates`, sin root), drivers cargados |
+| `juansebas7ian.hardware` | 󰔏 + temperatura de la CPU (rojo con cualquier alerta; N = actualizaciones de drivers + BIOS) | izq. panel · der. btop | **Pestañas** Summary (alertas y tarjetas: CPU, GPU, RAM, bomba, disco, drivers, Bluetooth, baterías) · **CPU** (gráficas de 2 min de temperatura, carga y enfriador; hilos; memoria; bomba y ventiladores con su papel; todas las temperaturas; disco y red) · **GPU** (NVML en vivo, procesos, Radeon, driver, DKMS por kernel, GSP, CUDA probado con `libcuda`, cuDNN) · **Disks** (discos y salud NVMe, qué ocupa con navegación por carpetas, Steam por juego, firmware y TBW, disponible, qué liberar) · **Drivers** (BIOS frente a ASUS, `omarchy-hwcheck`, actualizaciones, drivers cargados) · **Devices** (Bluetooth con batería, conectar, reconexión al arrancar por dispositivo, visibilidad; baterías Logitech por solaar; teclados, ratones y mandos con `pad-keepalive`; audio; cámaras; árbol USB con los errores del arranque). Teclas: h/l o 1-6 pestañas, j/k desplazar, r revisar, b btop |
 
 Cada widget es un plugin con `manifest.json`, un `Panel.qml` y un ayudante en Python sin
 dependencias que imprime JSON (se puede probar solo, p. ej. `plugins/juansebas7ian.ollama/ollama-ctl.py status`).
+
+### Hardware y Nube: estructura
+
+```
+plugins/juansebas7ian.hardware/
+  Panel.qml            ícono, estado, pestañas, teclado; habla con el backend por stdin/stdout
+  tabs/*Tab.qml        una pestaña por archivo, cargada solo al abrirla (recibe el panel como `hw`)
+  backend/hardwared.py un único proceso para todo: sensores cada 1 s (los emite cada 1 s solo con una
+                       pestaña en vivo abierta, si no cada 5 s); du, checkupdates y solaar en hilos y
+                       solo para la pestaña abierta; CUDA en un proceso corto; alertas en un solo sitio
+  backend/hw/          sensors, gpu, drivers, storage, peripherals, alerts, util (pruebas: tests/test_hardware.py)
+plugins/juansebas7ian.cloud/
+  Panel.qml, tabs/*Tab.qml (recibe el panel como `cloud`), backend/cloud.py (+ gdrive.py, icloud.py)
+shared/ui/             componentes comunes (Theme, Section, Pair, Gauge, Graph, Tile, TabBar, FileRow…)
+sync-ui.sh             copia shared/ui a cada plugin con `.uses-shared-ui` (Omarchy no admite enlaces
+                       simbólicos en un plugin); una prueba falla si alguna copia difiere
+```
+
+Umbrales de las alertas de Hardware (opcional) en `~/.config/omarchy-hardware/config.json`:
+`{"cpuWarn": 85, "cpuCrit": 90, "gpuWarn": 83, "pumpMinRpm": 500, "ramWarn": 0.9, "diskFreeWarn": 0.1,
+"batteryWarn": 15, "notify": true}`. Notifica las críticas (bomba parada, CPU ≥ cpuCrit, SMART) y las
+baterías bajas una sola vez hasta que se resuelven; las actualizaciones de NVIDIA/CUDA/kernel, una vez por versión.
+Nombres y papeles de los ventiladores: `~/.config/omarchy-sysmon/fans.json` (ruta de antes, por compatibilidad).
+
+Pruebas: `cd contrib/omarchy/bar && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_hardware tests.test_icloud tests.test_gphotos tests.test_session`.
+Capturas sin ratón: `omarchy-shell juansebas7ian.hardware tab cpu` (o `juansebas7ian.cloud tab icloud`) y `grim`.
+
+Reemplazan (2026-10-07) a `gdrive`, `icloud`, `gphotos`, `sysmon`, `cooling`, `storage`, `nvidia`, `drivers` y
+`omarchy.dropbox`: `install.sh` los retira con respaldo en `~/.local/state/omarchy-bar-extras/backups/<fecha>/`.
 
 ## Colectores del panel de agentes
 

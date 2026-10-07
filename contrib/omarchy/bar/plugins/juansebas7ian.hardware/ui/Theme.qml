@@ -29,6 +29,8 @@ QtObject {
     if (s < 90) return "just now"
     if (s < 5400) return Math.round(s / 60) + " min ago"
     if (s < 129600) return Math.round(s / 3600) + " h ago"
-    return Math.round(s / 86400) + " days ago"
+    if (s < 86400 * 60) return Math.round(s / 86400) + " days ago"
+    if (s < 86400 * 730) return Math.round(s / (86400 * 30.4)) + " months ago"
+    return Math.round(s / (86400 * 365.25)) + " years ago"
   }
 }

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.cloud",
+  "name": "Cloud",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "One panel for every cloud: overview, Google Drive (rclone mount), iCloud Drive (documents with their sync state, Apple's 30-day sign-in), Google Photos uploads and Dropbox. Mount switches, transfers and upload queues, storage, recent files.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Cloud",
+    "description": "Left = panel · right = open ~/GoogleDrive. ↑N = files waiting to upload; red = a service failed or a sign-in is about to expire.",
+    "category": "Files",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

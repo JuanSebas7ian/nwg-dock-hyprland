@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Instala los extras de la barra de Omarchy: widgets de Spotify, Google Drive, iCloud Drive, Google Fotos,
-# Ollama, monitor del sistema y drivers, más los colectores de uso de
-# Antigravity y opencode para el panel de agentes.
+# Instala los extras de la barra de Omarchy: los widgets Spotify, Nube (Google Drive, iCloud Drive,
+# Google Fotos y Dropbox en pestañas), Ollama y Hardware (resumen, CPU, GPU, discos, drivers y
+# periféricos en pestañas), más los colectores de uso de Antigravity y opencode para el panel de agentes.
 #
 # Uso, desde la raíz del repositorio:
 #   contrib/omarchy/bar/install.sh            # instala o actualiza (idempotente)
@@ -25,15 +25,14 @@ RCLONE_REMOTE=${RCLONE_REMOTE:-rclone:}
 # id del plugin y widget junto al que se coloca en la sección derecha
 WIDGETS=(
   "juansebas7ian.spotify:omarchy.tray"
-  "juansebas7ian.gdrive:omarchy.dropbox"
-  "juansebas7ian.icloud:juansebas7ian.gdrive"
-  "juansebas7ian.gphotos:juansebas7ian.icloud"
+  "juansebas7ian.cloud:juansebas7ian.spotify"
   "juansebas7ian.ollama:omarchy.agents"
-  "juansebas7ian.sysmon:juansebas7ian.cooling"
-  "juansebas7ian.cooling:juansebas7ian.ollama"
-  "juansebas7ian.storage:juansebas7ian.sysmon"
-  "juansebas7ian.nvidia:juansebas7ian.storage"
-  "juansebas7ian.drivers:juansebas7ian.nvidia"
+  "juansebas7ian.hardware:juansebas7ian.ollama"
+)
+# Widgets que Nube y Hardware reemplazaron (2026-10-07): se quitan al instalar, con respaldo.
+RETIRED=(
+  juansebas7ian.gdrive juansebas7ian.icloud juansebas7ian.gphotos
+  juansebas7ian.sysmon juansebas7ian.cooling juansebas7ian.storage juansebas7ian.nvidia juansebas7ian.drivers
 )
 COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup)
 
@@ -121,11 +120,29 @@ command -v omarchy >/dev/null || fail "esto es para Omarchy (no encuentro el com
 for dep in python3 jq rsync busctl; do
   command -v "$dep" >/dev/null || fail "falta $dep: omarchy pkg add $dep"
 done
-command -v checkupdates >/dev/null || warn "sin checkupdates, el widget de drivers no verá actualizaciones: omarchy pkg add pacman-contrib"
-command -v omarchy-hwcheck >/dev/null || warn "sin omarchy-hwcheck, el widget de drivers no mostrará la salud: contrib/omarchy/hwcheck/install.sh"
+command -v checkupdates >/dev/null || warn "sin checkupdates, Hardware › Drivers no verá actualizaciones: omarchy pkg add pacman-contrib"
+command -v omarchy-hwcheck >/dev/null || warn "sin omarchy-hwcheck, Hardware › Drivers no mostrará la salud: contrib/omarchy/hwcheck/install.sh"
+command -v solaar >/dev/null || warn "sin solaar, Hardware › Devices no verá la batería de los Logitech: omarchy pkg add solaar"
 
 # --------------------------------------------------------------- plugins
 say "Widgets de la barra"
+"$HERE/sync-ui.sh" # cada plugin lleva su copia de shared/ui (Omarchy no admite enlaces)
+for id in "${RETIRED[@]}"; do
+  if [[ -d $PLUGINS/$id ]]; then
+    omarchy plugin disable "$id" >/dev/null 2>&1 || true
+    backup "$PLUGINS/$id"
+    rm -rf "${PLUGINS:?}/$id"
+    say "  retirado (ahora es una pestaña de Nube o Hardware): $id"
+  fi
+done
+# El Dropbox de Omarchy pasa a la pestaña Dropbox de Nube. Solo una vez: si lo
+# vuelves a activar (omarchy plugin enable omarchy.dropbox), se respeta.
+merged=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-bar-extras/dropbox-in-cloud
+if [[ ! -e $merged ]]; then
+  omarchy plugin disable omarchy.dropbox >/dev/null 2>&1 || true
+  mkdir -p "$(dirname "$merged")" && touch "$merged"
+  say "  omarchy.dropbox: ahora es la pestaña Dropbox de Nube (deshacer: omarchy plugin enable omarchy.dropbox)"
+fi
 for entry in "${WIDGETS[@]}"; do
   id=${entry%%:*}
   omarchy plugin validate "$HERE/plugins/$id" >/dev/null || fail "manifiesto inválido: $id"

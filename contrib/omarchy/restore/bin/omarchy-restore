@@ -27,7 +27,7 @@ QUIET=false
 HEAL_PATHS=(
   .config/hypr .config/omarchy/shell.json .config/omarchy/plugins .config/omarchy/hooks .config/omarchy/extensions
   .config/systemd/user .config/nwg-dock-hyprland .config/wireplumber .config/spotifyd .config/spotify-player/app.toml
-  .config/rclone/rclone.conf .config/gphotos-sync .config/omarchy-backup .config/omarchy-sysmon .config/omarchy-session
+  .config/rclone/rclone.conf .config/gphotos-sync .config/omarchy-backup .config/omarchy-sysmon .config/omarchy-hardware .config/omarchy-session
   .config/opencode/opencode.json .config/uwsm .config/environment.d .config/git
   .local/bin/nwg-dock-hyprland-dnd .local/bin/omarchy-hwcheck .local/bin/omarchy-session .local/bin/omarchy-backup
   .local/bin/omarchy-restore .local/bin/omarchy-agent-usage-extra .local/bin/omarchy-agent-usage-antigravity
