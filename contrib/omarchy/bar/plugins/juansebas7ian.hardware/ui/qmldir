@@ -1,0 +1,13 @@
+singleton Theme 1.0 Theme.qml
+Section 1.0 Section.qml
+Pair 1.0 Pair.qml
+Line 1.0 Line.qml
+Meter 1.0 Meter.qml
+Gauge 1.0 Gauge.qml
+Graph 1.0 Graph.qml
+SizeRow 1.0 SizeRow.qml
+ActionRow 1.0 ActionRow.qml
+Tile 1.0 Tile.qml
+Notice 1.0 Notice.qml
+TabBar 1.0 TabBar.qml
+Caption 1.0 Caption.qml

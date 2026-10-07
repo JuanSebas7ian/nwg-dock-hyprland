@@ -20,16 +20,23 @@
 # BT_AUTOPOWER_ONCE=1 runs a single tick (tests).
 set -uo pipefail
 
-DISCOVERABLE=yes
-PAIRABLE=yes
-INTERVAL=5
-AUTOCONNECT=yes
-RECONNECT_AFTER="0 20 60 180 600"
-AUTOCONNECT_EXCLUDE=""
-CONNECT_TIMEOUT=15
 CONF=${BT_AUTOPOWER_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/bt-autopower.conf}
-# shellcheck disable=SC1090
-[ -r "$CONF" ] && . "$CONF"
+
+# Re-read on every tick: the Hardware widget edits this file (auto-connect per
+# device, visibility) and changes must apply without restarting the service.
+load_conf() {
+    DISCOVERABLE=yes
+    PAIRABLE=yes
+    INTERVAL=5
+    AUTOCONNECT=yes
+    RECONNECT_AFTER="0 20 60 180 600"
+    AUTOCONNECT_EXCLUDE=""
+    CONNECT_TIMEOUT=15
+    # shellcheck disable=SC1090
+    [ -r "$CONF" ] && . "$CONF"
+    return 0
+}
+load_conf
 
 log() { echo "bt-autopower: $*"; }
 btctl() { timeout 5s bluetoothctl "$@" 2>/dev/null; }
@@ -66,6 +73,7 @@ autoconnect_tick() {
 
 tick() {
     local list show rf
+    load_conf
     list=$(btctl list)
     [[ $list == *Controller* ]] || { applied=0; return 0; }
 

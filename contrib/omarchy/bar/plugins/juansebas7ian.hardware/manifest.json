@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.hardware",
+  "name": "Hardware",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "One panel for the whole machine: summary with alerts, CPU and cooling (graphs, threads, AIO pump, fans), GPU (NVML live, processes, driver, CUDA), storage (disks, health, firmware, what uses the space, Steam, cleanup), drivers (omarchy-hwcheck, updates, BIOS) and peripherals (Bluetooth with battery and reconnect at boot, wireless batteries, input devices, USB with errors, audio, cameras). One backend process.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Hardware",
+    "description": "Left = panel · right = btop. Shows the CPU temperature; red on any hardware alert; the number is pending driver updates.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
