@@ -1,0 +1,8 @@
+{
+  "_doc": "Librerías que faltan por un descuido del paquete de AUR, no del sistema. compat.py (C12) las informa como WARN con el motivo en vez de FAIL. Quitar la entrada cuando el paquete lo corrija.",
+  "c12": {
+    "zoom": {
+      "libQt6Bodymovin.so.6": "Zoom 7.x no incluye Qt Bodymovin y no lo declara; solo afecta al complemento de animaciones Lottie. Instalar qt6-lottie del sistema (Qt 6.11) no sirve: Zoom trae un Qt más antiguo (2026-10-07)"
+    }
+  }
+}

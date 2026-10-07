@@ -206,14 +206,36 @@ def ollama_up():
         return False
 
 
+KNOWN_GAPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "known-gaps.json")
+
+
+def known_gaps(path=None):
+    """{pkg: {lib: reason}} accepted for C12 (packaging slips of AUR apps)."""
+    try:
+        with open(path or KNOWN_GAPS) as f:
+            return json.load(f).get("c12", {})
+    except (OSError, ValueError):
+        return {}
+
+
 def rule_c12(ctx):
+    """AUR binaries whose libraries do not resolve.
+
+    Apps that ship their own runtime (Zoom, Electron/CEF apps under /opt) load
+    it through their launcher, which ldd does not see: a missing library that
+    the same package contains is bundled, not missing. A symbol-version clash
+    ("version `Qt_6.11' not found") inside such an app only affects that app,
+    so it is a WARN; a library that no package provides is a FAIL."""
     if not ctx.aur:
         return [(OK, "C12", "sin paquetes de AUR")]
-    bad, scanned = [], 0
+    bad, clash, scanned, bundled = [], [], 0, 0
+    gaps, accepted = getattr(ctx, "known_gaps", None), []
+    gaps = known_gaps() if gaps is None else gaps
     for pkg in ctx.aur:
         rc, out = ctx.run(["pacman", "-Ql", pkg])
-        for line in out.splitlines():
-            path = line.split(" ", 1)[-1]
+        paths = [line.split(" ", 1)[-1] for line in out.splitlines()]
+        own = {os.path.basename(p) for p in paths}
+        for path in paths:
             if not (path.startswith(ELF_DIRS) and os.path.isfile(path)):
                 continue
             try:
@@ -226,12 +248,30 @@ def rule_c12(ctx):
                 break
             scanned += 1
             rc, ldd = ctx.run(["ldd", path], timeout=10)
-            miss = [l.split("=>")[0].strip() for l in ldd.splitlines() if "not found" in l]
+            miss, versions = set(), set()
+            for l in ldd.splitlines():
+                if "=> not found" in l:
+                    lib = l.split("=>")[0].strip()
+                    if lib in own:
+                        bundled += 1
+                    elif lib in gaps.get(pkg, {}):
+                        accepted.append("%s: %s (%s)" % (pkg, lib, gaps[pkg][lib]))
+                    else:
+                        miss.add(lib)
+                elif "version `" in l and "not found" in l:
+                    versions.add(l.split("version `", 1)[1].split("'", 1)[0])
             if miss:
-                bad.append("%s (%s): %s" % (pkg, os.path.basename(path), ", ".join(sorted(set(miss)))))
+                bad.append("%s (%s): %s" % (pkg, os.path.basename(path), ", ".join(sorted(miss))))
+            if versions:
+                clash.append("%s (%s): necesita %s" % (pkg, os.path.basename(path), ", ".join(sorted(versions))))
     if bad:
         return [(FAIL, "C12", "librerías sin resolver en AUR: " + "; ".join(sorted(bad)[:5]))]
-    return [(OK, "C12", "%d binarios de %d paquetes de AUR resuelven sus librerías" % (scanned, len(ctx.aur)))]
+    note = " (%d librerías incluidas en sus propios paquetes)" % bundled if bundled else ""
+    if accepted:
+        clash = ["excepción conocida, known-gaps.json: " + a for a in sorted(set(accepted))] + clash
+    if clash:
+        return [(WARN, "C12", "apps de AUR con runtime propio, solo afecta a esa app%s: %s" % (note, "; ".join(clash[:5])))]
+    return [(OK, "C12", "%d binarios de %d paquetes de AUR resuelven sus librerías%s" % (scanned, len(ctx.aur), note))]
 
 
 def rule_c13(ctx):

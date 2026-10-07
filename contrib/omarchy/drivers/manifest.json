@@ -42,6 +42,7 @@
         "cccl",
         "cuda",
         "cudnn",
+        "nvidia-container-toolkit",
         "ollama",
         "ollama-cuda"
       ],
@@ -242,6 +243,11 @@
       "src": "compat.py",
       "dest": "/usr/local/lib/omarchy/compat.py",
       "mode": "755"
+    },
+    {
+      "src": "known-gaps.json",
+      "dest": "/usr/local/lib/omarchy/known-gaps.json",
+      "mode": "644"
     }
   ],
   "installers": [

@@ -258,6 +258,26 @@ class PostRules(unittest.TestCase):
             c.run = lambda cmd, timeout=15, env=None: (0, "foo %s\n" % elf) if cmd[0] == "pacman" else (0, "\tlibc.so.6 => /usr/lib/libc.so.6\n")
             self.assertEqual(level(compat.rule_c12(c), "C12"), [compat.OK])
             self.assertEqual(level(compat.rule_c12(compat.Ctx({})), "C12"), [compat.OK])  # no AUR packages
+            # A library the package itself ships (Zoom's /opt/zoom/libcef.so) is bundled, not missing.
+            own = os.path.join(self.t, "usr/lib/foo/libcef.so")
+            put(own, "x")
+            c.run = lambda cmd, timeout=15, env=None: (0, "foo %s\nfoo %s\n" % (elf, own)) if cmd[0] == "pacman" else (0, "\tlibcef.so => not found\n")
+            r = compat.rule_c12(c)
+            self.assertEqual(level(r, "C12"), [compat.OK])
+            self.assertIn("incluidas", r[0][2])
+            # A symbol-version clash inside an app with its own runtime is a warning, not a failure.
+            c.run = lambda cmd, timeout=15, env=None: (0, "foo %s\n" % elf) if cmd[0] == "pacman" else (0, "\t/opt/foo/lib/libQt6Core.so.6: version `Qt_6.11' not found (required by /usr/lib/libQt6LabsAnimation.so.6)\n")
+            r = compat.rule_c12(c)
+            self.assertEqual(level(r, "C12"), [compat.WARN])
+            self.assertIn("Qt_6.11", r[0][2])
+            # A gap listed in known-gaps.json is reported with its reason, as a warning.
+            c.known_gaps = {"foo": {"libgone.so.1": "vendor slip"}}
+            c.run = lambda cmd, timeout=15, env=None: (0, "foo %s\n" % elf) if cmd[0] == "pacman" else (0, "\tlibgone.so.1 => not found\n")
+            r = compat.rule_c12(c)
+            self.assertEqual(level(r, "C12"), [compat.WARN])
+            self.assertIn("vendor slip", r[0][2])
+            c.known_gaps = {"bar": {"libgone.so.1": "other package"}}
+            self.assertEqual(level(compat.rule_c12(c), "C12"), [compat.FAIL])  # only for the listed package
         finally:
             compat.ELF_DIRS = old
 
