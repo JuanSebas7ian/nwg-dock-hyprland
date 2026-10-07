@@ -238,6 +238,7 @@ Volver a un snapshot desde el USB: los snapshots de root están en `/mnt/.snapsh
    parámetros del kernel (`~/.claude/skills/omarchy-hardware/scripts/kernel-param.sh`, ver la tabla de cambios de `omarchy.md`).
 4. Volver a añadir Windows a Limine: `~/.claude/skills/omarchy-hardware/scripts/add-windows-entry.sh`.
 5. Reaplicar este plan: los scripts de `contrib/omarchy/plan/` son idempotentes.
+6. Entorno de IA: `omarchy pkg add uv nvtop llama-cpp ggml-cuda nvidia-container-toolkit` y `contrib/omarchy/ai/install.sh` (versiones exactas de los `uv.lock`).
 
 ---
 
@@ -256,3 +257,4 @@ Una línea por acción: fecha y hora · ID · qué se hizo · resultado o eviden
 | 2026-10-07 | P7 | Plan, `omarchy.md` y publicación | Pendiente para el usuario: U1-U7 y medir el arranque (`systemd-analyze`) tras reiniciar |
 | 2026-10-07 16:35 | — | Programación: `nvidia-container-toolkit`, terraform, shellcheck, shfmt, cmake, ninja, pandoc; Jupyter (`ipykernel` + JupyterLab) | Snapshot root #37; GPU visible en Docker (RTX 3060). `compat post` mostró C12 FAIL por Zoom (instalado antes): 9 librerías que Zoom trae (falso positivo, corregido) y `libQt6Bodymovin` que Zoom no incluye (excepción en `drivers/known-gaps.json`) → WARN; reward 96,25 estable. Incidente: al probar Zoom en segundo plano se cerró el Zoom abierto del usuario (`pkill -f`) |
 | 2026-10-07 | — | Programación opcional: R, DBeaver, kubectl, k9s, direnv, just (repo); Maven, Gradle, pnpm, bun, Flutter (mise); pre-commit (uv) | Todos responden; `flutter doctor` OK salvo Android (sin SDK); gancho de direnv y `CHROME_EXECUTABLE` en `~/.bashrc` |
+| 2026-10-07 17:20 | — | Suite de IA: `contrib/omarchy/ai/` (ai-lab + unsloth-env con uv.lock, kernels), nvtop, llama.cpp + ggml-cuda | `verify.py` OK en ambos (RTX 3060, bf16, SDPA, NF4); LangGraph + Ollama OK; `llama-cli` ve CUDA0. Extras no elegidos: Open WebUI + Qdrant, vLLM |
