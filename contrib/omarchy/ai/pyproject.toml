@@ -1,0 +1,89 @@
+[project]
+name = "ai-lab"
+version = "2026.10.7"
+description = "Base environment for deep learning, LLMs and AI engineering on this Omarchy PC (RTX 3060 12 GB, driver 610 / CUDA 13.3)"
+# 3.12: the DL ecosystem (bitsandbytes, unsloth, vLLM, flash-attn) supports it first; 3.14 lags.
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  # deep learning
+  "torch>=2.14.1",
+  "torchvision",
+  # audio: torchaudio stopped at 2.11 (maintenance mode, no build for torch 2.14); librosa + soundfile instead
+  "librosa",
+  "soundfile",
+  "lightning",
+  "timm",
+  "einops",
+  "onnx",
+  "onnxruntime",
+  # LLMs, fine-tuning (LoRA/QLoRA) in 12 GB
+  "transformers",
+  "datasets",
+  "accelerate",
+  "peft",
+  "trl",
+  "bitsandbytes",
+  "sentence-transformers",
+  "huggingface-hub[cli,hf-xet]",
+  "safetensors",
+  "evaluate",
+  # AI engineering
+  "langchain",
+  "langchain-community",
+  "langchain-ollama",
+  "langchain-openai",
+  "langchain-anthropic",
+  "langgraph",
+  "llama-index-core",
+  "llama-index-llms-ollama",
+  "llama-index-embeddings-huggingface",
+  "openai",
+  "anthropic",
+  "ollama",
+  "litellm",
+  "chromadb",
+  "qdrant-client",
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic",
+  "pydantic-settings",
+  "gradio",
+  "streamlit",
+  "python-dotenv",
+  "tiktoken",
+  # data, evaluation, plots
+  "numpy",
+  "pandas",
+  "polars",
+  "pyarrow",
+  "duckdb",
+  "scikit-learn",
+  "scipy",
+  "matplotlib",
+  "seaborn",
+  "plotly",
+  "tqdm",
+  "rich",
+  # experiment tracking
+  "tensorboard",
+  "mlflow",
+  "wandb",
+  # notebooks
+  "ipykernel",
+  "ipywidgets",
+]
+
+[tool.uv]
+package = false
+# Solo esta máquina: Linux x86_64 (sin esto uv también intenta resolver para Windows/macOS).
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+# PyTorch with CUDA 13.2 runtime: newest build that the 610 driver (CUDA 13.3) supports.
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }
+torchvision = { index = "pytorch-cu132" }

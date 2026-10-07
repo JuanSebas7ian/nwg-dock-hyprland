@@ -1,0 +1,16 @@
+[project]
+name = "ai-unsloth"
+version = "2026.10.7"
+description = "Unsloth: fast LoRA/QLoRA fine-tuning of 7-8B LLMs in 12 GB. Separate from ai-lab because unsloth pins its own torch/xformers/trl."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "unsloth",
+  "ipykernel",
+  "ipywidgets",
+  "tensorboard",
+]
+
+[tool.uv]
+package = false
+# Solo esta máquina: Linux x86_64 (sin esto uv también intenta resolver para Windows/macOS).
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
