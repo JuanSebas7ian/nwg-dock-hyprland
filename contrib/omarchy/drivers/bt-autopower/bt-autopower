@@ -7,15 +7,26 @@
 # (resume, bt-guardian, unplug).
 #
 # Respects Omarchy's off switch: omarchy-bluetooth-power turns Bluetooth off with an rfkill soft
-# block, so a blocked adapter is left alone.
+# block, so a blocked adapter is left alone. (blueman-applet used to set that block at login because
+# it saw no adapter yet; install.sh disables its PowerManager plugin.)
 #
-# Config (optional): ~/.config/bt-autopower.conf  DISCOVERABLE=yes|no  PAIRABLE=yes|no  INTERVAL=5
+# After every power-up it reconnects the paired + trusted devices that are not connected (speakers
+# do not reconnect by themselves), at the offsets in RECONNECT_AFTER, so a device switched on a bit
+# later is still picked up. Devices that are off just time out.
+#
+# Config (optional): ~/.config/bt-autopower.conf
+#   DISCOVERABLE=yes|no  PAIRABLE=yes|no  INTERVAL=5
+#   AUTOCONNECT=yes|no  RECONNECT_AFTER="0 20 60 180 600"  AUTOCONNECT_EXCLUDE="AA:BB:.. ..."
 # BT_AUTOPOWER_ONCE=1 runs a single tick (tests).
 set -uo pipefail
 
 DISCOVERABLE=yes
 PAIRABLE=yes
 INTERVAL=5
+AUTOCONNECT=yes
+RECONNECT_AFTER="0 20 60 180 600"
+AUTOCONNECT_EXCLUDE=""
+CONNECT_TIMEOUT=15
 CONF=${BT_AUTOPOWER_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/bt-autopower.conf}
 # shellcheck disable=SC1090
 [ -r "$CONF" ] && . "$CONF"
@@ -24,6 +35,34 @@ log() { echo "bt-autopower: $*"; }
 btctl() { timeout 5s bluetoothctl "$@" 2>/dev/null; }
 
 applied=0   # discoverable/pairable already applied for the current power-up
+ready_at=0  # epoch of the current power-up
+rounds=()   # reconnect offsets still pending for the current power-up
+
+macs() { btctl devices "$1" | awk '$1 == "Device" {print $2}'; }
+
+reconnect() {
+    local mac name out paired trusted connected
+    paired=$(macs Paired); trusted=$(macs Trusted); connected=$(macs Connected)
+    for mac in $paired; do
+        [[ $trusted == *"$mac"* ]] || continue
+        [[ $connected == *"$mac"* ]] && continue
+        [[ " $AUTOCONNECT_EXCLUDE " == *" $mac "* ]] && continue
+        name=$(btctl info "$mac" | sed -n 's/^[[:space:]]*Alias: //p')
+        out=$(timeout "${CONNECT_TIMEOUT}s" bluetoothctl connect "$mac" 2>/dev/null)
+        if [[ $out == *"Connection successful"* ]]; then log "connected ${name:-$mac}"; fi
+    done
+}
+
+# Runs the reconnect rounds whose offset has passed since the power-up.
+autoconnect_tick() {
+    [ "$AUTOCONNECT" = yes ] && [ ${#rounds[@]} -gt 0 ] || return 0
+    local now
+    printf -v now '%(%s)T' -1
+    (( now - ready_at >= rounds[0] )) || return 0
+    rounds=("${rounds[@]:1}")
+    while [ ${#rounds[@]} -gt 0 ] && (( now - ready_at >= rounds[0] )); do rounds=("${rounds[@]:1}"); done
+    reconnect
+}
 
 tick() {
     local list show rf
@@ -46,9 +85,12 @@ tick() {
             btctl discoverable-timeout 0 >/dev/null
             [[ $show == *"Discoverable: yes"* ]] || btctl discoverable on >/dev/null
         fi
-        log "ready (discoverable=$DISCOVERABLE pairable=$PAIRABLE)"
+        log "ready (discoverable=$DISCOVERABLE pairable=$PAIRABLE autoconnect=$AUTOCONNECT)"
         applied=1
+        printf -v ready_at '%(%s)T' -1
+        read -ra rounds <<< "$RECONNECT_AFTER"
     fi
+    autoconnect_tick
 }
 
 if [ "${BT_AUTOPOWER_ONCE:-0}" = 1 ]; then tick; exit 0; fi

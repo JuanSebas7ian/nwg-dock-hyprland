@@ -18,6 +18,9 @@ case "$1" in
   power) [ -e "$S/power_fails" ] && exit 1; echo yes > "$S/powered" ;;
   discoverable) echo yes > "$S/disc" ;;
   pairable) echo yes > "$S/pair" ;;
+  devices) [ -e "$S/dev_$2" ] && cat "$S/dev_$2" ;;
+  info) echo "Device $2 (public)"; echo "	Alias: Speaker $2" ;;
+  connect) if grep -qx "$2" "$S/reachable" 2>/dev/null; then echo "Connection successful"; else echo "Failed to connect"; exit 1; fi ;;
 esac
 """
 FAKE_RFKILL = r"""#!/bin/bash
@@ -100,6 +103,54 @@ class BtAutopower(unittest.TestCase):
         self.run_once()
         self.assertEqual(self.get("disc"), "no")
         self.assertEqual(self.get("pair"), "yes")
+
+    def devices(self, kind, *macs):
+        self.set(**{"dev_" + kind: "\n".join("Device %s X" % m for m in macs)})
+
+    def test_reconnects_paired_trusted_devices(self):
+        self.set(powered="yes", reachable="AA:00:00:00:00:01")
+        self.devices("Paired", "AA:00:00:00:00:01", "AA:00:00:00:00:02", "AA:00:00:00:00:03")
+        self.devices("Trusted", "AA:00:00:00:00:01", "AA:00:00:00:00:03")
+        self.devices("Connected", "AA:00:00:00:00:03")
+        r = self.run_once()
+        calls = self.calls()
+        self.assertIn("connect AA:00:00:00:00:01", calls)
+        self.assertNotIn("connect AA:00:00:00:00:02", calls)  # not trusted
+        self.assertNotIn("connect AA:00:00:00:00:03", calls)  # already connected
+        self.assertIn("connected Speaker AA:00:00:00:00:01", r.stdout)
+
+    def test_unreachable_device_is_not_fatal(self):
+        self.set(powered="yes")
+        self.devices("Paired", "AA:00:00:00:00:01")
+        self.devices("Trusted", "AA:00:00:00:00:01")
+        r = self.run_once()
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("connect AA:00:00:00:00:01", self.calls())
+        self.assertNotIn("connected", r.stdout)
+
+    def test_autoconnect_can_be_disabled_or_excluded(self):
+        self.set(powered="yes")
+        self.devices("Paired", "AA:00:00:00:00:01", "AA:00:00:00:00:02")
+        self.devices("Trusted", "AA:00:00:00:00:01", "AA:00:00:00:00:02")
+        conf = os.path.join(self.tmp.name, "c.conf")
+        self.env["BT_AUTOPOWER_CONF"] = conf
+        with open(conf, "w") as f:
+            f.write('AUTOCONNECT_EXCLUDE="AA:00:00:00:00:02"\n')
+        self.run_once()
+        self.assertIn("connect AA:00:00:00:00:01", self.calls())
+        self.assertNotIn("connect AA:00:00:00:00:02", self.calls())
+        os.remove(os.path.join(self.state, "calls"))
+        with open(conf, "w") as f:
+            f.write("AUTOCONNECT=no\n")
+        self.run_once()
+        self.assertFalse([c for c in self.calls() if c.startswith("connect")])
+
+    def test_no_reconnect_while_blocked(self):
+        self.set(blocked="yes")
+        self.devices("Paired", "AA:00:00:00:00:01")
+        self.devices("Trusted", "AA:00:00:00:00:01")
+        self.run_once()
+        self.assertFalse([c for c in self.calls() if c.startswith("connect")])
 
     def test_power_failure_is_not_fatal(self):
         open(os.path.join(self.state, "power_fails"), "w").close()
