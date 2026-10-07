@@ -47,7 +47,7 @@ Flujo: **implementa Sonnet → evalúa Opus → corrige → snapshot "estable"**
 ## Reglas
 
 - Root solo en `apply.sh` y `stable-snapshot.sh`, lanzados en una terminal visible (el usuario escribe la contraseña):
-  `hyprctl dispatch "hl.exec_cmd(\"uwsm-app -- xdg-terminal-exec <script>\")"`, y esperar `exit=` en el log.
+  `hyprctl dispatch "hl.dsp.exec_cmd(\"uwsm-app -- xdg-terminal-exec <script>\")"`, y esperar `exit=` en el log.
 - Probar primero `--dry-run` y las pruebas unitarias; después la ejecución real.
 - Commits en inglés en `feat/dnd-reorder`, push solo a `fork`; verificar con un clon limpio (`.gitignore` ignora `bin`).
 - Documentar en `~/.claude/omarchy.md` (tabla de cambios, cómo deshacer).

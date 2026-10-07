@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Archivos de Windows desde Omarchy, SOLO LECTURA (plan P6).
+#
+#   windows-files            monta (si hace falta) y abre la carpeta en el gestor de archivos
+#   windows-files status     dónde está montado y con qué opciones
+#   windows-files unmount    desmonta
+#
+# Solo lectura a propósito: con Inicio rápido o hibernación activos en Windows, escribir en el NTFS
+# corrompe datos de Windows. Usa udisks (pide la contraseña con el agente polkit de Omarchy) y el
+# driver ntfs3 del kernel. Partición: Windows 11 en el Samsung 980 (por PARTUUID, que no cambia
+# aunque cambien los nombres nvme0/nvme1). Otra partición: WINDOWS_PARTUUID=<uuid> windows-files
+set -euo pipefail
+
+PARTUUID=${WINDOWS_PARTUUID:-b74588a7-7fd7-4da8-a43b-006e2333b527}
+DEV=/dev/disk/by-partuuid/$PARTUUID
+
+[[ -e $DEV ]] || { echo "No encuentro la partición de Windows ($DEV)." >&2; exit 1; }
+
+mounted() { findmnt -rno TARGET -S "$DEV" 2>/dev/null | head -1 || true; }
+
+case ${1:-open} in
+status)
+  target=$(mounted)
+  if [[ -n $target ]]; then
+    echo "montado en $target ($(findmnt -rno FSTYPE,OPTIONS -S "$DEV" | head -1))"
+  else
+    echo "no montado"
+  fi
+  ;;
+unmount | umount)
+  if [[ -n $(mounted) ]]; then udisksctl unmount -b "$DEV"; else echo "no estaba montado"; fi
+  ;;
+open | mount)
+  target=$(mounted)
+  if [[ -z $target ]]; then
+    udisksctl mount -b "$DEV" -o ro >/dev/null
+    target=$(mounted)
+  fi
+  opts=$(findmnt -rno OPTIONS -S "$DEV" | head -1 || true)
+  if [[ ,$opts, != *,ro,* ]]; then
+    echo "AVISO: $target está montado con escritura ($opts). Desmonta y vuelve a ejecutar." >&2
+    exit 2
+  fi
+  echo "$target (solo lectura)"
+  [[ ${1:-open} == open ]] && xdg-open "$target" >/dev/null 2>&1 &
+  ;;
+*)
+  sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+  exit 2
+  ;;
+esac

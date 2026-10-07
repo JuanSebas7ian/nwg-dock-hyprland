@@ -71,7 +71,7 @@ pkill -x nwg-dock-hyprla            # launch-dock.sh lo relanza con el binario n
 ```bash
 mv ~/.local/bin/nwg-dock-hyprland-dnd ~/.local/bin/nwg-dock-hyprland-dnd.off
 pkill -f 'bash .*launch-dock.sh$'; pkill -x nwg-dock-hyprla
-hyprctl dispatch 'hl.exec_cmd("uwsm-app -- '"$HOME"'/.config/hypr/scripts/launch-dock.sh")'
+hyprctl dispatch 'hl.dsp.exec_cmd("uwsm-app -- '"$HOME"'/.config/hypr/scripts/launch-dock.sh")'
 ```
 
 Sin el binario `-dnd`, el script usa `/usr/bin/nwg-dock-hyprland`. El archivo de anclados

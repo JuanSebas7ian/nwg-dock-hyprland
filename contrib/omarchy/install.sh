@@ -109,7 +109,7 @@ if $START; then
   pkill -x nwg-dock-hyprla 2> /dev/null || true
   sleep 1
   # el mensaje "expected a dispatcher" es normal: el comando sí se ejecuta
-  hyprctl dispatch "hl.exec_cmd(\"uwsm-app -- $HYPR/scripts/launch-dock.sh\")" > /dev/null 2>&1 || true
+  hyprctl dispatch "hl.dsp.exec_cmd(\"uwsm-app -- $HYPR/scripts/launch-dock.sh\")" > /dev/null 2>&1 || true
   sleep 3
   pgrep -x nwg-dock-hyprla > /dev/null && say "  dock corriendo" ||
     fail "el dock no arrancó; revisa ~/.local/state/nwg-dock/dock.log"

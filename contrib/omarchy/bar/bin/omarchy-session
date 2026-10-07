@@ -80,7 +80,8 @@ def hypr_json(what):
 
 
 def dispatch(lua):
-  # Lua-mode hyprctl prints "expected a dispatcher" even when it works.
+  # hl.dsp.* returns a dispatcher (hyprctl answers "ok"); the plain hl.exec_cmd(...) form also ran the
+  # command but left "expected a dispatcher" in hyprctl configerrors after every restore.
   subprocess.run(["hyprctl", "dispatch", lua], capture_output=True, text=True, timeout=10)
 
 
@@ -325,7 +326,7 @@ def restore(dry_run=False):
     events = None
 
   for cmd, w in launches:
-    dispatch(f"hl.exec_cmd({lua_str('uwsm-app -- ' + cmd)}, {{ workspace = {lua_str(w['workspace'] + ' silent')} }})")
+    dispatch(f"hl.dsp.exec_cmd({lua_str('uwsm-app -- ' + cmd)}, {{ workspace = {lua_str(w['workspace'] + ' silent')} }})")
     time.sleep(0.25)
 
   # Send each new window to the next saved place of its class.

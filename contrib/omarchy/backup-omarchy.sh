@@ -71,7 +71,7 @@ Contiene la configuración de usuario (no los paquetes). Rutas relativas a `$HOM
    `cp -a home/. ~/`
 5. Recarga Hyprland y valida: `hyprctl reload && hyprctl configerrors`
 6. Relanza el dock (o cierra sesión y vuelve a entrar):
-   `hyprctl dispatch 'hl.exec_cmd("uwsm-app -- '"$HOME"'/.config/hypr/scripts/launch-dock.sh")'`
+   `hyprctl dispatch 'hl.dsp.exec_cmd("uwsm-app -- '"$HOME"'/.config/hypr/scripts/launch-dock.sh")'`
    (el mensaje "expected a dispatcher" es normal; el comando sí se ejecuta).
 
 Si el binario `~/.local/bin/nwg-dock-hyprland-dnd` no funciona en el sistema nuevo, recompílalo desde
