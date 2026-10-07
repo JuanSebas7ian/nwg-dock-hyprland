@@ -34,7 +34,7 @@ RETIRED=(
   juansebas7ian.gdrive juansebas7ian.icloud juansebas7ian.gphotos
   juansebas7ian.sysmon juansebas7ian.cooling juansebas7ian.storage juansebas7ian.nvidia juansebas7ian.drivers
 )
-COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }
@@ -89,9 +89,9 @@ remove_all() {
       say "  quitado: $id"
     fi
   done
-  systemctl --user disable --now omarchy-agent-usage-extra.timer omarchy-session.service gphotos-sync.timer gphotos-sync.path >/dev/null 2>&1 || true
+  systemctl --user disable --now omarchy-agent-usage-extra.timer omarchy-session.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.path opencode-ollama-sync.timer >/dev/null 2>&1 || true
   systemctl --user stop gphotos-sync.service >/dev/null 2>&1 || true
-  for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path; do
+  for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
   for c in "${COLLECTORS[@]}"; do
@@ -154,7 +154,7 @@ say "Colectores de uso (Antigravity, opencode)"
 for c in "${COLLECTORS[@]}"; do
   install_file "$HERE/bin/$c" "$BIN/$c" 755 || say "  sin cambios: $BIN/$c"
 done
-for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service; do
+for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
   install_file "$HERE/systemd/$unit" "$UNITS/$unit" 644 || say "  sin cambios: $UNITS/$unit"
 done
 
@@ -257,6 +257,11 @@ fi
 # --------------------------------------------------------------- activar
 systemctl --user daemon-reload
 systemctl --user enable --now omarchy-agent-usage-extra.timer >/dev/null
+# opencode ve los modelos que Ollama tiene: al descargar/borrar uno y al iniciar sesión.
+if [[ -d /var/lib/ollama/blobs ]]; then
+  systemctl --user enable --now opencode-ollama-sync.path opencode-ollama-sync.timer >/dev/null || warn "opencode-ollama-sync no arrancó"
+  "$BIN/opencode-ollama-sync" >/dev/null || true
+fi
 # Session restore: this session counts as already restored, so enabling it
 # now does not reopen windows that are already open.
 if ! systemctl --user is-active -q omarchy-session.service; then

@@ -1,0 +1,7 @@
+[Unit]
+Description=Sync opencode's Ollama models with the models Ollama has
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/opencode-ollama-sync

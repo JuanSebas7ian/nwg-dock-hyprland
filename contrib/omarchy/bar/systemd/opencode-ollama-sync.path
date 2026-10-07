@@ -1,0 +1,12 @@
+[Unit]
+Description=Watch Ollama's model store for pulls and deletions (opencode sync)
+
+[Path]
+# blobs changes on every pull and delete; library on new model names.
+PathChanged=/var/lib/ollama/blobs
+PathChanged=/var/lib/ollama/manifests/registry.ollama.ai/library
+TriggerLimitIntervalSec=30s
+TriggerLimitBurst=20
+
+[Install]
+WantedBy=default.target

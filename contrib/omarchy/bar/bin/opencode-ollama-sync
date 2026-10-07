@@ -1,0 +1,139 @@
+#!/usr/bin/python3
+"""Keep opencode's Ollama provider in step with the models Ollama really has.
+
+  opencode-ollama-sync            update ~/.config/opencode/opencode.json (only if something changed)
+  opencode-ollama-sync --dry-run  print what would change
+
+For every model in /api/tags it asks /api/show for its capabilities and context
+length, and writes provider.ollama.models.<name> with:
+  name       kept if you renamed it; otherwise "<model> (local)"
+  tool_call  the model supports tools (opencode's agent needs them)
+  reasoning  the model can think; attachment/modalities if it has vision
+  limit      context = min(model, server's OLLAMA_CONTEXT_LENGTH); output = a quarter of it (max 8192)
+Embedding-only models (nomic-embed-text…) are skipped; models no longer in
+Ollama are removed. Any other key you add to a model entry, and the rest of the
+file, is kept. If Ollama is not running, nothing is touched.
+
+Runs from opencode-ollama-sync.path (when a model is pulled or deleted) and
+opencode-ollama-sync.timer (at login).
+"""
+
+import copy
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+BASE = os.environ.get("OLLAMA_HOST_URL", "http://127.0.0.1:11434")
+CONFIG = Path(os.environ.get("OPENCODE_CONFIG") or
+              Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode" / "opencode.json")
+PROVIDER = {"npm": "@ai-sdk/openai-compatible", "name": "Ollama (local)",
+            "options": {"baseURL": BASE + "/v1"}}
+
+
+def api(path, body=None, timeout=10):
+  data = json.dumps(body).encode() if body is not None else None
+  req = urllib.request.Request(BASE + path, data=data, headers={"Content-Type": "application/json"})
+  with urllib.request.urlopen(req, timeout=timeout) as r:
+    return json.loads(r.read())
+
+
+def server_context():
+  """OLLAMA_CONTEXT_LENGTH of ollama.service (32768 here); Ollama's default otherwise."""
+  out = subprocess.run(["systemctl", "show", "ollama.service", "-p", "Environment", "--value"],
+                       capture_output=True, text=True).stdout
+  for word in out.split():
+    if word.startswith("OLLAMA_CONTEXT_LENGTH="):
+      try:
+        return int(word.split("=", 1)[1])
+      except ValueError:
+        pass
+  return 4096
+
+
+def describe(models, server_ctx):
+  """[(name, show)] from Ollama → {name: entry} for opencode (pure: tested)."""
+  out = {}
+  for name, show in models:
+    caps = set(show.get("capabilities") or [])
+    if "completion" not in caps:
+      continue  # embeddings and the like cannot chat
+    info = show.get("model_info") or {}
+    native = next((v for k, v in info.items() if k.endswith(".context_length") and isinstance(v, int)), server_ctx)
+    ctx = min(native, server_ctx)
+    entry = {"name": f"{name} (local)", "tool_call": "tools" in caps, "reasoning": "thinking" in caps,
+             "limit": {"context": ctx, "output": min(8192, ctx // 4)}}
+    if "vision" in caps:
+      entry["attachment"] = True
+      entry["modalities"] = {"input": ["text", "image"], "output": ["text"]}
+    out[name] = entry
+  return out
+
+
+def merge(config, found):
+  """New config with provider.ollama.models = found, keeping user names and extra keys."""
+  cfg = copy.deepcopy(config)
+  provider = cfg.setdefault("provider", {}).setdefault("ollama", copy.deepcopy(PROVIDER))
+  for k, v in PROVIDER.items():
+    provider.setdefault(k, copy.deepcopy(v))
+  old = provider.get("models") or {}
+  models = {}
+  for name, entry in found.items():
+    prev = old.get(name) or {}
+    merged = dict(prev)
+    merged.update({k: v for k, v in entry.items() if k != "name"})
+    merged["name"] = prev.get("name") or entry["name"]
+    models[name] = merged
+  provider["models"] = models
+  return cfg
+
+
+def main(argv):
+  dry = "--dry-run" in argv
+  try:
+    tags = api("/api/tags").get("models") or []
+  except OSError as exc:
+    print(f"opencode-ollama-sync: Ollama not reachable ({exc}); nothing changed")
+    return 0
+  shown = []
+  for m in tags:
+    try:
+      shown.append((m["name"], api("/api/show", {"model": m["name"]})))
+    except OSError:
+      pass
+  found = describe(shown, server_context())
+  try:
+    config = json.loads(CONFIG.read_text())
+  except FileNotFoundError:
+    config = {"$schema": "https://opencode.ai/config.json"}
+  except ValueError as exc:
+    print(f"opencode-ollama-sync: {CONFIG} is not valid JSON ({exc}); nothing changed", file=sys.stderr)
+    return 1
+  new = merge(config, found)
+  if new == config:
+    print(f"opencode-ollama-sync: up to date ({', '.join(found) or 'no chat models'})")
+    return 0
+  before = set((config.get("provider", {}).get("ollama", {}).get("models") or {}))
+  after = set(found)
+  summary = f"+{sorted(after - before)} -{sorted(before - after)} updated {sorted(after & before)}"
+  if dry:
+    print(json.dumps(new["provider"]["ollama"], indent=2))
+    print(summary)
+    return 0
+  if CONFIG.exists():
+    backup = CONFIG.with_name(CONFIG.name + ".bak." + time.strftime("%Y%m%d"))
+    if not backup.exists():
+      backup.write_text(CONFIG.read_text())
+  CONFIG.parent.mkdir(parents=True, exist_ok=True)
+  tmp = CONFIG.with_suffix(".tmp")
+  tmp.write_text(json.dumps(new, indent=2, ensure_ascii=False) + "\n")
+  tmp.replace(CONFIG)
+  print(f"opencode-ollama-sync: {summary}")
+  return 0
+
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv[1:]))

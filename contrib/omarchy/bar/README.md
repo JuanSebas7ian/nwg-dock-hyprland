@@ -59,6 +59,17 @@ de Antigravity e IDE; cuota por modelo del servidor local mientras Antigravity e
 `bin/omarchy-agent-usage-opencode` (tokens por modelo; los locales marcados `· local`; VRAM y modelos de
 Ollama como topes) los escribe `omarchy-agent-usage-extra` cada 2 min (`omarchy-agent-usage-extra.timer`).
 
+## opencode: los modelos de Ollama, siempre al día
+
+`bin/opencode-ollama-sync` escribe en `~/.config/opencode/opencode.json` (bloque `provider.ollama.models`) los
+modelos que Ollama tiene de verdad: lee `/api/tags` y `/api/show`, omite los de solo embeddings, pone
+`tool_call`, `reasoning`, visión y `limit` (contexto = mínimo entre el modelo y `OLLAMA_CONTEXT_LENGTH` del
+servicio, salida = un cuarto, máx. 8192). Conserva los nombres que les pongas y cualquier otra clave; quita los
+modelos borrados; con Ollama apagado no toca nada; respaldo diario `opencode.json.bak.<fecha>`.
+`opencode-ollama-sync.path` lo ejecuta al descargar o borrar un modelo (vigila `/var/lib/ollama/blobs` y los
+manifiestos) y `opencode-ollama-sync.timer` al iniciar sesión. `--dry-run` muestra el cambio.
+Pruebas: `python3 -m unittest tests.test_opencode_sync`.
+
 ## Sesión: abrir lo mismo que había al apagar
 
 `bin/omarchy-session` + `systemd/omarchy-session.service`: guarda en cada cambio (eventos de Hyprland, con 3 s de
