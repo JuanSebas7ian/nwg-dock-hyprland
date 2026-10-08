@@ -237,8 +237,13 @@ def write_session(snap):
         SESSION.replace(STATE / "session.prev.json")
     except (OSError, ValueError):
       pass
+  # fsync: after a freeze and a hard reset, the last session must already be on disk
+  # (btrfs commits every 30 s; without it a reset could bring back an older one).
   tmp = SESSION.with_suffix(".tmp")
-  tmp.write_text(json.dumps(snap, indent=1))
+  with open(tmp, "w") as f:
+    f.write(json.dumps(snap, indent=1))
+    f.flush()
+    os.fsync(f.fileno())
   tmp.replace(SESSION)
 
 

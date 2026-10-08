@@ -1,0 +1,391 @@
+#!/usr/bin/python3
+"""Catch desktop freezes: record what was going on, and get out of them
+without a hard reset.
+
+  omarchy-freeze-guard daemon     watch Hyprland (systemd user service)
+  omarchy-freeze-guard report     write a diagnostic report now
+  omarchy-freeze-guard last       how the previous boot ended + latest reports
+
+What the daemon does:
+  * asks Hyprland for its version on its control socket every couple of
+    seconds. Hyprland answers from its main loop, so no answer = the screen is
+    frozen (the kernel and every service may still be fine: that is what the
+    2026-10-07 20:44 freeze looked like);
+  * keeps a copy of the tail of hyprland.log on disk, fsynced. The real log
+    lives in /run (tmpfs) and is gone after a reset;
+  * after `reportAfter` seconds without an answer, writes a report (Hyprland
+    thread states and kernel wait channels, nvidia-smi, PSI, recent journal,
+    the log tail) to ~/.local/state/omarchy-freeze/ and syncs the disks;
+  * after `recoverAfter` seconds (0 = never), aborts Hyprland (SIGABRT, so
+    systemd-coredump keeps a backtrace; SIGKILL 15 s later if needed). SDDM
+    comes back, you log in, and omarchy-session reopens the windows. Unsaved
+    work inside apps is lost, as with a reset, but the disks are clean and
+    you keep the evidence;
+  * once per boot, looks at how the previous boot ended (clean shutdown,
+    reset, or never woke from suspend) and notifies if it was not clean.
+
+Config (optional): ~/.config/omarchy-freeze-guard/config.json
+  {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 10, "recoverAfter": 60}
+"""
+
+import datetime
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME = Path.home()
+STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / "omarchy-freeze"
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "omarchy-freeze-guard" / "config.json"
+SESSION_DIR = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / "omarchy-session"
+RUN = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+DEFAULTS = {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 10, "recoverAfter": 60}
+KEEP_REPORTS = 20
+KEEP_LOGS = 5
+LOG_TAIL_BYTES = 512 * 1024
+MIRROR_EVERY = 15
+NOISE = re.compile(r"UFW BLOCK|xkbcomp|keycode|Virtual modifier|Using 0, ignoring|LFSH|Using Lock|not fatal to the X")
+CLEAN_END = re.compile(r"Unmounted /|Reached target .*(Shutdown|Power-Off|Reboot|Final Step)|"
+                       r"System is (powering down|rebooting)|Journal stopped")
+
+
+def log(*a):
+  print("omarchy-freeze-guard:", *a, file=sys.stderr, flush=True)
+
+
+def config():
+  cfg = dict(DEFAULTS)
+  try:
+    cfg.update(json.loads(CONFIG.read_text()))
+  except (OSError, ValueError):
+    pass
+  return cfg
+
+
+def now():
+  return datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def write_durable(path, text):
+  """Atomic write that survives a reset a few seconds later."""
+  path.parent.mkdir(parents=True, exist_ok=True)
+  tmp = path.with_name(path.name + ".tmp")
+  with open(tmp, "w") as f:
+    f.write(text)
+    f.flush()
+    os.fsync(f.fileno())
+  tmp.replace(path)
+  fd = os.open(path.parent, os.O_RDONLY)
+  try:
+    os.fsync(fd)
+  finally:
+    os.close(fd)
+
+
+def run(cmd, timeout=5):
+  try:
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return (p.stdout + p.stderr).rstrip()
+  except subprocess.TimeoutExpired:
+    return f"(did not answer in {timeout} s: {' '.join(cmd)})"
+  except OSError as e:
+    return f"({e})"
+
+
+def notify(summary, body, urgency="normal"):
+  run(["notify-send", "-a", "Omarchy", "-u", urgency, summary, body])
+
+
+def read(path, default=""):
+  try:
+    return Path(path).read_text(errors="replace")
+  except OSError:
+    return default
+
+
+def tail(path, nbytes):
+  try:
+    with open(path, "rb") as f:
+      f.seek(0, os.SEEK_END)
+      f.seek(max(0, f.tell() - nbytes))
+      return f.read().decode(errors="replace")
+  except OSError:
+    return ""
+
+
+# ------------------------------------------------------------------ Hyprland
+
+def instance():
+  return os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+
+
+def hypr_dir():
+  return RUN / "hypr" / instance()
+
+
+def hypr_pid():
+  try:
+    pid = int(read(hypr_dir() / "hyprland.lock").split()[0])
+  except (IndexError, ValueError):
+    return None
+  return pid if Path(f"/proc/{pid}").exists() else None
+
+
+def probe(timeout):
+  """None if Hyprland answered, else why not."""
+  s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+  s.settimeout(timeout)
+  try:
+    s.connect(str(hypr_dir() / ".socket.sock"))
+    s.sendall(b"j/version")
+    got = b""
+    while True:
+      chunk = s.recv(65536)
+      if not chunk:
+        break
+      got += chunk
+    return None if got else "empty answer"
+  except socket.timeout:
+    return f"no answer in {timeout} s"
+  except OSError as e:
+    return str(e)
+  finally:
+    s.close()
+
+
+def threads(pid):
+  rows = []
+  for t in sorted(Path(f"/proc/{pid}/task").glob("*"), key=lambda p: int(p.name)):
+    stat = read(t / "stat")
+    m = re.match(r"\d+ \((.*)\) (\S)", stat)
+    if m:
+      rows.append(f"  {t.name:>8} {m.group(2)} {read(t / 'wchan') or '-':<32} {m.group(1)}")
+  return "\n".join(rows)
+
+
+# ------------------------------------------------------------------ reports
+
+def report(reason, pid=None, failures=()):
+  pid = pid or hypr_pid()
+  parts = [f"omarchy-freeze-guard report: {reason}",
+           f"time: {datetime.datetime.now().isoformat(timespec='seconds')}",
+           f"boot: {read('/proc/sys/kernel/random/boot_id').strip()}",
+           f"kernel: {os.uname().release}",
+           f"hyprland: pid {pid}, instance {instance()}"]
+  if failures:
+    parts.append("probe failures (last 10):\n" + "\n".join(f"  {f}" for f in list(failures)[-10:]))
+  if pid:
+    status = read(f"/proc/{pid}/status")
+    state = re.search(r"^State:\s*(.*)$", status, re.M)
+    parts.append(f"hyprland state: {state.group(1) if state else '?'}"
+                 "  (D = stuck inside the kernel, usually the GPU driver; R/S = stuck in userspace)")
+    parts.append("hyprland threads (tid, state, kernel wait channel, name):\n" + threads(pid))
+  parts.append("load: " + read("/proc/loadavg").strip())
+  for res in ("cpu", "memory", "io"):
+    parts.append(f"pressure {res}:\n" + read(f"/proc/pressure/{res}").rstrip())
+  mem = re.search(r"^MemAvailable:\s*(.*)$", read("/proc/meminfo"), re.M)
+  parts.append("MemAvailable: " + (mem.group(1) if mem else "?"))
+  parts.append("nvidia-smi:\n" + run(["nvidia-smi", "--query-gpu=name,driver_version,pstate,temperature.gpu,"
+                                      "utilization.gpu,memory.used,memory.total,power.draw,clocks_event_reasons.active",
+                                      "--format=csv"], timeout=8))
+  ps = run(["ps", "-eo", "pid,stat,wchan:28,etime,pcpu,rss,comm", "--sort=-pcpu"])
+  parts.append("processes (top CPU):\n" + "\n".join(ps.splitlines()[:26]))
+  journal = run(["journalctl", "-b", "--since", "-3min", "-o", "short-precise", "-q", "--no-pager"], timeout=8)
+  parts.append("journal, last 3 min (noise filtered):\n" +
+               "\n".join(line for line in journal.splitlines() if not NOISE.search(line))[-20000:])
+  parts.append("hyprland.log tail:\n" + tail(hypr_dir() / "hyprland.log", 24 * 1024))
+  path = STATE / f"freeze-{now()}.txt"
+  write_durable(path, "\n\n".join(parts) + "\n")
+  prune(STATE.glob("freeze-*.txt"), KEEP_REPORTS)
+  os.sync()
+  return path
+
+
+def prune(paths, keep):
+  for p in sorted(paths)[:-keep]:
+    try:
+      p.unlink()
+    except OSError:
+      pass
+
+
+def mirror_log(last):
+  """Copy the tail of hyprland.log to disk when it changed. Returns its size."""
+  src = hypr_dir() / "hyprland.log"
+  try:
+    size = src.stat().st_size
+  except OSError:
+    return last
+  if size != last:
+    write_durable(STATE / "hyprland-current.log", f"# instance {instance()}\n" + tail(src, LOG_TAIL_BYTES))
+  return size
+
+
+def rotate_log():
+  """A log left by another Hyprland instance is the one from before a crash/reset: keep it."""
+  cur = STATE / "hyprland-current.log"
+  first = read(cur).split("\n", 1)[0]
+  if first and first != f"# instance {instance()}":
+    cur.replace(STATE / f"hyprland-{datetime.datetime.fromtimestamp(cur.stat().st_mtime):%Y%m%d-%H%M%S}.log")
+    prune(STATE.glob("hyprland-2*.log"), KEEP_LOGS)
+
+
+def save_session_copy():
+  src = SESSION_DIR / "session.json"
+  if src.exists():
+    write_durable(SESSION_DIR / "session.freeze.json", read(src))
+
+
+def recover(pid):
+  save_session_copy()
+  os.sync()
+  log(f"Hyprland (pid {pid}) frozen: SIGABRT")
+  try:
+    os.kill(pid, signal.SIGABRT)
+  except ProcessLookupError:
+    return "gone before the signal"
+  for _ in range(15):
+    time.sleep(1)
+    if not Path(f"/proc/{pid}").exists():
+      return "aborted (core dump: coredumpctl info Hyprland)"
+  try:
+    os.kill(pid, signal.SIGKILL)
+  except ProcessLookupError:
+    return "aborted"
+  time.sleep(5)
+  return "killed" if not Path(f"/proc/{pid}").exists() else "still alive after SIGKILL: stuck in the kernel (state D), only SysRq or a reset helps"
+
+
+# ------------------------------------------------------------------ previous boot
+
+def previous_boot():
+  """(verdict, last lines) for how the previous boot ended."""
+  lines = run(["journalctl", "-b", "-1", "-n", "300", "-o", "short-precise", "-q", "--no-pager"], timeout=20).splitlines()
+  if not lines or lines[0].startswith("("):
+    return "unknown", lines
+  useful = [line for line in lines if not NOISE.search(line)]
+  last = "\n".join(lines[-40:])
+  if any(CLEAN_END.search(line) for line in lines[-60:]):
+    return "clean", useful[-40:]
+  if "PM: suspend entry" in last and "PM: suspend exit" not in last:
+    return "suspend", useful[-40:]
+  return "reset", useful[-40:]
+
+
+def check_previous_boot(force=False):
+  boot = read("/proc/sys/kernel/random/boot_id").strip()
+  marker = STATE / "checked-boot"
+  if not force and read(marker).strip() == boot:
+    return None
+  verdict, lines = previous_boot()
+  STATE.mkdir(parents=True, exist_ok=True)
+  marker.write_text(boot)
+  if verdict in ("clean", "unknown"):
+    return verdict
+  when = lines[-1][:22] if lines else "?"
+  reports = sorted(STATE.glob("freeze-*.txt"))
+  logs = sorted(STATE.glob("hyprland-2*.log"))
+  text = {"suspend": f"The previous boot went to sleep ({when}) and never woke up: a reset was needed.",
+          "reset": f"The previous boot ended without a shutdown ({when}): reset or power loss."}[verdict]
+  body = [text, ""]
+  if reports:
+    body.append(f"Last freeze report: {reports[-1]}")
+  if logs:
+    body.append(f"Hyprland log from before the reset: {logs[-1]}")
+  body.append("\nLast journal lines of that boot:\n" + "\n".join(lines))
+  path = STATE / f"boot-{now()}-{verdict}.txt"
+  write_durable(path, "\n".join(body) + "\n")
+  prune(STATE.glob("boot-*.txt"), KEEP_REPORTS)
+  notify("The last session ended badly", f"{text}\nDetails: {path}", "critical")
+  return verdict
+
+
+# ------------------------------------------------------------------ daemon
+
+def daemon():
+  cfg = config()
+  STATE.mkdir(parents=True, exist_ok=True)
+  if not instance():
+    log("HYPRLAND_INSTANCE_SIGNATURE not set")
+    return 1
+  rotate_log()
+  try:
+    check_previous_boot()
+  except Exception as e:  # never let the boot check stop the watchdog
+    log("previous boot check failed:", e)
+  every, timeout = float(cfg["probeEvery"]), float(cfg["probeTimeout"])
+  report_after, recover_after = float(cfg["reportAfter"]), float(cfg["recoverAfter"])
+  log(f"watching {instance()} (report after {report_after:g} s, recover after {recover_after:g} s)")
+  size, mirrored = -1, 0.0
+  since, failures, reported = None, [], None
+  mono, boot = time.monotonic(), time.clock_gettime(time.CLOCK_BOOTTIME)
+  while True:
+    time.sleep(every)
+    m, b = time.monotonic(), time.clock_gettime(time.CLOCK_BOOTTIME)
+    slept = (b - boot) - (m - mono) > 5  # the machine was suspended in between
+    mono, boot = m, b
+    pid = hypr_pid()
+    if pid is None:
+      log("Hyprland is gone; stopping")
+      return 0
+    if slept:
+      since, failures = None, []
+      continue
+    why = probe(timeout)
+    if why is None:
+      if reported:
+        frozen = time.monotonic() - since
+        with open(reported, "a") as f:
+          f.write(f"\nRECOVERED by itself after {frozen:.0f} s\n")
+        notify("The desktop was frozen", f"It recovered by itself after {frozen:.0f} s.\nReport: {reported}")
+      since, failures, reported = None, [], None
+      if m - mirrored >= MIRROR_EVERY:
+        size, mirrored = mirror_log(size), m
+      continue
+    since = since or time.monotonic() - timeout
+    failures.append(f"{datetime.datetime.now():%H:%M:%S} {why}")
+    frozen = time.monotonic() - since
+    if not reported and frozen >= report_after:
+      reported = report(f"Hyprland has not answered for {frozen:.0f} s", pid, failures)
+      log("freeze report:", reported)
+    if recover_after > 0 and frozen >= recover_after:
+      result = recover(pid)
+      with open(reported, "a") as f:
+        f.write(f"\nRECOVERY after {frozen:.0f} s: {result}\n")
+        f.flush()
+        os.fsync(f.fileno())
+      log("recovery:", result)
+      return 0
+
+
+def last():
+  verdict, lines = previous_boot()
+  print(f"previous boot: {verdict}")
+  for line in lines[-15:]:
+    print("  " + line)
+  for pattern in ("boot-*.txt", "freeze-*.txt", "hyprland-2*.log"):
+    found = sorted(STATE.glob(pattern))
+    print(f"{pattern}: {len(found)}" + (f", latest {found[-1]}" if found else ""))
+  return 0
+
+
+def main(argv):
+  cmd = argv[1] if len(argv) > 1 else "daemon"
+  if cmd == "daemon":
+    return daemon()
+  if cmd == "report":
+    print(report("manual report"))
+    return 0
+  if cmd == "last":
+    return last()
+  print(__doc__)
+  return 3
+
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv))
