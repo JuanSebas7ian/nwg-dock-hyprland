@@ -2,11 +2,13 @@
 Description=Detect desktop freezes, record them and recover without a reset (omarchy-freeze-guard)
 PartOf=graphical-session.target
 After=graphical-session.target
+# Never give up restarting it: it is what gets the desktop back.
+StartLimitIntervalSec=0
 
 [Service]
 ExecStart=%h/.local/bin/omarchy-freeze-guard daemon
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=2
 
 [Install]
 WantedBy=graphical-session.target
