@@ -57,10 +57,10 @@ class Vpn(unittest.TestCase):
   def test_detects_providers_and_locations(self):
     s = self.write("us-nyc.prod.surfshark.com_wg.conf", SURFSHARK)
     p = self.write("wg-JP-FREE-3.conf", PROTON)
-    for path, prov, loc in ((s, "surfshark", "US-NYC"), (p, "proton", "JP-FREE-3")):
+    for path, prov in ((s, "surfshark"), (p, "proton")):
       data, comments = vpn.parse_conf(path.read_text())
       self.assertEqual(vpn.detect_provider(path, data, comments), prov)
-      self.assertEqual(vpn.location_of(path, prov), loc)
+    self.assertEqual(vpn.location_of(p), "JP-FREE-3")
 
   def test_unknown_provider_is_none(self):
     p = self.write("home.conf", SURFSHARK.replace("surfshark.com", "example.org"))
@@ -83,10 +83,10 @@ class Vpn(unittest.TestCase):
     self.assertFalse(vpn.add_v6_blackhole(conf, data)[1])
 
   def test_interface_names_are_valid_and_unique(self):
-    a = vpn.iface_name("surfshark", "US-NYC-VERY-LONG-NAME", set())
+    a = vpn.iface_name("ss", "US-NYC-VERY-LONG-NAME", set())
     self.assertLessEqual(len(a), 15)
     self.assertRegex(a, r"^ss-[a-z0-9]+$")
-    b = vpn.iface_name("surfshark", "US-NYC-VERY-LONG-NAME", {a})
+    b = vpn.iface_name("ss", "US-NYC-VERY-LONG-NAME", {a})
     self.assertNotEqual(a, b)
     self.assertLessEqual(len(b), 15)
 
@@ -96,6 +96,19 @@ class Vpn(unittest.TestCase):
 
   def test_terse_split_unescapes_colons(self):
     self.assertEqual(vpn.split_terse(r"Proton JP\:1:uuid:wireguard"), ["Proton JP:1", "uuid", "wireguard"])
+
+  def test_proton_location_names_country_and_server(self):
+    names = vpn.countries([])
+    loc = vpn.proton_location({"name": "Proton NL-FREE-7", "uuid": "u"}, names)
+    self.assertEqual((loc["cc"], loc["country"], loc["city"], loc["region"]), ("NL", "Netherlands", "Free #7", "Europe"))
+
+  def test_surfshark_conf_for_any_location(self):
+    key = {"privateKey": KEY, "address": "10.14.0.2/16", "dns": "162.252.172.57"}
+    conf = vpn.surfshark_conf({"id": "co-bog.prod.surfshark.com", "pubKey": "PUB="}, key)
+    data, _ = vpn.parse_conf(conf)
+    self.assertEqual(data["Peer"]["Endpoint"], "co-bog.prod.surfshark.com:51820")
+    self.assertEqual(data["Peer"]["PublicKey"], "PUB=")
+    self.assertTrue(vpn.add_v6_blackhole(conf, data)[1])
 
   def test_provider_of_names(self):
     self.assertEqual(vpn.provider_of("Surfshark US-NYC"), "surfshark")

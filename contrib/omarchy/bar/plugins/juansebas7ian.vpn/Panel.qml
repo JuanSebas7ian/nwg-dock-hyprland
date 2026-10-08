@@ -6,11 +6,14 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "ui"
+import "parts"
 
-// VPN: Surfshark (paid) and Proton VPN Free. Every server is a WireGuard
-// profile in NetworkManager; ~/.local/bin/omarchy-vpn (bar/bin/) does the
-// work and prints JSON. The official apps stay available for everything the
-// panel does not do (server lists, kill switch, CleanWeb, NetShield).
+// VPN: Surfshark (any of its locations, from one WireGuard key) and Proton VPN
+// Free (the servers imported from its .conf files), as NetworkManager
+// profiles. ~/.local/bin/omarchy-vpn (bar/bin/) does the work and prints JSON.
+// Screens: home (where you are, connect), locations (picker with flags by
+// region), details (everything about the tunnel), accounts (keys and servers).
+// Each one is screens/<Name>Screen.qml and gets this object as `vpn`.
 Panel {
   id: root
   moduleName: "juansebas7ian.vpn"
@@ -30,29 +33,43 @@ Panel {
   readonly property string glyphOff: String.fromCodePoint(0xF0499)  // shield-outline
 
   // ------------------------------------------------------------------ state
+  property string screen: "home"
+  readonly property var screens: ({
+    home: { file: "HomeScreen", title: "VPN" },
+    locations: { file: "LocationsScreen", title: "Choose a location" },
+    details: { file: "DetailsScreen", title: "Connection details" },
+    accounts: { file: "AccountsScreen", title: "Accounts & servers" }
+  })
   property var st: null
-  property string busy: ""        // uuid being connected, "down", "import", "toggle"
+  property var locs: null
+  property string busy: ""          // location id being connected, "down", "import", "toggle"
   property string message: ""
   property bool messageIsError: false
+  property string provider: "surfshark"   // provider shown in the picker
+  property var selected: null             // location to connect when nothing is active
 
   readonly property bool connected: !!st && st.connected
-  readonly property var current: connected ? st.active[0] : null
+  readonly property var current: connected ? st.current : null
+  readonly property var currentLoc: current ? current.location : null
   readonly property var ip4: st && st.ip ? st.ip.ipv4 : null
   readonly property var ip6: st && st.ip ? st.ip.ipv6 : null
   readonly property bool leak: !!st && st.ipv6Leak
   readonly property var inbox: st ? (st.inbox || []) : []
-  readonly property var providers: [
-    { id: "surfshark", title: "SURFSHARK", app: "surfshark", appLabel: "Open the Surfshark app", appHint: "All locations, kill switch, CleanWeb, MultiHop",
-      setup: "my.surfshark.com → VPN → Manual setup → Desktop → WireGuard: create a key pair, pick a location, download the .conf" },
-    { id: "proton", title: "PROTON VPN FREE", app: "protonvpn-app", appLabel: "Open the Proton VPN app", appHint: "Free servers, kill switch, NetShield (sign in once)",
-      setup: "account.protonvpn.com → Downloads → WireGuard configuration: pick a free server, download the .conf" }
-  ]
+  readonly property bool surfsharkReady: !!st && st.setup.surfshark
+  readonly property var protonServers: st ? st.setup.proton : []
+  // What the big button connects to: the pick, else the last one used.
+  readonly property var target: selected ? selected : (st && st.last && st.last.location ? st.last.location : null)
 
   // ------------------------------------------------------------------ actions
   function refresh(force) {
     if (statusProc.running) return
     statusProc.command = [ctl, "status"].concat(force ? ["--refresh"] : [])
     statusProc.running = true
+  }
+  function loadLocations(force) {
+    if (locProc.running) return
+    locProc.command = [ctl, "locations"].concat(force ? ["--refresh"] : [])
+    locProc.running = true
   }
   function run(tag, args) {
     if (actionProc.running) return
@@ -61,18 +78,47 @@ Panel {
     actionProc.command = [ctl].concat(args)
     actionProc.running = true
   }
-  function connectProfile(p) { if (p.active) run("down", ["down"]); else run(p.uuid, ["up", p.uuid]) }
+  function connectTo(loc) {
+    if (!loc) { go("locations"); return }
+    selected = loc
+    if (loc.provider === "surfshark" && !surfsharkReady) { go("accounts"); return }
+    run(loc.id, ["connect", loc.provider, loc.id])
+    go("home")
+  }
+  function disconnect() { run("down", ["down"]) }
+  function primary() { if (connected) disconnect(); else connectTo(target) }
   function openApp(bin) { root.bar.run("uwsm-app -- " + bin); root.close() }
   function openUrl(u) { root.bar.run("xdg-open " + u); root.close() }
-  function profiles(id) { return st && st.profiles ? (st.profiles[id] || []) : [] }
+  function go(name) {
+    if (!screens[name]) return
+    if (name === "locations") {
+      loadLocations(false)
+      if (currentLoc && (currentLoc.provider === "surfshark" || currentLoc.provider === "proton")) provider = currentLoc.provider
+    }
+    screen = name
+  }
+  function back() { if (screen !== "home") screen = "home"; else root.close() }
+  function locLabel(l) {
+    if (!l) return ""
+    return l.city && l.city !== l.country ? l.city + ", " + l.country : l.country
+  }
+  function providerLabel(p) { return p === "surfshark" ? "Surfshark" : p === "proton" ? "Proton VPN Free" : "Other VPN" }
+  function regionGlyph(r) { return r === "The Americas" ? "🌎" : r === "Asia Pacific" ? "🌏" : "🌍" }
+  function duration(since) {
+    if (!since) return ""
+    var s = Math.max(0, Math.floor(Date.now() / 1000 - since))
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60)
+    return h > 0 ? h + " h " + m + " min" : m > 0 ? m + " min" : s + " s"
+  }
 
   onOpenedChanged: {
     if (opened) { refresh(false); Qt.callLater(function() { keyCatcher.forceActiveFocus() }) }
-    else message = ""
+    else { message = ""; screen = "home" }
   }
+  onScreenChanged: loadScreen()
 
   Timer {
-    interval: root.opened ? 3000 : 20000
+    interval: root.opened ? 2000 : 20000
     running: true
     repeat: true
     triggeredOnStart: true
@@ -87,6 +133,13 @@ Panel {
     }
   }
   Process {
+    id: locProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { try { root.locs = JSON.parse(text) } catch (e) {} }
+    }
+  }
+  Process {
     id: actionProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -97,6 +150,7 @@ Panel {
           else if (r.imported) {
             root.message = "Imported: " + r.imported.map(function(i) { return i.name }).join(", ")
             root.messageIsError = false
+            root.loadLocations(false)
           }
         } catch (e) {}
         root.busy = ""
@@ -111,6 +165,7 @@ Panel {
     function close(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): string { root.refresh(true); return "ok" }
+    function screen(name: string): void { root.open(); root.go(name) }
   }
 
   // ------------------------------------------------------------------ bar icon
@@ -121,12 +176,14 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: (root.connected ? root.glyphOn : root.glyphOff) + (root.busy !== "" ? " …" : "")
+    text: (root.connected ? root.glyphOn : root.glyphOff)
+      + (root.busy !== "" ? " …" : root.currentLoc && root.currentLoc.cc ? " " + root.currentLoc.cc : "")
     active: root.leak
     tooltipText: !root.st ? "VPN"
-      : root.connected ? root.current.name + (root.ip4 ? "\n" + root.ip4.ip + " · " + (root.ip4.city ? root.ip4.city + ", " : "") + root.ip4.country : "")
-        + (root.leak ? "\nIPv6 is leaking around the tunnel" : "")
-      : "VPN off" + (root.ip4 ? " · " + root.ip4.country : "") + "\nRight click: connect " + (root.st.last && root.st.last.name ? root.st.last.name : "(none used yet)")
+      : root.connected ? "Protected · " + root.locLabel(root.currentLoc) + " (" + root.providerLabel(root.currentLoc.provider) + ")"
+        + (root.ip4 ? "\n" + root.ip4.ip : "") + (root.leak ? "\nIPv6 is leaking around the tunnel" : "")
+      : "Not protected" + (root.ip4 ? " · " + root.ip4.country : "")
+        + (root.target ? "\nRight click: connect to " + root.locLabel(root.target) : "")
     onPressed: function(code) {
       if (code === Qt.RightButton) root.run("toggle", ["toggle"])
       else root.toggle()
@@ -134,6 +191,12 @@ Panel {
   }
 
   // ------------------------------------------------------------------ panel
+  function loadScreen() {
+    flick.contentY = 0
+    loader.setSource(Qt.resolvedUrl("screens/" + screens[screen].file + ".qml"), { vpn: root })
+  }
+  Component.onCompleted: loadScreen()
+
   KeyboardPanel {
     id: panel
     anchorItem: button
@@ -142,194 +205,90 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(body.implicitHeight, Style.space(900))
+    contentHeight: panel.fittedContentHeight(header.implicitHeight + Style.space(12) + (loader.item ? loader.item.implicitHeight : 0), Style.space(760))
 
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
       onMoveRequested: function(dx, dy) {
+        if (dx < 0) root.back()
         if (dy !== 0) flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height, flick.contentY + dy * Style.space(56)))
       }
-      onCloseRequested: root.close()
+      onCloseRequested: root.back()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
+        if (root.screen === "locations" && loader.item && loader.item.typeText) { loader.item.typeText(t); return }
         if (t === "r" || t === "R") root.refresh(true)
-        else if (t === "d" || t === "D") { if (root.connected) root.run("down", ["down"]) }
-        else if (t === "c" || t === "C") root.run("toggle", ["toggle"])
-        else if (t === "i" || t === "I") root.run("import", ["import"])
+        else if (t === "c" || t === "C") root.primary()
+        else if (t === "l" || t === "L") root.go("locations")
+        else if (t === "i" || t === "I") root.go("details")
+        else if (t === "a" || t === "A") root.go("accounts")
+      }
+
+      // Header: back arrow on inner screens, title, refresh.
+      Column {
+        id: header
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        spacing: Style.space(8)
+
+        RowLayout {
+          width: parent.width
+          spacing: Style.space(6)
+          PanelActionButton {
+            visible: root.screen !== "home"
+            iconText: "󰁍"
+            tooltipText: "Back (Esc)"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.back()
+          }
+          Text {
+            visible: root.screen === "home"
+            text: root.connected ? root.glyphOn : root.glyphOff
+            color: root.leak ? root.urgent : root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.icon
+          }
+          Text {
+            Layout.fillWidth: true
+            text: root.screens[root.screen].title
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            font.bold: true
+            elide: Text.ElideRight
+          }
+          PanelActionButton {
+            iconText: "󰑐"
+            tooltipText: "Check again (r)"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: { root.refresh(true); if (root.screen === "locations") root.loadLocations(true) }
+          }
+        }
+        Notice { visible: root.message !== ""; text: root.message; level: root.messageIsError ? "crit" : "info" }
       }
 
       Flickable {
         id: flick
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: header.bottom
+        anchors.topMargin: Style.space(12)
+        anchors.bottom: parent.bottom
         contentWidth: width
-        contentHeight: body.implicitHeight
+        contentHeight: loader.item ? loader.item.implicitHeight : 0
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         interactive: contentHeight > height
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-        Column {
-          id: body
+        Loader {
+          id: loader
           width: flick.width - (flick.interactive ? Style.space(12) : 0)
-          spacing: Style.space(8)
-
-          PanelHero {
-            width: parent.width
-            title: "VPN"
-            meta: !root.st ? "Checking…"
-              : root.busy === "down" ? "Disconnecting…"
-              : root.busy !== "" && root.busy !== "import" ? "Connecting…"
-              : root.connected ? "Connected · " + root.current.name
-              : "Not connected"
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            iconComponent: Component {
-              Text {
-                text: root.connected ? root.glyphOn : root.glyphOff
-                color: root.leak ? root.urgent : root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.display
-              }
-            }
-            trailingControl: Component {
-              PanelActionButton {
-                iconText: "󰑐"
-                tooltipText: "Check the public IP again (r) · c = connect last / disconnect · i = import"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: root.refresh(true)
-              }
-            }
-          }
-
-          Notice { visible: root.message !== ""; text: root.message; level: root.messageIsError ? "crit" : "info" }
-          Notice {
-            visible: root.leak
-            level: "crit"
-            text: "IPv6 goes around the tunnel (" + (root.ip6 ? root.ip6.organization : "") + "). Import the server again from its .conf: imported profiles route IPv6 into the tunnel."
-          }
-          Notice {
-            visible: root.inbox.length > 0
-            level: "info"
-            text: root.inbox.length + " WireGuard config(s) in ~/Downloads ready to import."
-          }
-          ActionRow {
-            visible: root.inbox.length > 0
-            icon: "󰋺"
-            label: root.busy === "import" ? "Importing…" : "Import from ~/Downloads (i)"
-            hint: "Each .conf becomes a server below; the file (it holds your private key) moves to ~/.config/omarchy-vpn/configs"
-            onActivated: root.run("import", ["import"])
-          }
-
-          Section { title: "CONNECTION" }
-          Pair { label: "Status"; value: root.connected ? "Connected" : "Off"; strong: true }
-          Pair { visible: root.connected; label: "Server"; value: root.current ? root.current.name : "" }
-          Pair { visible: root.connected && !!root.current.endpoint; label: "Endpoint"; value: root.current && root.current.endpoint ? root.current.endpoint : "" }
-          Pair { label: "Public IP"; value: root.ip4 ? root.ip4.ip : (root.st && root.st.ip.ipv4Error ? "offline" : "…") }
-          Pair { visible: !!root.ip4; label: "Seen from"; value: root.ip4 ? (root.ip4.city ? root.ip4.city + ", " : "") + root.ip4.country : "" }
-          Pair { visible: !!root.ip4; label: "Network"; value: root.ip4 ? root.ip4.organization || "" : "" }
-          Pair {
-            label: "IPv6"
-            value: !root.ip6 ? (root.connected ? "blocked (no leak)" : "not available") : root.leak ? "LEAKING · " + root.ip6.ip : root.ip6.ip
-            hot: root.leak
-          }
-          Pair {
-            visible: root.connected && !!root.current.ipv4_dns
-            label: "DNS"
-            value: root.current && root.current.ipv4_dns ? root.current.ipv4_dns.join(", ") + " (tunnel only)" : ""
-          }
-          ActionRow {
-            visible: root.connected
-            icon: "󰅖"
-            label: root.busy === "down" ? "Disconnecting…" : "Disconnect (d)"
-            hint: "Back to the normal connection"
-            onActivated: root.run("down", ["down"])
-          }
-
-          Repeater {
-            model: root.providers
-            Column {
-              id: prov
-              required property var modelData
-              width: body.width
-              spacing: Style.space(4)
-              readonly property var list: root.profiles(modelData.id)
-              readonly property var app: root.st && root.st.apps ? root.st.apps[modelData.id] : null
-
-              Section { title: prov.modelData.title }
-              Repeater {
-                model: prov.list
-                RowLayout {
-                  required property var modelData
-                  width: prov.width
-                  spacing: Style.space(8)
-                  ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 0
-                    Text {
-                      text: modelData.name.replace(/^(Surfshark|Proton) /, "")
-                      textFormat: Text.PlainText
-                      color: Theme.foreground
-                      font.family: Theme.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                      font.bold: modelData.active
-                    }
-                    Text {
-                      Layout.fillWidth: true
-                      text: modelData.active ? "Connected" + (modelData.device ? " · " + modelData.device : "")
-                        : !modelData.imported ? "Created by the official app"
-                        : modelData.lastUsed > 0 ? "Last used " + Theme.ago(modelData.lastUsed) : "Never used"
-                      color: Theme.dim
-                      font.family: Theme.fontFamily
-                      font.pixelSize: Style.font.caption
-                      elide: Text.ElideRight
-                    }
-                  }
-                  ToggleSwitch {
-                    checked: modelData.active
-                    busy: root.busy === modelData.uuid
-                    onToggled: root.connectProfile(modelData)
-                  }
-                }
-              }
-              Line {
-                visible: prov.list.length === 0
-                small: true
-                tone: "dim"
-                text: "No servers yet. " + prov.modelData.setup + ", then import it here."
-              }
-              ActionRow {
-                icon: "󰖟"
-                label: "Get WireGuard configs"
-                hint: root.st && root.st.web ? root.st.web[prov.modelData.id].replace("https://", "") : ""
-                onActivated: root.openUrl(root.st.web[prov.modelData.id])
-              }
-              ActionRow {
-                visible: !!prov.app && prov.app.installed
-                icon: "󰏌"
-                label: prov.modelData.appLabel + (prov.app && prov.app.running ? " (running)" : "")
-                hint: prov.modelData.appHint
-                onActivated: root.openApp(prov.modelData.app)
-              }
-            }
-          }
-
-          Section { visible: root.profiles("other").length > 0; title: "OTHER VPN" }
-          Repeater {
-            model: root.profiles("other")
-            Pair {
-              required property var modelData
-              label: modelData.name
-              value: modelData.active ? "connected" : modelData.type
-              strong: modelData.active
-            }
-          }
-          Line {
-            small: true
-            tone: "dim"
-            text: "One VPN at a time: connecting a server disconnects the other. Proton Free allows one device; the Surfshark plan, unlimited."
-          }
+          onLoaded: item.width = Qt.binding(function() { return loader.width })
         }
       }
     }

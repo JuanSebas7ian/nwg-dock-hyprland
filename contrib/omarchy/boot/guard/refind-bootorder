@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Mantiene rEFInd primero en el orden de arranque del firmware. Windows (sus actualizaciones grandes)
+# y algunas BIOS se ponen primeras; esto lo devuelve en el siguiente arranque de Omarchy. Solo escribe
+# en la NVRAM si hace falta. Lo instala contrib/omarchy/boot/install.sh refind.
+set -euo pipefail
+out=$(efibootmgr)
+num=$(awk 'tolower($0) ~ /refind_x64\.efi/ {sub(/^Boot/, "", $1); sub(/\*$/, "", $1); print $1; exit}' <<<"$out")
+if [[ -z $num ]]; then
+  echo "refind-bootorder: no hay entrada EFI de rEFInd; nada que hacer"
+  exit 0
+fi
+order=$(awk -F': ' '/^BootOrder:/ {print $2}' <<<"$out")
+first=${order%%,*}
+if [[ ${first^^} == "${num^^}" ]]; then
+  echo "refind-bootorder: rEFInd (Boot$num) ya es el primero ($order)"
+  exit 0
+fi
+rest=$(tr ',' '\n' <<<"$order" | grep -vix "$num" | paste -sd, -)
+new=$num${rest:+,$rest}
+efibootmgr --bootorder "$new" >/dev/null
+echo "refind-bootorder: orden de arranque $order → $new"

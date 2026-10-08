@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep rEFInd first in the UEFI boot order
+ConditionPathExists=/sys/firmware/efi
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/omarchy/refind-bootorder
+
+[Install]
+WantedBy=multi-user.target
