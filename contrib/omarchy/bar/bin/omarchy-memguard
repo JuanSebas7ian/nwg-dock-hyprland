@@ -6,6 +6,10 @@ spikes, without killing anything and without getting in the way of work.
   omarchy-memguard status [--json] now, percentiles of the last hour, what it is doing
   omarchy-memguard explain         which apps are protected and why
   omarchy-memguard smoke           live, read-only self-check (PASS/WARN/FAIL lines)
+  omarchy-memguard ui [--brief]    everything the bar widget shows, as JSON
+  omarchy-memguard set KEY VALUE   change a setting (validated; the daemon reloads it live)
+  omarchy-memguard add|remove LIST NAME   exceptions: protect, ordinary, freezable
+  omarchy-memguard reset [KEY]     back to the default (all settings without KEY)
 
 Made for an AI/ML workstation: high memory use is normal (models, datasets,
 training, notebooks) and is never "cleaned". It acts only when the machine is
@@ -60,6 +64,7 @@ GB = 1 << 30
 MB = 1 << 20
 
 DEFAULTS = {
+  "enabled": 1,               # 0 = watch and show only, never act (what was applied is undone)
   "every": 2,                 # seconds between samples
   "ramWarnAvailPct": 12,      # MemAvailable below this % of RAM -> level 1
   "ramCritAvailPct": 6,       # -> level 2
@@ -83,6 +88,38 @@ DEFAULTS = {
   "maxFreezeMin": 30,         # a frozen job is thawed after this anyway
 }
 FREEZABLE = ["gphotos-sync.service", "omarchy-backup.service", "opencode-ollama-sync.service"]
+# Exceptions, by process name (comm or program), unit name or app name:
+#   protect    always protected work, like the built-in lists
+#   ordinary   never protected (never overrides the desktop)
+#   freezable  extra user units that may be paused under pressure (never FUSE mounts)
+LISTS = ("protect", "ordinary", "freezable")
+NAME_RE = re.compile(r"^[A-Za-z0-9_.@:+\-]{1,64}$")
+MAX_LIST = 50
+# For the settings screen: key -> (group, label, unit, min, max, step)
+SCHEMA = {
+  "enabled": ("General", "Act on spikes (off = watch only)", "bool", 0, 1, 1),
+  "voxtypeOffload": ("GPU", "Move dictation off the GPU when work needs the VRAM", "bool", 0, 1, 1),
+  "ramWarnAvailPct": ("RAM", "Warn below free RAM", "%", 1, 50, 1),
+  "ramCritAvailPct": ("RAM", "Act below free RAM (with waiting)", "%", 1, 40, 1),
+  "ramPanicAvailPct": ("RAM", "Emergency below free RAM", "%", 1, 20, 1),
+  "psiWarn": ("Pressure", "Warn when work waits", "%", 1, 90, 1),
+  "psiConfirm": ("Pressure", "Waiting that confirms low RAM", "%", 0, 50, 1),
+  "psiCrit": ("Pressure", "Act when work waits", "%", 5, 95, 1),
+  "tteWarn": ("Spikes", "Warn when RAM full in", "s", 5, 600, 5),
+  "tteCrit": ("Spikes", "Act when RAM + swap full in", "s", 5, 600, 5),
+  "ttePanic": ("Spikes", "Emergency when RAM + swap full in", "s", 2, 120, 1),
+  "swapCritPct": ("Spikes", "Act when swap used above", "%", 10, 95, 5),
+  "vramWarnFreeMB": ("GPU", "Free VRAM before helping a process that asks for more", "MB", 100, 8000, 100),
+  "vramCritFreeMB": ("GPU", "Critical free VRAM", "MB", 100, 4000, 100),
+  "vramGrowMB": ("GPU", "Growth that counts as asking for more (30 s)", "MB", 50, 4000, 50),
+  "voxtypeReloadFreeMB": ("GPU", "Free VRAM to put dictation back", "MB", 1000, 11000, 250),
+  "voxtypeReloadCalmMin": ("GPU", "...for this long", "min", 1, 120, 1),
+  "calmSeconds": ("Undo", "Calm before undoing", "s", 5, 600, 5),
+  "maxFreezeMin": ("Undo", "Longest pause of a background job", "min", 1, 240, 5),
+  "reclaimIdleMin": ("Idle apps", "Idle before giving memory to zram", "min", 1, 240, 1),
+  "reclaimMB": ("Idle apps", "Per app and minute", "MB", 64, 4096, 64),
+  "every": ("General", "Sample every", "s", 1, 30, 1),
+}
 NEVER_FREEZE = re.compile(r"rclone|fuse|sshfs|gvfs|dropbox|pipewire|wireplumber")
 
 # What counts as protected work. comm names (first 15 chars), then patterns on the command line.
@@ -98,7 +135,8 @@ GPU_GUI = {"chrome", "chromium", "firefox", "electron", "Discord", "slack", "zoo
 AI = {"ollama", "llama-server", "llama-cli", "llama-bench", "vllm", "tensorboard", "mlflow", "jupyter",
       "jupyter-lab", "jupyter-noteboo", "wandb", "wandb-service", "ray", "raylet", "gcs_server", "dockerd",
       "docker", "containerd", "containerd-shim", "nvidia-smi", "nvtop", "text-generation", "tgi", "triton",
-      "uv", "pip", "conda", "mamba", "nvcc", "accelerate", "deepspeed", "torchrun", "huggingface-cli", "hf"}
+      "uv", "pip", "conda", "mamba", "nvcc", "accelerate", "deepspeed", "torchrun", "huggingface-cli", "hf",
+      "voxtype"}  # dictation (Whisper on the GPU)
 DEV = {"claude", "codex", "opencode", "gemini", "cursor-agent", "copilot", "aider", "antigravity-ide",
        "antigravity", "code", "cursor", "nvim", "vim", "emacs", "zed", "idea", "pycharm", "java", "node",
        "pyrefly", "pyright", "pyright-langse", "basedpyright", "ruff", "rust-analyzer", "gopls", "clangd",
@@ -115,10 +153,16 @@ def log(*a):
   print("omarchy-memguard:", *a, file=sys.stderr, flush=True)
 
 
+def valid_name(v):
+  return isinstance(v, str) and bool(NAME_RE.match(v))
+
+
 def config():
-  """Defaults, overridden by the valid non-negative numbers in the config file.
-  A bad file or value is ignored: the daemon must run whatever is there."""
+  """Defaults, overridden by the valid values in the config file: non-negative
+  numbers, and lists of plain names for the exceptions. A bad file or value is
+  ignored: the daemon must run whatever is there."""
   cfg = {k: float(v) for k, v in DEFAULTS.items()}
+  cfg.update({k: [] for k in LISTS})
   try:
     user = json.loads(CONFIG.read_text())
   except (OSError, ValueError):
@@ -127,6 +171,10 @@ def config():
     log(f"{CONFIG}: not a JSON object, using defaults")
     return cfg
   for k, v in user.items():
+    if k in LISTS:
+      if isinstance(v, list):
+        cfg[k] = [x for x in v if valid_name(x)][:MAX_LIST]
+      continue
     if k not in DEFAULTS:
       log(f"{CONFIG}: unknown key {k!r} ignored")
       continue
@@ -350,8 +398,18 @@ class Scope:
     self.why = ""
 
 
-def app_scopes(cuda_pids=()):
-  """Every unit under app.slice with its processes classified."""
+def scope_matches(scope, names, comms):
+  if not names:
+    return False
+  base = re.sub(r"\.(scope|service)$", "", scope.name)
+  return scope.name in names or base in names or bool(comms & set(names))
+
+
+def app_scopes(cuda_pids=(), cfg=None):
+  """Every unit under app.slice with its processes classified, with the user's exceptions."""
+  cfg = cfg or {}
+  protect, ordinary = cfg.get("protect") or [], cfg.get("ordinary") or []
+  freezable = set(FREEZABLE) | set(cfg.get("freezable") or [])
   base = user_cgroup() / "app.slice"
   out = []
   try:
@@ -362,15 +420,26 @@ def app_scopes(cuda_pids=()):
     if not d.is_dir() or not (d.name.endswith(".scope") or d.name.endswith(".service")):
       continue
     s = Scope(d)
-    if d.name in FREEZABLE:  # batch jobs: pausable, not protected
+    if d.name in freezable:  # batch jobs: pausable, not protected
+      s.why = "background job (pausable)"
       out.append(s)
       continue
     best = None
-    rank = {"desktop": 3, "ai": 2, "dev": 1}
+    rank = {"desktop": 4, "user": 3, "ai": 2, "dev": 1}
+    comms = set()
     for pid in s.pids:
-      k = classify(comm_of(pid), cmdline_of(pid), pid in cuda_pids)
+      c = comm_of(pid)
+      comms.add(c)
+      comms.add(os.path.basename(cmdline_of(pid).split(" ", 1)[0]))
+      k = classify(c, cmdline_of(pid), pid in cuda_pids)
       if k and (best is None or rank[k] > rank[best[0]]):
-        best = (k, comm_of(pid))
+        best = (k, c)
+    comms.discard("")
+    if scope_matches(s, protect, comms) and (best is None or best[0] != "desktop"):
+      best = ("user", "your exception")
+    elif scope_matches(s, ordinary, comms) and best and best[0] != "desktop":
+      best = None
+      s.why = "your exception: ordinary"
     if best:
       s.kind, s.why = best
     out.append(s)
@@ -599,6 +668,8 @@ class Guard:
 
   # -- one step
   def tick(self, t, mi, psi, vram, scopes):
+    if not self.cfg.get("enabled", 1):
+      return self.idle_tick(t, mi, psi, vram, scopes)
     used = mi.get("MemTotal", 0) - mi.get("MemAvailable", 0)
     self.hist.add(t, used, vram["used"] if vram else None)
     lvl, reasons, info = self.ram_level(t, mi, psi)
@@ -614,10 +685,8 @@ class Guard:
         self.event(t, f"memory level {lvl}: " + "; ".join(reasons))
       if not self.episode:
         self.episode = True
-        top = sorted(scopes, key=lambda s: -s.current)[:5]
-        notify("Memory is running low" if lvl < 3 else "Memory almost exhausted",
-               "; ".join(reasons) + "\nTop: " + ", ".join(f"{label(s)} {human(s.current)}" for s in top),
-               "critical" if lvl >= 2 else "normal")
+        self.notified = 0
+      self.maybe_warn(t, lvl, reasons, info, scopes)
       self.reclaim_idle(t, scopes)
       if lvl >= 2:
         self.freeze_batch(t)
@@ -646,7 +715,7 @@ class Guard:
         self.save_applied()
 
     p95, p99 = self.hist.percentile(1, 95), self.hist.percentile(1, 99)
-    self.status = {"t": time.time(), "level": lvl, "vramLevel": vlvl, "reasons": reasons,
+    self.status = {"t": time.time(), "enabled": True, "level": lvl, "vramLevel": vlvl, "reasons": reasons,
                    "ram": dict(info, used=used, total=mi.get("MemTotal", 0), p95=p95, p99=p99),
                    "vram": None if not vram else {"used": vram["used"], "total": vram["total"], "free": vram["free"],
                                                   "p95": self.hist.percentile(2, 95), "p99": self.hist.percentile(2, 99)},
@@ -654,6 +723,39 @@ class Guard:
                    "protected": sorted(s.name for s in scopes if s.kind), "unloaded": self.unloaded[-5:],
                    "dictation": "on demand (moved off the GPU)" if self.voxtype_offloaded is not None else "resident"}
     return lvl
+
+  def maybe_warn(self, t, lvl, reasons, info, scopes):
+    """Tell the user only what is worth an interruption. Fast growth with swap to
+    spare and nobody waiting (a build, a dataset load) is level 1 but silent;
+    low RAM or waiting warns at most every 15 min; level 2+ always, once per rise."""
+    if lvl <= self.notified:
+        return
+    real = info["availPct"] < self.cfg["ramWarnAvailPct"] or info["psiSome"] > self.cfg["psiWarn"]
+    if lvl == 1 and (not real or t - getattr(self, "last_warn", -1e9) < 900):
+      return
+    self.notified = lvl
+    self.last_warn = t
+    top = sorted(scopes, key=lambda s: -s.current)[:5]
+    notify("Memory is running low" if lvl < 3 else "Memory almost exhausted",
+           "; ".join(reasons) + "\nTop: " + ", ".join(f"{label(s)} {human(s.current)}" for s in top),
+           "critical" if lvl >= 2 else "normal")
+
+  def idle_tick(self, t, mi, psi, vram, scopes):
+    """Switched off: undo what is applied, keep measuring for the widget, never act."""
+    if self.frozen or self.throttled or self.episode:
+      self.undo_all(t, "memguard switched off")
+    used = mi.get("MemTotal", 0) - mi.get("MemAvailable", 0)
+    self.hist.add(t, used, vram["used"] if vram else None)
+    _, reasons, info = self.ram_level(t, mi, psi)
+    self.status = {"t": time.time(), "enabled": False, "level": 0, "vramLevel": 0, "reasons": [],
+                   "ram": dict(info, used=used, total=mi.get("MemTotal", 0), p95=self.hist.percentile(1, 95),
+                               p99=self.hist.percentile(1, 99)),
+                   "vram": None if not vram else {"used": vram["used"], "total": vram["total"], "free": vram["free"],
+                                                  "p95": self.hist.percentile(2, 95), "p99": self.hist.percentile(2, 99)},
+                   "frozen": [], "throttled": [], "protected": sorted(s.name for s in scopes if s.kind),
+                   "unloaded": self.unloaded[-5:],
+                   "dictation": "on demand (moved off the GPU)" if self.voxtype_offloaded is not None else "resident"}
+    return 0
 
   # -- actions
   def protect(self, t, scopes):
@@ -734,10 +836,11 @@ class Guard:
         self.event(t, f"moved {human(before - after)} of idle {label(s)} to zram")
 
   def freeze_batch(self, t):
-    for unit in FREEZABLE:
+    for unit in FREEZABLE + [u for u in (self.cfg.get("freezable") or []) if u not in FREEZABLE]:
       if unit in self.frozen or NEVER_FREEZE.search(unit) or not unit_active(unit):
         continue
       if freeze_unit(unit):
+        self.acted = True
         self.frozen[unit] = t
         self.event(t, f"froze {unit} until memory is back to normal")
         self.save_applied()
@@ -758,6 +861,7 @@ class Guard:
     prev_high = read(best.path / "memory.high", "max").strip() or "max"
     cap = max(best.current, 256 * MB)
     if set_memory_high(best.path, cap):
+      self.acted = True
       self.throttled[best.name] = (best.path, prev_high)
       self.event(t, f"slowed {label(best)} (+{human(best_rate)}/s): capped at {human(cap)} until memory is back to normal")
       notify("Runaway memory slowed down", f"{label(best)} grew {human(best_rate)}/s. It keeps running, "
@@ -838,7 +942,9 @@ class Guard:
       self.event(t, f"released the cap on {name}")
     if self.episode:
       self.event(t, why)
-      notify("Memory is back to normal", "Everything that was paused or slowed down is running normally again.")
+      if getattr(self, "acted", False):  # only worth saying if something was paused or slowed
+        notify("Memory is back to normal", "Everything that was paused or slowed down is running normally again.")
+    self.acted = False
     self.episode = False
     self.calm_since = None
     self.save_applied()
@@ -901,6 +1007,13 @@ def write_status(status):
     pass
 
 
+def config_mtime():
+  try:
+    return CONFIG.stat().st_mtime_ns
+  except OSError:
+    return None
+
+
 def daemon():
   cfg = config()
   STATE.mkdir(parents=True, exist_ok=True)
@@ -914,16 +1027,22 @@ def daemon():
 
   signal.signal(signal.SIGTERM, stop)
   log(f"watching RAM{' and VRAM' if nv else ''} every {cfg['every']:g} s")
+  mtime = config_mtime()
   try:
     while True:
       t = time.monotonic()
+      if config_mtime() != mtime:  # the widget (or a hand edit) changed it: no restart needed
+        mtime = config_mtime()
+        cfg = config()
+        guard.cfg = cfg
+        guard.event(t, "settings reloaded")
       try:
         vram = nv.sample() if nv else None
       except Exception:
         vram = None
       try:
         cuda = {p["pid"] for p in vram["procs"] if "C" in p["type"]} if vram else set()
-        scopes = app_scopes(cuda)
+        scopes = app_scopes(cuda, cfg)
         guard.tick(t, meminfo(), effective_psi(scopes, guard.throttled), vram, scopes)
         write_status(guard.status)
       except Exception as e:  # one bad sample never stops the watch
@@ -1020,6 +1139,108 @@ def smoke():
   return 1 if any(s == "FAIL" for s, _ in rows) else 0
 
 
+def user_config():
+  try:
+    data = json.loads(CONFIG.read_text())
+  except (OSError, ValueError):
+    return {}
+  return data if isinstance(data, dict) else {}
+
+
+def write_config(data):
+  CONFIG.parent.mkdir(parents=True, exist_ok=True)
+  tmp = CONFIG.with_name(CONFIG.name + ".tmp")
+  tmp.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n")
+  tmp.replace(CONFIG)
+
+
+def edit_config(op, key=None, value=None):
+  """set/add/remove/reset with validation. Returns (ok, error)."""
+  data = user_config()
+  if op == "reset":
+    if key is None:
+      data = {k: v for k, v in data.items() if k in LISTS}  # settings back to defaults, exceptions kept
+    elif key in DEFAULTS or key in LISTS:
+      data.pop(key, None)
+    else:
+      return False, f"unknown setting {key}"
+  elif op == "set":
+    if key not in DEFAULTS:
+      return False, f"unknown setting {key}"
+    try:
+      f = float(value)
+    except (TypeError, ValueError):
+      return False, f"{key}: {value!r} is not a number"
+    lo, hi = SCHEMA.get(key, (None, None, None, 0, float("inf"), 1))[3:5]
+    if not (lo <= f <= hi):
+      return False, f"{key}: {f:g} is outside {lo:g}-{hi:g}"
+    if float(DEFAULTS[key]) == f:
+      data.pop(key, None)
+    else:
+      data[key] = int(f) if f == int(f) else f
+  elif op in ("add", "remove"):
+    if key not in LISTS:
+      return False, f"unknown list {key} (protect, ordinary, freezable)"
+    if not valid_name(value):
+      return False, f"{value!r}: use a process, app or unit name (letters, digits, . _ - @ : +)"
+    items = [x for x in data.get(key, []) if valid_name(x)]
+    if op == "add":
+      if key == "freezable" and NEVER_FREEZE.search(value):
+        return False, f"{value}: mounts and audio are never paused"
+      if value not in items:
+        if len(items) >= MAX_LIST:
+          return False, f"{key}: at most {MAX_LIST} names"
+        items.append(value)
+      other = {"protect": "ordinary", "ordinary": "protect"}.get(key)
+      if other and value in data.get(other, []):  # one name, one rule
+        data[other] = [x for x in data[other] if x != value]
+    else:
+      items = [x for x in items if x != value]
+    data[key] = items
+    if not items:
+      data.pop(key)
+  else:
+    return False, f"unknown operation {op}"
+  write_config(data)
+  return True, ""
+
+
+def ui_state(brief=False):
+  try:
+    st = json.loads(read(STATE / "status.json") or "{}")
+  except ValueError:
+    st = {}
+  rc, out = run(["systemctl", "--user", "is-active", "omarchy-memguard.service"], timeout=5)
+  state = {"status": st, "service": out or "unknown", "age": round(time.time() - st.get("t", 0), 1) if st else None}
+  if brief:
+    return state
+  cfg = config()
+  cuda = set()
+  nv = open_nvml()  # classify exactly as the daemon does (CUDA processes are AI work)
+  if nv:
+    try:
+      cuda = {p["pid"] for p in nv.sample()["procs"] if "C" in p["type"]}
+    except Exception:
+      pass
+  scopes = app_scopes(cuda, cfg)
+  apps = []
+  for sc in sorted(scopes, key=lambda x: -(x.current + x.swap)):
+    proc = dominant(sc)
+    apps.append({"unit": sc.name, "label": label(sc), "kind": sc.kind, "why": sc.why,
+                 "match": proc if valid_name(proc) else re.sub(r"\.(scope|service)$", "", sc.name),
+                 "mem": sc.current, "swap": sc.swap, "capped": sc.name in st.get("throttled", [])})
+  lines = read(STATE / "events.log").splitlines()[-60:]
+  state.update({
+    "apps": apps,
+    "events": [{"when": l[:19], "text": l[20:]} for l in reversed(lines)],
+    "config": {"effective": cfg, "user": user_config(), "defaults": DEFAULTS,
+               "schema": [{"key": k, "group": g, "label": lab, "unit": u, "min": lo, "max": hi, "step": step,
+                           "value": cfg[k], "default": DEFAULTS[k]} for k, (g, lab, u, lo, hi, step) in SCHEMA.items()],
+               "builtinFreezable": FREEZABLE},
+  })
+  return state
+
+
 def main(argv):
   cmd = argv[1] if len(argv) > 1 else "daemon"
   if cmd == "daemon":
@@ -1030,6 +1251,18 @@ def main(argv):
     return explain()
   if cmd == "smoke":
     return smoke()
+  if cmd == "ui":
+    print(json.dumps(ui_state("--brief" in argv[2:])))
+    return 0
+  if cmd in ("set", "add", "remove", "reset"):
+    key = argv[2] if len(argv) > 2 else None
+    value = argv[3] if len(argv) > 3 else None
+    if cmd != "reset" and (key is None or value is None):
+      print(json.dumps({"ok": False, "error": f"usage: omarchy-memguard {cmd} KEY VALUE"}))
+      return 3
+    ok, err = edit_config(cmd, key, value)
+    print(json.dumps({"ok": ok, "error": err}))
+    return 0 if ok else 1
   print(__doc__)
   return 3
 

@@ -304,6 +304,52 @@ class Spikes(Base):
       self.m.FREEZABLE.remove("rclone-gdrive.service")
 
 
+class Quiet(Base):
+  """Notifications are interruptions: only for what matters (seen live 2026-10-08:
+  a build growing 400 MB/s warned and said "back to normal" every minute)."""
+
+  def test_a_build_bursting_memory_with_swap_to_spare_is_silent(self):
+    def build(mc, t):
+      phase = int(t) % 60
+      if phase < 20:  # 20 s of +400 MB/s, then the compiler frees it
+        mc.avail -= 800 * MB
+      else:
+        mc.avail = 20 * GB
+
+    mc = Machine(self.m, scopes=ai_box(), script=build)
+    mc.run(15 * 60)
+    self.assertIn(1, [l for _, l in mc.levels], "it does see the bursts")
+    self.assertEqual(mc.notes, [], "but does not interrupt for them")
+
+  def test_low_ram_warns_at_most_every_15_min(self):
+    def flapping_low(mc, t):
+      mc.avail = int(2.5 * GB) if int(t) % 120 < 60 else 15 * GB
+
+    mc = Machine(self.m, scopes=ai_box(), script=flapping_low)
+    mc.run(30 * 60)
+    warns = [n for n in mc.notes if "running low" in n[0]]
+    self.assertEqual(len(warns), 2, warns)
+    self.assertFalse(any("back to normal" in n[0] for n in mc.notes), "nothing was paused or slowed")
+
+  def test_escalation_warns_even_after_a_quiet_level_1(self):
+    def rising(mc, t):
+      mc.avail -= 900 * MB
+      mc.psi_some = 0 if t < 10 else 30
+
+    mc = Machine(self.m, scopes=ai_box(), script=rising)
+    mc.run(16)
+    self.assertTrue(any(u == "critical" for _, u in mc.notes), mc.notes)
+
+  def test_escalation_warns_again_after_a_level_1_warning(self):
+    def low_then_waiting(mc, t):
+      mc.avail = int(2.5 * GB)  # level 1, real: warned
+      mc.psi_some = 0 if t < 20 else 30  # then work starts waiting: level 2
+
+    mc = Machine(self.m, scopes=ai_box(), script=low_then_waiting)
+    mc.run(30)
+    self.assertEqual([u for _, u in mc.notes if True][:2], ["normal", "critical"], mc.notes)
+
+
 class IdleReclaim(Base):
   def pressure(self, mc, t):
     mc.avail = int(2.5 * GB)  # level 1
@@ -456,6 +502,7 @@ class Classify(Base):
     self.assertEqual(c("myapp", "/opt/x/myapp", cuda=True), "ai")
     self.assertEqual(c("chrome", "/opt/google/chrome/chrome --type=gpu-process", cuda=True), None)
     self.assertEqual(c("ollama", "/usr/bin/ollama runner --model x"), "ai")
+    self.assertEqual(c("voxtype", "/usr/bin/voxtype daemon"), "ai", "dictation is AI work, also without CUDA")
     self.assertEqual(c("dockerd", "/usr/bin/dockerd"), "ai")
     self.assertEqual(c("claude", "claude --resume"), "dev")
     self.assertEqual(c("java", "java -jar jdtls.jar"), "dev")
@@ -560,6 +607,156 @@ class Recovery(Base):
       m.Guard.undo_all = orig
     self.assertEqual(calls["n"], 6, "kept looping through failing samples")
     self.assertEqual(undone, ["memguard stopped"])
+
+
+class Exceptions(Base):
+  """protect / ordinary / freezable, as the widget writes them."""
+
+  def scope_dir(self, name, procs):
+    """A fake app.slice unit with processes [(pid, comm, cmdline)]."""
+    root = Path(tempfile.mkdtemp())
+    m = self.m
+    m.user_cgroup = lambda: root
+    d = root / "app.slice" / name
+    d.mkdir(parents=True)
+    (d / "cgroup.procs").write_text("\n".join(str(p) for p, _, _ in procs))
+    (d / "memory.current").write_text(str(GB))
+    table = {p: (c, cl) for p, c, cl in procs}
+    m.comm_of = lambda pid: table.get(pid, ("", ""))[0]
+    m.cmdline_of = lambda pid: table.get(pid, ("", ""))[1]
+    return d
+
+  def kind(self, cfg, name="app-slack.scope", procs=((10, "slack", "/usr/lib/slack/slack"),)):
+    self.scope_dir(name, procs)
+    return self.m.app_scopes((), cfg)[0]
+
+  def test_protect_by_process_unit_or_app_name(self):
+    for entry in ("slack", "app-slack.scope", "app-slack"):
+      s = self.kind({"protect": [entry]})
+      self.assertEqual((s.kind, s.why), ("user", "your exception"), entry)
+
+  def test_ordinary_removes_builtin_protection(self):
+    s = self.kind({"ordinary": ["java"]}, "app-ide.scope", ((5, "java", "java -jar big.jar"),))
+    self.assertIsNone(s.kind)
+    self.assertIn("ordinary", s.why)
+
+  def test_the_desktop_cannot_be_made_ordinary(self):
+    s = self.kind({"ordinary": ["Hyprland"]}, "hypr.scope", ((1, "Hyprland", "Hyprland"),))
+    self.assertEqual(s.kind, "desktop")
+
+  def test_extra_freezable_job_is_paused_and_not_protected(self):
+    s = self.kind({"freezable": ["my-sync.service"]}, "my-sync.service", ((7, "python3", "python3 sync.py"),))
+    self.assertIsNone(s.kind)
+    mc = Machine(self.m, scopes=ai_box(), script=lambda mc, t: setattr(mc, "psi_some", 30),
+                 units_active=("my-sync.service",))
+    mc.run(10, cfg={"freezable": ["my-sync.service"]})
+    self.assertIn("my-sync.service", mc.frozen)
+
+
+class Settings(Base):
+  """What the widget calls: validated edits, live reload, the on/off switch."""
+
+  def edit(self, *a):
+    return self.m.edit_config(*a)
+
+  def test_set_validates_range_and_type(self):
+    self.assertEqual(self.edit("set", "psiCrit", "40"), (True, ""))
+    self.assertEqual(self.m.config()["psiCrit"], 40.0)
+    self.assertFalse(self.edit("set", "psiCrit", "500")[0])
+    self.assertFalse(self.edit("set", "psiCrit", "abc")[0])
+    self.assertFalse(self.edit("set", "nope", "1")[0])
+
+  def test_setting_the_default_removes_the_key(self):
+    self.edit("set", "psiCrit", "40")
+    self.edit("set", "psiCrit", str(self.m.DEFAULTS["psiCrit"]))
+    self.assertNotIn("psiCrit", json.loads(self.m.CONFIG.read_text()))
+
+  def test_lists_add_remove_and_one_rule_per_name(self):
+    self.assertTrue(self.edit("add", "protect", "slack")[0])
+    self.assertTrue(self.edit("add", "protect", "slack")[0])
+    self.assertEqual(self.m.config()["protect"], ["slack"], "no duplicates")
+    self.edit("add", "ordinary", "slack")
+    cfg = self.m.config()
+    self.assertEqual((cfg["protect"], cfg["ordinary"]), ([], ["slack"]))
+    self.edit("remove", "ordinary", "slack")
+    self.assertNotIn("ordinary", json.loads(self.m.CONFIG.read_text()))
+
+  def test_names_are_checked(self):
+    for bad in ("", "a b", "x;rm -rf ~", "$(id)", "a" * 65, "../etc"):
+      self.assertFalse(self.edit("add", "protect", bad)[0], bad)
+    self.assertFalse(self.edit("add", "freezable", "rclone-gdrive.service")[0], "mounts are never paused")
+    self.assertFalse(self.edit("add", "bogus", "x")[0])
+
+  def test_reset_keeps_exceptions(self):
+    self.edit("set", "psiCrit", "40")
+    self.edit("add", "protect", "slack")
+    self.edit("reset")
+    cfg = self.m.config()
+    self.assertEqual((cfg["psiCrit"], cfg["protect"]), (float(self.m.DEFAULTS["psiCrit"]), ["slack"]))
+
+  def test_every_setting_is_on_the_settings_screen(self):
+    self.assertEqual(set(self.m.SCHEMA), set(self.m.DEFAULTS))
+    for k, (g, lab, unit, lo, hi, step) in self.m.SCHEMA.items():
+      self.assertTrue(lo <= self.m.DEFAULTS[k] <= hi, k)
+
+  def test_switched_off_undoes_and_never_acts(self):
+    mc = Machine(self.m, scopes=ai_box(), script=Spikes.runaway_chrome.__get__(Spikes()))
+    mc.run(40)
+    self.assertTrue(mc.frozen and mc.highs)
+    mc.guard.cfg = dict(mc.guard.cfg, enabled=0)
+    mc.guard.tick(100, mc.mi(), (60, 40), None, mc.scopes)
+    self.assertEqual(mc.thawed, ["gphotos-sync.service"])
+    self.assertEqual(mc.highs.get("chrome.scope"), "max")
+    self.assertFalse(mc.guard.status["enabled"])
+    mc2 = Machine(self.m, scopes=ai_box(), script=Spikes.runaway_chrome.__get__(Spikes()))
+    mc2.run(40, cfg={"enabled": 0})
+    self.assertEqual((mc2.frozen, mc2.highs, mc2.notes), ([], {}, []))
+
+  def test_daemon_reloads_settings_without_restarting(self):
+    m = self.m
+    seen = []
+    n = {"i": 0}
+
+    def sleep(s):
+      n["i"] += 1
+      if n["i"] == 2:
+        m.edit_config("set", "psiCrit", "60")
+        os.utime(m.CONFIG, ns=(1, 10 ** 18))  # mtime changes even within the same tick
+      if n["i"] > 3:
+        raise SystemExit(0)
+
+    m.time = types.SimpleNamespace(sleep=sleep, monotonic=lambda: n["i"] * 2.0, time=lambda: 0)
+    m.open_nvml = lambda: None
+    m.undo_leftovers = lambda: []
+    m.signal = types.SimpleNamespace(signal=lambda *a: None, SIGTERM=15)
+    m.meminfo = lambda: {"MemTotal": 30 * GB, "MemAvailable": 20 * GB, "SwapTotal": 0, "SwapFree": 0}
+    m.app_scopes = lambda cuda, cfg=None: []
+    m.effective_psi = lambda scopes, throttled=(): (0.0, 0.0)
+    orig = m.Guard.tick
+    m.Guard.tick = lambda self, t, *a: seen.append(self.cfg["psiCrit"]) or 0
+    try:
+      with self.assertRaises(SystemExit):
+        m.daemon()
+    finally:
+      m.Guard.tick = orig
+    self.assertEqual(seen[0], float(m.DEFAULTS["psiCrit"]))
+    self.assertEqual(seen[-1], 60.0)
+
+  def test_ui_state_shape(self):
+    m = self.m
+    m.app_scopes = lambda cuda, cfg=None: [FakeScope("app-slack.scope", None, GB)]
+    m.label = lambda s: s.name
+    m.run = lambda cmd, timeout=10: (0, "active")
+    m.open_nvml = lambda: None
+    m.STATE.mkdir(parents=True)
+    (m.STATE / "status.json").write_text(json.dumps({"t": 1, "level": 0, "throttled": []}))
+    (m.STATE / "events.log").write_text("2026-10-08 11:15:42 slowed x\n")
+    st = m.ui_state()
+    self.assertEqual(st["service"], "active")
+    self.assertEqual(st["apps"][0]["unit"], "app-slack.scope")
+    self.assertEqual(st["events"][0], {"when": "2026-10-08 11:15:42", "text": "slowed x"})
+    self.assertEqual({r["key"] for r in st["config"]["schema"]}, set(m.DEFAULTS))
+    json.dumps(st)  # the widget parses it
 
 
 class Unit(unittest.TestCase):
