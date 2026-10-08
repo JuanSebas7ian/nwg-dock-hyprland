@@ -28,6 +28,7 @@ WIDGETS=(
   "juansebas7ian.cloud:juansebas7ian.spotify"
   "juansebas7ian.ollama:omarchy.agents"
   "juansebas7ian.hardware:juansebas7ian.ollama"
+  "juansebas7ian.memguard:juansebas7ian.hardware"
   "juansebas7ian.vpn:omarchy.network"
 )
 # Clones de widgets de Omarchy: al activarse ocupan el lugar del original con sus mismos ajustes

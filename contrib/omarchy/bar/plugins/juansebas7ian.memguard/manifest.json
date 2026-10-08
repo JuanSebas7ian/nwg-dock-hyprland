@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.memguard",
+  "name": "Memory guard",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "omarchy-memguard: RAM, VRAM and memory pressure live with p95/p99, what it is doing (paused jobs, capped runaways, unloaded models, dictation on or off the GPU), which apps are protected and why, the activity log, and every setting and exception (protect, treat as ordinary, pausable background jobs).",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "Memory guard",
+    "description": "Left = panel · right = switch it on/off. Red when it is acting on a spike; the number is the level.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
