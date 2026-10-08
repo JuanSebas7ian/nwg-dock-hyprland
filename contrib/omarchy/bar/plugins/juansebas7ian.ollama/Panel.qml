@@ -202,6 +202,9 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
+    // BarIconButton is one icon wide; this widget also shows text (counts, °, %, country),
+    // which spilled over its neighbours. Grow with the painted text instead.
+    fixedWidth: vertical ? -1 : Math.max(slotSize, Math.ceil(glyphPaintedWidth) + Style.space(10))
     text: root.pulling && root.pullFraction >= 0 ? "󰧑 " + Math.round(root.pullFraction * 100) + "%" : "󰧑"
     dimmed: !root.info.running
     tooltipText: !root.info.running ? "Ollama is not running"

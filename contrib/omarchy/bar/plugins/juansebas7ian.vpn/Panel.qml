@@ -204,6 +204,9 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
+    // BarIconButton is one icon wide; this widget also shows text (counts, °, %, country),
+    // which spilled over its neighbours. Grow with the painted text instead.
+    fixedWidth: vertical ? -1 : Math.max(slotSize, Math.ceil(glyphPaintedWidth) + Style.space(10))
     text: (root.connected ? root.glyphOn : root.glyphOff)
       + (root.busy !== "" ? " …" : root.currentLoc && root.currentLoc.cc ? " " + root.currentLoc.cc : "")
     active: root.leak

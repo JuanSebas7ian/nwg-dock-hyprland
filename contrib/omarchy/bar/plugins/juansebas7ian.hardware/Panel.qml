@@ -188,6 +188,9 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
+    // BarIconButton is one icon wide; this widget also shows text (counts, °, %, country),
+    // which spilled over its neighbours. Grow with the painted text instead.
+    fixedWidth: vertical ? -1 : Math.max(slotSize, Math.ceil(glyphPaintedWidth) + Style.space(10))
     text: "󰔏 " + (root.cpu ? Math.round(root.tctl) + "°" : "") + (root.updateCount > 0 ? "  " + root.updateCount : "")
     active: root.alerts.length > 0
     tooltipText: !root.live ? "Hardware"
