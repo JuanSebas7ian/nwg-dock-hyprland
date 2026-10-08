@@ -1,0 +1,488 @@
+"""Tests for bin/omarchy-memguard.
+
+Scenarios run the real Guard.tick against a simulated machine (RAM, swap,
+pressure, VRAM, protected and ordinary apps) on an AI/ML workstation, and
+check two things every time: the machine is defended against the sudden or
+runaway spike, and nobody's work is slowed, paused, unloaded or killed
+without need. Plus classification, config, leftovers after a crash, the
+daemon loop, the systemd unit and the installer.
+
+Run: cd contrib/omarchy/bar && python3 -m unittest tests.test_memguard
+"""
+
+import json
+import os
+import tempfile
+import types
+import unittest
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+BIN = HERE / "bin" / "omarchy-memguard"
+UNIT = HERE / "systemd" / "omarchy-memguard.service"
+INSTALL = HERE / "install.sh"
+GB = 1 << 30
+MB = 1 << 20
+
+
+def load(tmp):
+  m = SourceFileLoader("omarchy_memguard", str(BIN)).load_module()
+  m.STATE = Path(tmp) / "state"
+  m.CONFIG = Path(tmp) / "config.json"
+  m.log = lambda *a: None
+  return m
+
+
+class FakeScope:
+  def __init__(self, name, kind=None, mem=1 * GB, cpu_busy=False):
+    self.name = name
+    self.path = Path("/fake") / name
+    self.kind = kind
+    self.why = kind or ""
+    self.current = mem
+    self.swap = 0
+    self.cpu = 0
+    self.busy = cpu_busy
+    self.pids = [1]
+
+
+class Machine:
+  """RAM/VRAM over time. `script(m, t)` mutates the machine each tick."""
+
+  def __init__(self, m, total=30 * GB, avail=20 * GB, swap=60 * GB, scopes=(), vram=None, script=None,
+               units_active=("gphotos-sync.service",)):
+    self.m = m
+    self.total, self.avail, self.swap_total, self.swap_free = total, avail, swap, swap
+    self.psi_some = self.psi_full = 0.0
+    self.scopes = list(scopes)
+    self.vram = vram  # {"total", "free", "used", "procs": [...]}
+    self.script = script or (lambda mach, t: None)
+    self.active = set(units_active)
+    self.frozen, self.thawed, self.highs, self.reclaims, self.notes = [], [], {}, [], []
+    self.unloaded, self.avoid = [], set()
+    self.loaded_models = ["qwen2.5-coder:7b"]
+    self.ollama_sm = 0
+    self.wire()
+
+  def wire(self):
+    m, mc = self.m, self
+    m.unit_active = lambda u: u in mc.active
+    m.freeze_unit = lambda u: mc.frozen.append(u) or True
+    m.thaw_unit = lambda u: mc.thawed.append(u) or True
+    m.set_memory_high = lambda path, v: mc.highs.__setitem__(path.name, v) or True
+    m.reclaim = lambda path, n: mc.reclaims.append(path.name) or True
+    def read(p, default="", real=m.read):
+      p = Path(p)
+      if str(p).startswith("/fake/"):
+        return "max" if p.name == "memory.high" else str(mc.scope(p.parent.name).current)
+      return real(p, default)
+
+    m.read = read
+    m.notify = lambda s, b, u="normal": mc.notes.append((s, u))
+    m.set_avoid = lambda path, on: (mc.avoid.add(path.name) if on else mc.avoid.discard(path.name)) or True
+    m.has_avoid = lambda path: path.name in mc.avoid
+    m.ollama_loaded = lambda: list(mc.loaded_models)
+
+    def unload(model):
+      mc.loaded_models.remove(model)
+      mc.unloaded.append(model)
+      return True
+
+    m.ollama_unload = unload
+    m.ollama_generating = lambda vram: mc.ollama_sm >= 5
+    m.comm_of = lambda pid: "ollama" if pid == 900 else "python3"
+    m.label = lambda s: s.name
+
+  def scope(self, name):
+    return next(s for s in self.scopes if s.name == name)
+
+  def mi(self):
+    return {"MemTotal": self.total, "MemAvailable": max(0, self.avail),
+            "SwapTotal": self.swap_total, "SwapFree": self.swap_free}
+
+  def run(self, seconds, cfg=None, every=2):
+    g = self.m.Guard(dict(self.m.config(), **(cfg or {})))
+    t = 0.0
+    self.levels = []
+    while t < seconds:
+      t += every
+      self.script(self, t)
+      for s in self.scopes:
+        if s.busy:
+          s.cpu += int(every * 1e6)
+      lvl = g.tick(t, self.mi(), (self.psi_some, self.psi_full), self.vram, self.scopes)
+      self.levels.append((t, lvl))
+    self.guard = g
+    return g
+
+
+def ai_box(**kw):
+  """A typical session: a training run, the IDE, a terminal, Chrome, Slack."""
+  return [FakeScope("train.scope", "ai", 8 * GB, cpu_busy=True), FakeScope("ide.scope", "dev", 3 * GB, cpu_busy=True),
+          FakeScope("foot.scope", "dev", 200 * MB), FakeScope("hyprland.scope", "desktop", 300 * MB, cpu_busy=True),
+          FakeScope("chrome.scope", None, 3 * GB, cpu_busy=kw.get("chrome_busy", True)),
+          FakeScope("slack.scope", None, 1 * GB)]
+
+
+class Base(unittest.TestCase):
+  def setUp(self):
+    self.m = load(tempfile.mkdtemp())
+
+
+class NormalWork(Base):
+  def test_heavy_but_calm_ai_work_is_left_alone(self):
+    mc = Machine(self.m, avail=6 * GB, scopes=ai_box())  # 20 % free: busy, not in danger
+    mc.run(600)
+    self.assertEqual(max(l for _, l in mc.levels), 0)
+    self.assertEqual((mc.frozen, mc.highs, mc.reclaims, mc.notes, mc.unloaded), ([], {}, [], [], []))
+
+  def test_protected_scopes_are_marked_for_oomd(self):
+    mc = Machine(self.m, scopes=ai_box())
+    mc.run(10)
+    self.assertEqual(mc.avoid, {"train.scope", "ide.scope", "foot.scope", "hyprland.scope"})
+
+  def test_mark_removed_when_an_app_stops_being_protected(self):
+    mc = Machine(self.m, scopes=ai_box())
+    mc.run(10)
+    mc.scope("foot.scope").kind = None
+    mc.run(10)  # a new Guard: as after a daemon restart
+    self.assertNotIn("foot.scope", mc.avoid)
+
+  def test_marks_set_by_systemd_itself_are_kept(self):
+    mc = Machine(self.m, scopes=ai_box())
+    mc.avoid.add("slack.scope")  # e.g. a unit started with ManagedOOMPreference=avoid
+    mc.run(10)
+    self.assertIn("slack.scope", mc.avoid)
+
+  def test_loading_a_dataset_fast_with_swap_to_spare_only_warns(self):
+    # +1 GB/s for 15 s from 20 GB free: RAM fills, but 60 GB of zram/swap remain and nobody waits yet.
+    def load_data(mc, t):
+      if t <= 16:
+        mc.avail -= 1 * GB
+        mc.scope("train.scope").current += 1 * GB
+
+    mc = Machine(self.m, scopes=ai_box(), script=load_data)
+    mc.run(120)
+    self.assertLessEqual(max(l for _, l in mc.levels), 1)
+    self.assertEqual((mc.frozen, mc.highs), ([], {}), "no pause, no cap for a legitimate load")
+
+  def test_short_pressure_blip_does_not_escalate(self):
+    def blip(mc, t):
+      mc.psi_some = 12 if 20 <= t < 24 else 0
+
+    mc = Machine(self.m, scopes=ai_box(), script=blip)
+    mc.run(120)
+    self.assertEqual(mc.frozen, [])
+    self.assertEqual(mc.highs, {})
+
+
+class Spikes(Base):
+  def runaway_chrome(self, mc, t):
+    """A tab leaks 600 MB/s; the machine starts waiting on memory."""
+    if 20 <= t <= 60:
+      mc.avail -= int(1.2 * GB)
+      mc.swap_free -= int(1.5 * GB)
+      mc.scope("chrome.scope").current += int(1.2 * GB)
+      mc.psi_some = 30
+    elif t > 60:
+      mc.avail, mc.swap_free, mc.psi_some = 15 * GB, 55 * GB, 0  # it settled (or oomd took it)
+
+  def test_runaway_app_is_capped_batch_paused_work_untouched(self):
+    mc = Machine(self.m, scopes=ai_box(), script=self.runaway_chrome)
+    mc.run(70)
+    self.assertIn("chrome.scope", mc.highs, "the runaway is capped")
+    self.assertEqual(set(mc.highs), {"chrome.scope"}, "nothing else is capped")
+    self.assertEqual(mc.frozen, ["gphotos-sync.service"])
+    self.assertNotIn("train.scope", mc.reclaims)
+    self.assertTrue(any(u == "critical" for _, u in mc.notes))
+
+  def test_everything_is_undone_once_calm(self):
+    mc = Machine(self.m, scopes=ai_box(), script=self.runaway_chrome)
+    mc.run(150)
+    self.assertEqual(mc.highs.get("chrome.scope"), "max", "cap released")
+    self.assertEqual(mc.thawed, ["gphotos-sync.service"])
+    self.assertEqual(mc.guard.frozen, {})
+    self.assertEqual(mc.guard.throttled, {})
+    self.assertTrue(any("back to normal" in s for s, _ in mc.notes))
+
+  def test_cap_stays_while_the_capped_app_keeps_leaking_into_swap(self):
+    def leak(mc, t):
+      c = mc.scope("chrome.scope")
+      if t <= 10:  # spike: RAM grows, processes wait
+        c.current += 1 * GB
+        mc.avail -= 1 * GB
+        mc.psi_some = 30
+      elif t <= 120:  # capped: RAM stays, the leak goes on into swap; the machine is calm
+        c.swap += 300 * MB
+        mc.psi_some = 0
+      # after 120 s the leak stops
+
+    mc = Machine(self.m, scopes=ai_box(), script=leak)
+    mc.run(110)
+    self.assertNotEqual(mc.highs.get("chrome.scope"), "max", "still leaking: keep the cap")
+    mc.run(0)
+    mc2 = Machine(self.m, scopes=ai_box(), script=leak)
+    mc2.run(200)
+    self.assertEqual(mc2.highs.get("chrome.scope"), "max", "released once it stopped growing")
+
+  def test_undo_waits_for_a_real_calm(self):
+    def flapping(mc, t):
+      mc.psi_some = 30 if (t // 10) % 2 == 0 and t < 100 else 0
+      if t < 100:
+        mc.scope("chrome.scope").current += 200 * MB
+
+    mc = Machine(self.m, scopes=ai_box(), script=flapping)
+    mc.run(100)
+    self.assertEqual(mc.thawed, [], "10 s of calm is not 30 s")
+
+  def test_under_pressure_your_training_keeps_growing_the_app_is_capped(self):
+    # level 2 (processes waiting), not the edge: the run grows fastest but is work; Chrome is capped instead.
+    def both_grow(mc, t):
+      mc.scope("train.scope").current += 1 * GB
+      mc.scope("chrome.scope").current += 200 * MB
+      mc.psi_some, mc.psi_full = 30, 0
+
+    mc = Machine(self.m, scopes=ai_box(), script=both_grow)
+    mc.run(10)
+    self.assertEqual(max(l for _, l in mc.levels), 2)
+    self.assertNotIn("train.scope", mc.highs)
+    self.assertIn("chrome.scope", mc.highs)
+
+  def test_protected_runaway_is_capped_only_when_the_machine_is_about_to_die(self):
+    def training_explodes(mc, t):
+      mc.avail -= 2 * GB
+      mc.swap_free -= 6 * GB
+      mc.scope("train.scope").current += 2 * GB
+      mc.psi_some, mc.psi_full = 40, 30
+
+    mc = Machine(self.m, avail=12 * GB, swap=24 * GB, scopes=ai_box(chrome_busy=True), script=training_explodes)
+    mc.run(10)
+    self.assertEqual(max(l for _, l in mc.levels), 3)
+    self.assertIn("train.scope", mc.highs, "slowed instead of letting the machine (and the run) crash")
+
+  def test_desktop_is_never_capped(self):
+    def compositor_grows(mc, t):
+      mc.avail -= 2 * GB
+      mc.swap_free -= 8 * GB
+      mc.scope("hyprland.scope").current += 2 * GB
+      mc.psi_some, mc.psi_full = 50, 40
+
+    scopes = [FakeScope("hyprland.scope", "desktop", 1 * GB)]
+    mc = Machine(self.m, avail=10 * GB, swap=20 * GB, scopes=scopes, script=compositor_grows)
+    mc.run(10)
+    self.assertEqual(mc.highs, {})
+
+  def test_frozen_job_is_thawed_after_the_limit_even_under_pressure(self):
+    def stuck(mc, t):
+      mc.psi_some = 30
+
+    mc = Machine(self.m, scopes=ai_box(), script=stuck)
+    mc.run(31 * 60)
+    self.assertEqual(mc.thawed, ["gphotos-sync.service"])
+
+  def test_fuse_mounts_are_never_frozen(self):
+    self.m.FREEZABLE.append("rclone-gdrive.service")
+    try:
+      mc = Machine(self.m, scopes=ai_box(), script=lambda mc, t: setattr(mc, "psi_some", 30),
+                   units_active=("rclone-gdrive.service", "gphotos-sync.service"))
+      mc.run(10)
+      self.assertNotIn("rclone-gdrive.service", mc.frozen)
+    finally:
+      self.m.FREEZABLE.remove("rclone-gdrive.service")
+
+
+class IdleReclaim(Base):
+  def pressure(self, mc, t):
+    mc.avail = int(2.5 * GB)  # level 1
+    mc.psi_some = 0
+
+  def test_only_idle_ordinary_apps_give_memory_to_zram(self):
+    mc = Machine(self.m, scopes=ai_box(chrome_busy=True), script=self.pressure)
+    mc.run(11 * 60)
+    self.assertIn("slack.scope", mc.reclaims, "Slack idle for 10 min")
+    self.assertNotIn("chrome.scope", mc.reclaims, "Chrome in use")
+    for protected in ("train.scope", "ide.scope", "foot.scope", "hyprland.scope"):
+      self.assertNotIn(protected, mc.reclaims)
+
+  def test_reclaim_is_rate_limited(self):
+    mc = Machine(self.m, scopes=ai_box(), script=self.pressure)
+    mc.run(15 * 60)
+    n = mc.reclaims.count("slack.scope")
+    self.assertTrue(3 <= n <= 6, n)  # once a minute after the first 10 min
+
+
+class Vram(Base):
+  def vram(self, free_mb, procs):
+    total = 12288 * MB
+    return {"total": total, "free": free_mb * MB, "used": total - free_mb * MB, "procs": procs}
+
+  def test_a_big_model_filling_the_gpu_is_not_unloaded(self):
+    mc = Machine(self.m, vram=self.vram(900, [{"pid": 900, "mem": 10 * GB, "type": "C", "sm": 0}]))
+    mc.run(600)
+    self.assertEqual(mc.unloaded, [], "the GPU full of your own model is the point")
+
+  def test_training_that_needs_vram_gets_the_idle_model_out(self):
+    procs = [{"pid": 900, "mem": 6 * GB, "type": "C", "sm": 0}, {"pid": 777, "mem": 4 * GB, "type": "C", "sm": 90}]
+
+    def grow(mc, t):
+      procs[1]["mem"] += 100 * MB
+      mc.vram = self.vram(1200 - int(t) * 10, procs)
+
+    mc = Machine(self.m, vram=self.vram(1200, procs), script=grow)
+    mc.run(20)
+    self.assertEqual(mc.unloaded, ["qwen2.5-coder:7b"])
+
+  def test_model_answering_a_request_is_never_unloaded(self):
+    procs = [{"pid": 900, "mem": 6 * GB, "type": "C", "sm": 80}, {"pid": 777, "mem": 4 * GB, "type": "C", "sm": 90}]
+
+    def grow(mc, t):
+      procs[1]["mem"] += 100 * MB
+      mc.vram = self.vram(1000, procs)
+
+    mc = Machine(self.m, vram=self.vram(1000, procs), script=grow)
+    mc.ollama_sm = 80
+    mc.run(30)
+    self.assertEqual(mc.unloaded, [])
+
+  def test_gpu_almost_full_warns_once(self):
+    mc = Machine(self.m, vram=self.vram(300, [{"pid": 777, "mem": 11 * GB, "type": "C", "sm": 99}]))
+    mc.run(300)
+    self.assertEqual(sum(1 for s, _ in mc.notes if "almost full" in s), 1)
+
+
+class Classify(Base):
+  def test_kinds(self):
+    c = self.m.classify
+    self.assertEqual(c("python3", "/home/u/ai/.venv/bin/python train.py --model unsloth/x"), "ai")
+    self.assertEqual(c("python3", "python3 backup_photos.py"), "dev", "any script: work until proven otherwise")
+    self.assertEqual(c("python3", "python -m torch.distributed.run train.py"), "ai")
+    self.assertEqual(c("python3", "/home/u/ai/.venv/bin/python -m ipykernel_launcher -f k.json"), "ai")
+    self.assertEqual(c("pt_main_thread", "python train.py"), "ai")
+    self.assertEqual(c("python3", "python -m torchrun --nproc 1 x.py"), "ai")
+    self.assertEqual(c("pt_data_worker", "python train.py"), "ai")
+    self.assertEqual(c("myapp", "/opt/x/myapp", cuda=True), "ai")
+    self.assertEqual(c("chrome", "/opt/google/chrome/chrome --type=gpu-process", cuda=True), None)
+    self.assertEqual(c("ollama", "/usr/bin/ollama runner --model x"), "ai")
+    self.assertEqual(c("dockerd", "/usr/bin/dockerd"), "ai")
+    self.assertEqual(c("claude", "claude --resume"), "dev")
+    self.assertEqual(c("java", "java -jar jdtls.jar"), "dev")
+    self.assertEqual(c("Hyprland", "Hyprland"), "desktop")
+    self.assertEqual(c("rclone", "rclone mount rclone: ~/GoogleDrive"), "desktop")
+    self.assertEqual(c("slack", "/usr/lib/slack/slack"), None)
+    self.assertEqual(c("chrome", "/opt/google/chrome/chrome"), None)
+
+
+class Pressure(Base):
+  """Pressure is what the innocent feel, not a process thrashing inside its own cap."""
+
+  def scope(self, name, some, current=1 * GB, limit=float("inf")):
+    s = FakeScope(name, None, current)
+    s.pressure, s.limit = (some, some / 2), limit
+    return s
+
+  def test_capped_runaway_does_not_count(self):
+    runaway = self.scope("tail.scope", 80, current=5 * GB, limit=5 * GB)
+    calm = self.scope("slack.scope", 1)
+    self.assertEqual(self.m.effective_psi([runaway, calm], extra=[(0.5, 0)])[0], 1)
+
+  def test_the_scope_memguard_capped_does_not_count(self):
+    capped = self.scope("chrome.scope", 90)
+    self.assertEqual(self.m.effective_psi([capped], throttled={"chrome.scope"}, extra=[(2, 0)])[0], 2)
+
+  def test_a_victim_counts(self):
+    victim = self.scope("ide.scope", 35)
+    self.assertEqual(self.m.effective_psi([victim], extra=[(0, 0)]), (35, 17.5))
+
+  def test_desktop_or_system_services_count(self):
+    self.assertEqual(self.m.effective_psi([], extra=[(40, 20), (3, 0)]), (40, 20))
+
+  def test_parse(self):
+    self.assertEqual(self.m.parse_psi("some avg10=12.50 avg60=1 avg300=0 total=9\nfull avg10=3.00 avg60=0 avg300=0 total=1"),
+                     (12.5, 3.0))
+
+
+class Config(Base):
+  def test_bad_config_falls_back_to_defaults(self):
+    for content in ["{bad", "[1]", "null", json.dumps({"psiCrit": "x", "every": 0, "ramWarnAvailPct": -1,
+                                                       "tteCrit": True, "nope": 3, "vramWarnFreeMB": None})]:
+      self.m.CONFIG.write_text(content)
+      cfg = self.m.config()
+      for k, v in self.m.DEFAULTS.items():
+        self.assertEqual(cfg[k], float(v), f"{content}: {k}")
+      self.m.Guard(cfg)
+
+  def test_valid_values_apply(self):
+    self.m.CONFIG.write_text(json.dumps({"psiCrit": 40, "maxFreezeMin": 0}))
+    cfg = self.m.config()
+    self.assertEqual((cfg["psiCrit"], cfg["maxFreezeMin"]), (40.0, 0.0))
+
+
+class Recovery(Base):
+  """A daemon that dies must not leave work paused or capped."""
+
+  def test_leftovers_of_a_crashed_run_are_undone_at_start(self):
+    m = self.m
+    m.STATE.mkdir(parents=True)
+    capped = Path(tempfile.mkdtemp())
+    (m.STATE / "applied.json").write_text(json.dumps({"frozen": ["gphotos-sync.service"],
+                                                      "throttled": {"chrome.scope": [str(capped), "max"]}}))
+    thawed, highs = [], {}
+    m.thaw_unit = lambda u: thawed.append(u) or True
+    m.set_memory_high = lambda p, v: highs.__setitem__(str(p), v) or True
+    done = m.undo_leftovers()
+    self.assertEqual(thawed, ["gphotos-sync.service"])
+    self.assertEqual(highs, {str(capped): "max"})
+    self.assertEqual(len(done), 2)
+    left = json.loads((m.STATE / "applied.json").read_text())
+    self.assertEqual((left["frozen"], left["throttled"]), ([], {}))
+
+  def test_applied_state_is_written_while_acting(self):
+    mc = Machine(self.m, scopes=ai_box(), script=Spikes.runaway_chrome.__get__(Spikes()))
+    mc.run(40)
+    data = json.loads((self.m.STATE / "applied.json").read_text())
+    self.assertEqual(data["frozen"], ["gphotos-sync.service"])
+    self.assertIn("chrome.scope", data["throttled"])
+
+  def test_daemon_survives_bad_samples_and_undoes_on_stop(self):
+    m = self.m
+    calls = {"n": 0}
+    undone = []
+
+    def sleep(s):
+      calls["n"] += 1
+      if calls["n"] > 5:
+        raise SystemExit(0)  # what SIGTERM does
+
+    m.time = types.SimpleNamespace(sleep=sleep, monotonic=lambda: calls["n"] * 2.0, time=lambda: 0)
+    m.open_nvml = lambda: None
+    m.meminfo = lambda: (_ for _ in ()).throw(OSError("proc gone"))  # every sample fails
+    m.undo_leftovers = lambda: []
+    m.signal = types.SimpleNamespace(signal=lambda *a: None, SIGTERM=15)
+    orig = m.Guard.undo_all
+    m.Guard.undo_all = lambda self, t, why: undone.append(why)
+    try:
+      with self.assertRaises(SystemExit):
+        m.daemon()
+    finally:
+      m.Guard.undo_all = orig
+    self.assertEqual(calls["n"], 6, "kept looping through failing samples")
+    self.assertEqual(undone, ["memguard stopped"])
+
+
+class Unit(unittest.TestCase):
+  def test_unit_restarts_always_and_starts_with_the_session(self):
+    u = UNIT.read_text()
+    for line in ("Restart=always", "StartLimitIntervalSec=0", "WantedBy=graphical-session.target",
+                 "ExecStart=%h/.local/bin/omarchy-memguard daemon"):
+      self.assertIn(line, u)
+
+  def test_installer_wires_it(self):
+    sh = INSTALL.read_text()
+    self.assertRegex(sh, r"COLLECTORS=\([^)]*omarchy-memguard")
+    self.assertIn("systemctl --user enable omarchy-memguard.service", sh)
+    self.assertIn("omarchy-memguard.service", sh.split("--remove")[1] if "--remove" in sh else sh)
+
+
+if __name__ == "__main__":
+  unittest.main()

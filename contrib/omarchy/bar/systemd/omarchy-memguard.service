@@ -1,0 +1,16 @@
+[Unit]
+Description=Defend RAM and VRAM against sudden or runaway spikes without killing work (omarchy-memguard)
+PartOf=graphical-session.target
+After=graphical-session.target
+# Never give up restarting it.
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=%h/.local/bin/omarchy-memguard daemon
+Restart=always
+RestartSec=2
+# It must keep sampling while the machine is short of memory.
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=graphical-session.target

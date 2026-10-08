@@ -1,0 +1,972 @@
+#!/usr/bin/python3
+"""Watch RAM and VRAM and keep the machine fast through sudden or runaway
+spikes, without killing anything and without getting in the way of work.
+
+  omarchy-memguard daemon          watch (systemd user service)
+  omarchy-memguard status [--json] now, percentiles of the last hour, what it is doing
+  omarchy-memguard explain         which apps are protected and why
+  omarchy-memguard smoke           live, read-only self-check (PASS/WARN/FAIL lines)
+
+Made for an AI/ML workstation: high memory use is normal (models, datasets,
+training, notebooks) and is never "cleaned". It acts only when the machine is
+being pushed to its limit: memory pressure (time processes spend waiting for
+RAM, /proc/pressure/memory), RAM about to run out at the current growth rate,
+swap filling up, or VRAM nearly full. Every action can be undone and is
+undone when things calm down:
+
+  level 1  warn with the top consumers; push the cold memory of apps idle for
+           10+ min into zram (memory.reclaim); unload Ollama models that are
+           not generating (they reload on the next request)
+  level 2  freeze background batch jobs (photo upload, backups) until calm;
+           slow down the scope that is running away (memory.high at its current
+           size: it reclaims from itself instead of starving everyone else)
+  level 3  also slow down a protected runaway; tell systemd-oomd, which kills
+           as a last resort (Omarchy's 50 % / 20 s), to take anything before
+           protected work
+
+Never touched: the desktop (Hyprland, shell, Xwayland, audio, portals), AI
+work (anything using CUDA, Python with torch/jax/transformers..., Jupyter,
+Ollama while generating, llama.cpp, vLLM, Docker, TensorBoard, MLflow...),
+coding agents and IDEs (claude, codex, opencode, gemini, Antigravity, VS Code,
+language servers), builds, and terminals. Their scopes carry user.oomd_avoid,
+so if something must die it is not them. FUSE mounts (Drive, iCloud) are
+never frozen: anything reading from them would hang.
+
+Config (optional): ~/.config/omarchy-memguard/config.json, see DEFAULTS.
+State: ~/.local/state/omarchy-memguard/ (status.json, events.log, applied.json)
+"""
+
+import datetime
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+HOME = Path.home()
+STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / "omarchy-memguard"
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "omarchy-memguard" / "config.json"
+CGROOT = Path("/sys/fs/cgroup")
+PROC = Path("/proc")
+OLLAMA = "http://127.0.0.1:11434"
+GB = 1 << 30
+MB = 1 << 20
+
+DEFAULTS = {
+  "every": 2,                 # seconds between samples
+  "ramWarnAvailPct": 12,      # MemAvailable below this % of RAM -> level 1
+  "ramCritAvailPct": 6,       # -> level 2
+  "ramPanicAvailPct": 3,      # -> level 3
+  "psiWarn": 10,              # memory "some" avg10 % -> level 1
+  "psiConfirm": 5,            # low RAM only escalates when processes already wait this much
+  "psiCrit": 25,              # -> level 2; "full" above this -> level 3
+  "tteWarn": 60,              # seconds until RAM runs out at the current rate -> level 1
+  "tteCrit": 25,              # seconds until RAM + swap run out -> level 2
+  "ttePanic": 10,             # -> level 3
+  "swapCritPct": 60,          # swap used % -> level 2
+  "vramWarnFreeMB": 1500,     # free VRAM below this while another process asks for more -> unload idle Ollama models
+  "vramCritFreeMB": 600,      # -> also a critical warning with the VRAM users
+  "vramGrowMB": 200,          # "asks for more": a non-Ollama process grew this much in the last 30 s
+  "calmSeconds": 30,          # this long back at level 0 before undoing everything
+  "reclaimIdleMin": 10,       # an app idle this long gives its cold memory to zram
+  "reclaimMB": 512,           # per app and per minute
+  "maxFreezeMin": 30,         # a frozen job is thawed after this anyway
+}
+FREEZABLE = ["gphotos-sync.service", "omarchy-backup.service", "opencode-ollama-sync.service"]
+NEVER_FREEZE = re.compile(r"rclone|fuse|sshfs|gvfs|dropbox|pipewire|wireplumber")
+
+# What counts as protected work. comm names (first 15 chars), then patterns on the command line.
+DESKTOP = {"Hyprland", "quickshell", "Xwayland", "pipewire", "pipewire-pulse", "wireplumber", "uwsm",
+           "fcitx5", "hypridle", "hyprsunset", "swayosd-server", "mako", "walker", "elephant",
+           "omarchy-freeze-", "omarchy-memguar", "omarchy-session", "xdg-desktop-por", "polkit-gnome-au",
+           "gnome-keyring-d", "nwg-dock-hyprla",
+           # mounts: slowing or killing them hangs every program reading from them
+           "rclone", "sshfs", "syncthing", "gvfsd", "gvfsd-fuse"}
+# GUI apps that open the GPU for video or WebGL: that is not AI work.
+GPU_GUI = {"chrome", "chromium", "firefox", "electron", "Discord", "slack", "zoom", "telegram-deskto",
+           "spotify", "obs", "mpv", "vlc", "steam", "steamwebhelper"}
+AI = {"ollama", "llama-server", "llama-cli", "llama-bench", "vllm", "tensorboard", "mlflow", "jupyter",
+      "jupyter-lab", "jupyter-noteboo", "wandb", "wandb-service", "ray", "raylet", "gcs_server", "dockerd",
+      "docker", "containerd", "containerd-shim", "nvidia-smi", "nvtop", "text-generation", "tgi", "triton",
+      "uv", "pip", "conda", "mamba", "nvcc", "accelerate", "deepspeed", "torchrun", "huggingface-cli", "hf"}
+DEV = {"claude", "codex", "opencode", "gemini", "cursor-agent", "copilot", "aider", "antigravity-ide",
+       "antigravity", "code", "cursor", "nvim", "vim", "emacs", "zed", "idea", "pycharm", "java", "node",
+       "pyrefly", "pyright", "pyright-langse", "basedpyright", "ruff", "rust-analyzer", "gopls", "clangd",
+       "jdtls", "cargo", "rustc", "gcc", "cc1", "cc1plus", "ld", "ld.lld", "make", "ninja", "cmake", "go",
+       "gradle", "mvn", "latexmk", "pdflatex", "lualatex", "git", "ssh", "rsync", "tmux", "zellij",
+       "foot", "alacritty", "kitty", "ghostty", "R", "rsession", "julia", "dbeaver", "terraform", "kubectl", "k9s"}
+AI_CMDLINE = re.compile(r"\b(torch|tensorflow|jax|keras|transformers|unsloth|accelerate|deepspeed|vllm|lightning|"
+                        r"ipykernel|jupyter|langchain|langgraph|llama_index|llama_cpp|sentence_transformers|"
+                        r"diffusers|peft|trl|bitsandbytes|xgboost|lightgbm|sklearn|ultralytics|gradio|streamlit|"
+                        r"mlflow|tensorboard|ray|dask|polars|pandas|duckdb|chromadb|qdrant|litellm|fastapi|uvicorn)\w*")
+
+
+def log(*a):
+  print("omarchy-memguard:", *a, file=sys.stderr, flush=True)
+
+
+def config():
+  """Defaults, overridden by the valid non-negative numbers in the config file.
+  A bad file or value is ignored: the daemon must run whatever is there."""
+  cfg = {k: float(v) for k, v in DEFAULTS.items()}
+  try:
+    user = json.loads(CONFIG.read_text())
+  except (OSError, ValueError):
+    return cfg
+  if not isinstance(user, dict):
+    log(f"{CONFIG}: not a JSON object, using defaults")
+    return cfg
+  for k, v in user.items():
+    if k not in DEFAULTS:
+      log(f"{CONFIG}: unknown key {k!r} ignored")
+      continue
+    try:
+      if isinstance(v, (str, bool)) or v is None:
+        raise ValueError
+      f = float(v)
+      if not (0 <= f < float("inf")) or (k == "every" and f < 0.5):
+        raise ValueError
+    except (TypeError, ValueError):
+      log(f"{CONFIG}: {k}={v!r} is not valid, keeping {cfg[k]:g}")
+      continue
+    cfg[k] = f
+  return cfg
+
+
+def read(path, default=""):
+  try:
+    return Path(path).read_text(errors="replace")
+  except OSError:
+    return default
+
+
+def write(path, text):
+  try:
+    Path(path).write_text(text)
+    return True
+  except OSError:
+    return False
+
+
+def run(cmd, timeout=10):
+  try:
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return p.returncode, (p.stdout + p.stderr).strip()
+  except (subprocess.TimeoutExpired, OSError) as e:
+    return 1, str(e)
+
+
+def notify(summary, body, urgency="normal"):
+  run(["notify-send", "-a", "Omarchy", "-u", urgency, summary, body], timeout=5)
+
+
+def human(n):
+  n = float(n)
+  return f"{n / GB:.1f} GB" if abs(n) >= GB else f"{n / MB:.0f} MB"
+
+
+# ------------------------------------------------------------------ sampling
+
+def meminfo():
+  out = {}
+  for line in read(PROC / "meminfo").splitlines():
+    k, _, v = line.partition(":")
+    parts = v.split()
+    if parts:
+      out[k] = int(parts[0]) * 1024
+  return out
+
+
+def parse_psi(text):
+  some = full = 0.0
+  for line in text.splitlines():
+    m = re.match(r"(some|full) avg10=([\d.]+)", line)
+    if m:
+      if m.group(1) == "some":
+        some = float(m.group(2))
+      else:
+        full = float(m.group(2))
+  return some, full
+
+
+def cgroup_psi(path):
+  return parse_psi(read(Path(path) / "memory.pressure"))
+
+
+def limit_of(path):
+  v = read(path, "max").strip()
+  return int(v) if v.isdigit() else float("inf")
+
+
+def effective_psi(scopes, throttled=(), extra=None):
+  """Memory pressure felt by the innocent: the desktop (session.slice), system
+  services (Ollama, Docker live in system.slice) and every app that is not
+  pressing against a limit of its own. Global PSI would also count a process
+  thrashing inside its own cap - including the one memguard just capped - and
+  escalate for nothing (seen live 2026-10-08)."""
+  base = user_cgroup()
+  groups = [cgroup_psi(base / "session.slice"), cgroup_psi(CGROOT / "system.slice")] if extra is None else list(extra)
+  for s in scopes:
+    if s.name in throttled or (s.limit != float("inf") and s.current >= 0.9 * s.limit):
+      continue
+    groups.append(s.pressure)
+  if not groups:
+    return psi_memory()
+  return max(g[0] for g in groups), max(g[1] for g in groups)
+
+
+def psi_memory():
+  some = full = 0.0
+  for line in read(PROC / "pressure" / "memory").splitlines():
+    m = re.match(r"(some|full) avg10=([\d.]+)", line)
+    if m:
+      if m.group(1) == "some":
+        some = float(m.group(2))
+      else:
+        full = float(m.group(2))
+  return some, full
+
+
+class Nvml:
+  """VRAM through libnvidia-ml (ctypes), without spawning nvidia-smi every 2 s."""
+
+  def __init__(self):
+    import ctypes
+    self.ct = ctypes
+    self.lib = ctypes.CDLL("libnvidia-ml.so.1")
+    if self.lib.nvmlInit_v2() != 0:
+      raise OSError("nvmlInit failed")
+    self.h = ctypes.c_void_p()
+    if self.lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(self.h)) != 0:
+      raise OSError("no GPU 0")
+
+    class Mem(ctypes.Structure):
+      _fields_ = [("total", ctypes.c_ulonglong), ("free", ctypes.c_ulonglong), ("used", ctypes.c_ulonglong)]
+
+    class Proc(ctypes.Structure):
+      _fields_ = [("pid", ctypes.c_uint), ("usedGpuMemory", ctypes.c_ulonglong),
+                  ("gpuInstanceId", ctypes.c_uint), ("computeInstanceId", ctypes.c_uint)]
+
+    class PUtil(ctypes.Structure):
+      _fields_ = [("pid", ctypes.c_uint), ("timeStamp", ctypes.c_ulonglong), ("smUtil", ctypes.c_uint),
+                  ("memUtil", ctypes.c_uint), ("encUtil", ctypes.c_uint), ("decUtil", ctypes.c_uint)]
+
+    self.Mem, self.Proc, self.PUtil = Mem, Proc, PUtil
+    self.last_ts = 0
+
+  def sample(self):
+    ct = self.ct
+    mem = self.Mem()
+    self.lib.nvmlDeviceGetMemoryInfo(self.h, ct.byref(mem))
+    procs = {}
+    for fn, kind in (("nvmlDeviceGetComputeRunningProcesses_v3", "C"), ("nvmlDeviceGetGraphicsRunningProcesses_v3", "G")):
+      if not hasattr(self.lib, fn):
+        continue
+      n = ct.c_uint(64)
+      arr = (self.Proc * 64)()
+      if getattr(self.lib, fn)(self.h, ct.byref(n), arr) == 0:
+        for p in arr[:n.value]:
+          e = procs.setdefault(p.pid, {"pid": p.pid, "mem": 0, "type": "", "sm": 0})
+          e["mem"] = max(e["mem"], p.usedGpuMemory if p.usedGpuMemory < (1 << 62) else 0)
+          e["type"] += kind
+    n = ct.c_uint(64)
+    arr = (self.PUtil * 64)()
+    if self.lib.nvmlDeviceGetProcessUtilization(self.h, arr, ct.byref(n), ct.c_ulonglong(self.last_ts)) == 0:
+      for u in arr[:n.value]:
+        if u.pid in procs:
+          procs[u.pid]["sm"] = max(procs[u.pid]["sm"], u.smUtil)
+        self.last_ts = max(self.last_ts, u.timeStamp)
+    return {"total": mem.total, "free": mem.free, "used": mem.used, "procs": list(procs.values())}
+
+
+def open_nvml():
+  try:
+    return Nvml()
+  except Exception:
+    return None
+
+
+# ------------------------------------------------------------------ processes and scopes
+
+def user_cgroup():
+  for line in read(PROC / "self" / "cgroup").splitlines():
+    path = line.split("::", 1)[-1]
+    m = re.match(r"(/user\.slice/user-\d+\.slice/user@\d+\.service)", path)
+    if m:
+      return CGROOT / m.group(1).lstrip("/")
+  return CGROOT / f"user.slice/user-{os.getuid()}.slice/user@{os.getuid()}.service"
+
+
+def comm_of(pid):
+  return read(PROC / str(pid) / "comm").strip()
+
+
+def cmdline_of(pid):
+  return read(PROC / str(pid) / "cmdline").replace("\0", " ").strip()
+
+
+def classify(comm, cmdline, cuda=False):
+  """'desktop', 'ai', 'dev' or None (an ordinary app)."""
+  base = os.path.basename(cmdline.split(" ", 1)[0]) if cmdline else ""
+  if comm in DESKTOP or base in DESKTOP:
+    return "desktop"
+  if cuda and comm not in GPU_GUI and base not in GPU_GUI and "--type=gpu-process" not in cmdline:
+    return "ai"
+  if comm in AI or base in AI:
+    return "ai"
+  if comm.startswith("pt_"):  # PyTorch names its threads/workers pt_main_thread, pt_data_worker...
+    return "ai"
+  if (comm.startswith("python") or base.startswith("python")) and AI_CMDLINE.search(cmdline):
+    return "ai"
+  if comm in DEV or base in DEV:
+    return "dev"
+  if comm.startswith("python") or base.startswith("python"):
+    return "dev"  # a script someone is running: work until proven otherwise
+  return None
+
+
+class Scope:
+  def __init__(self, path):
+    self.path = path
+    self.name = path.name
+    self.pids = [int(p) for p in read(path / "cgroup.procs").split() if p.isdigit()]
+    self.current = int(read(path / "memory.current", "0").strip() or 0)
+    self.swap = int(read(path / "memory.swap.current", "0").strip() or 0)
+    m = re.search(r"usage_usec (\d+)", read(path / "cpu.stat"))
+    self.cpu = int(m.group(1)) if m else 0
+    self.pressure = cgroup_psi(path)
+    self.limit = min(limit_of(path / "memory.max"), limit_of(path / "memory.high"))
+    self.kind = None
+    self.why = ""
+
+
+def app_scopes(cuda_pids=()):
+  """Every unit under app.slice with its processes classified."""
+  base = user_cgroup() / "app.slice"
+  out = []
+  try:
+    entries = sorted(base.iterdir())
+  except OSError:
+    return out
+  for d in entries:
+    if not d.is_dir() or not (d.name.endswith(".scope") or d.name.endswith(".service")):
+      continue
+    s = Scope(d)
+    if d.name in FREEZABLE:  # batch jobs: pausable, not protected
+      out.append(s)
+      continue
+    best = None
+    rank = {"desktop": 3, "ai": 2, "dev": 1}
+    for pid in s.pids:
+      k = classify(comm_of(pid), cmdline_of(pid), pid in cuda_pids)
+      if k and (best is None or rank[k] > rank[best[0]]):
+        best = (k, comm_of(pid))
+    if best:
+      s.kind, s.why = best
+    out.append(s)
+  return out
+
+
+def set_avoid(scope_path, on):
+  """user.oomd_avoid: systemd-oomd picks this cgroup last (set-property at runtime does not write it)."""
+  try:
+    if on:
+      os.setxattr(scope_path, "user.oomd_avoid", b"1")
+    else:
+      os.removexattr(scope_path, "user.oomd_avoid")
+    return True
+  except OSError:
+    return False
+
+
+def has_avoid(scope_path):
+  try:
+    return "user.oomd_avoid" in os.listxattr(scope_path)
+  except OSError:
+    return False
+
+
+def reclaim(scope_path, nbytes):
+  """Move up to nbytes of the scope's cold memory to swap (zram). EAGAIN = less was reclaimable."""
+  try:
+    with open(scope_path / "memory.reclaim", "w") as f:
+      f.write(str(int(nbytes)))
+    return True
+  except OSError:
+    return False
+
+
+def set_memory_high(scope_path, value):
+  return write(scope_path / "memory.high", str(value))
+
+
+def unit_active(unit):
+  return run(["systemctl", "--user", "is-active", unit], timeout=5)[1] in ("active", "activating", "reloading")
+
+
+def freeze_unit(unit):
+  return run(["systemctl", "--user", "freeze", unit])[0] == 0
+
+
+def thaw_unit(unit):
+  return run(["systemctl", "--user", "thaw", unit])[0] == 0
+
+
+# ------------------------------------------------------------------ Ollama
+
+def ollama_loaded():
+  try:
+    with urllib.request.urlopen(OLLAMA + "/api/ps", timeout=3) as r:
+      return [m.get("name") or m.get("model") for m in json.load(r).get("models", [])]
+  except Exception:
+    return []
+
+
+def ollama_unload(model):
+  data = json.dumps({"model": model, "keep_alive": 0}).encode()
+  req = urllib.request.Request(OLLAMA + "/api/generate", data=data, headers={"Content-Type": "application/json"})
+  try:
+    with urllib.request.urlopen(req, timeout=15) as r:
+      r.read()
+    return True
+  except Exception:
+    return False
+
+
+def ollama_generating(vram):
+  """True if an Ollama process is using the GPU's compute right now."""
+  for p in (vram or {}).get("procs", []):
+    if comm_of(p["pid"]).startswith("ollama") and p.get("sm", 0) >= 5:
+      return True
+  return False
+
+
+# ------------------------------------------------------------------ the guard
+
+class History:
+  """One hour of samples for percentiles, and a short window for growth rates."""
+
+  def __init__(self, seconds=3600):
+    self.seconds = seconds
+    self.samples = []  # (t, ram_used, vram_used)
+
+  def add(self, t, ram_used, vram_used):
+    self.samples.append((t, ram_used, vram_used))
+    while self.samples and self.samples[0][0] < t - self.seconds:
+      self.samples.pop(0)
+
+  def percentile(self, idx, q):
+    vals = sorted(s[idx] for s in self.samples if s[idx] is not None)
+    if not vals:
+      return None
+    k = min(len(vals) - 1, max(0, int(round(q / 100 * (len(vals) - 1)))))
+    return vals[k]
+
+  def rate(self, idx, t, window=6):
+    """Bytes per second over the last `window` seconds (positive = growing)."""
+    pts = [s for s in self.samples if s[0] >= t - window and s[idx] is not None]
+    if len(pts) < 2 or pts[-1][0] == pts[0][0]:
+      return 0.0
+    return (pts[-1][idx] - pts[0][idx]) / (pts[-1][0] - pts[0][0])
+
+
+class Guard:
+  def __init__(self, cfg):
+    self.cfg = cfg
+    self.hist = History()
+    self.level = 0
+    self.vlevel = 0
+    self.calm_since = None
+    self.frozen = {}         # unit -> since
+    self.throttled = {}      # scope name -> (path, previous memory.high)
+    self.avoided = set(load_applied().get("avoided", []))  # scope names we marked (survives restarts)
+    self.reclaimed_at = {}   # scope name -> t
+    self.idle_since = {}     # scope name -> (cpu usage, since)
+    self.last_scope_mem = {}  # scope name -> (t, bytes)
+    self.episode = False
+    self.vepisode = False
+    self.unloaded = []
+    self.events = []
+    self.status = {}
+
+  # -- bookkeeping
+  def event(self, t, text, urgency=None):
+    self.events.append((t, text))
+    del self.events[:-200]
+    log(text)
+    line = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {text}\n"
+    try:
+      STATE.mkdir(parents=True, exist_ok=True)
+      with open(STATE / "events.log", "a") as f:
+        f.write(line)
+    except OSError:
+      pass
+
+  def save_applied(self):
+    data = {"frozen": list(self.frozen), "throttled": {n: [str(p), prev] for n, (p, prev) in self.throttled.items()},
+            "avoided": sorted(self.avoided)}
+    try:
+      STATE.mkdir(parents=True, exist_ok=True)
+      tmp = STATE / "applied.json.tmp"
+      tmp.write_text(json.dumps(data))
+      tmp.replace(STATE / "applied.json")
+    except OSError:
+      pass
+
+  # -- levels
+  def ram_level(self, t, mi, psi):
+    c = self.cfg
+    total = mi.get("MemTotal", 1)
+    avail = mi.get("MemAvailable", total)
+    swap_total = mi.get("SwapTotal", 0)
+    swap_used = swap_total - mi.get("SwapFree", swap_total)
+    some, full = psi
+    grow = self.hist.rate(1, t)  # used memory growth, bytes/s
+    tte = avail / grow if grow > 64 * MB else float("inf")
+    # Running out of RAM with swap (zram) to spare only slows things down; it is the
+    # end of RAM *and* swap that crashes. Levels 2-3 need that, or processes already waiting.
+    tte_all = (avail + mi.get("SwapFree", 0)) / grow if grow > 64 * MB else float("inf")
+    avail_pct = 100 * avail / total
+    swap_pct = 100 * swap_used / swap_total if swap_total else 0
+    waiting = some > c["psiConfirm"]
+    lvl = 0
+    reasons = []
+    if avail_pct < c["ramWarnAvailPct"] or some > c["psiWarn"] or tte < c["tteWarn"]:
+      lvl = 1
+    if (avail_pct < c["ramCritAvailPct"] and waiting) or some > c["psiCrit"] or tte_all < c["tteCrit"] \
+       or swap_pct > c["swapCritPct"]:
+      lvl = 2
+    if (avail_pct < c["ramPanicAvailPct"] and full > c["psiConfirm"]) or full > c["psiCrit"] or tte_all < c["ttePanic"]:
+      lvl = 3
+    if lvl:
+      if avail_pct < c["ramWarnAvailPct"]:
+        reasons.append(f"{avail_pct:.0f} % RAM left")
+      if some > c["psiWarn"]:
+        reasons.append(f"waiting for memory {some:.0f} % of the time")
+      if tte < c["tteWarn"]:
+        reasons.append(f"growing {human(grow)}/s, RAM full in {tte:.0f} s" +
+                       (f", RAM+swap in {tte_all:.0f} s" if tte_all < c["tteWarn"] else ""))
+      if swap_pct > c["swapCritPct"]:
+        reasons.append(f"swap {swap_pct:.0f} % used")
+    return lvl, reasons, {"availPct": round(avail_pct, 1), "psiSome": some, "psiFull": full,
+                          "tte": None if tte == float("inf") else round(tte, 1), "swapPct": round(swap_pct, 1)}
+
+  def vram_level(self, vram):
+    if not vram:
+      return 0
+    free_mb = vram["free"] / MB
+    if free_mb < self.cfg["vramCritFreeMB"]:
+      return 2
+    if free_mb < self.cfg["vramWarnFreeMB"]:
+      return 1
+    return 0
+
+  # -- one step
+  def tick(self, t, mi, psi, vram, scopes):
+    used = mi.get("MemTotal", 0) - mi.get("MemAvailable", 0)
+    self.hist.add(t, used, vram["used"] if vram else None)
+    lvl, reasons, info = self.ram_level(t, mi, psi)
+    vlvl = self.vram_level(vram)
+    self.protect(t, scopes)
+    self.track_idle(t, scopes)
+    self.track_growth(t, scopes)
+    self.track_vram(t, vram)
+
+    if lvl > 0:
+      self.calm_since = None
+      if lvl > self.level or not self.episode:
+        self.event(t, f"memory level {lvl}: " + "; ".join(reasons))
+      if not self.episode:
+        self.episode = True
+        top = sorted(scopes, key=lambda s: -s.current)[:5]
+        notify("Memory is running low" if lvl < 3 else "Memory almost exhausted",
+               "; ".join(reasons) + "\nTop: " + ", ".join(f"{label(s)} {human(s.current)}" for s in top),
+               "critical" if lvl >= 2 else "normal")
+      self.reclaim_idle(t, scopes)
+      if lvl >= 2:
+        self.freeze_batch(t)
+        self.throttle_runaway(t, scopes, protected_too=lvl >= 3)
+    else:
+      if self.episode or self.frozen or self.throttled:
+        self.calm_since = self.calm_since if self.calm_since is not None else t
+        if t - self.calm_since >= self.cfg["calmSeconds"]:
+          self.release_calm(t)
+    self.level = lvl
+
+    if vlvl > 0:
+      self.relieve_vram(t, vram, vlvl)
+    elif self.vepisode:
+      self.vepisode = False
+      self.event(t, "VRAM back to normal")
+    self.vlevel = vlvl
+
+    # a job frozen for too long is thawed anyway: never stall work forever
+    for unit, since in list(self.frozen.items()):
+      if t - since >= self.cfg["maxFreezeMin"] * 60:
+        thaw_unit(unit)
+        del self.frozen[unit]
+        self.event(t, f"thawed {unit} after {self.cfg['maxFreezeMin']:g} min (limit)")
+        self.save_applied()
+
+    p95, p99 = self.hist.percentile(1, 95), self.hist.percentile(1, 99)
+    self.status = {"t": time.time(), "level": lvl, "vramLevel": vlvl, "reasons": reasons,
+                   "ram": dict(info, used=used, total=mi.get("MemTotal", 0), p95=p95, p99=p99),
+                   "vram": None if not vram else {"used": vram["used"], "total": vram["total"], "free": vram["free"],
+                                                  "p95": self.hist.percentile(2, 95), "p99": self.hist.percentile(2, 99)},
+                   "frozen": list(self.frozen), "throttled": list(self.throttled),
+                   "protected": sorted(s.name for s in scopes if s.kind), "unloaded": self.unloaded[-5:]}
+    return lvl
+
+  # -- actions
+  def protect(self, t, scopes):
+    """Mark protected scopes for oomd; unmark only the ones we marked (a unit may
+    carry ManagedOOMPreference=avoid of its own)."""
+    before = set(self.avoided)
+    for s in scopes:
+      if s.kind and s.name not in self.avoided and not has_avoid(s.path):
+        if set_avoid(s.path, True):
+          self.avoided.add(s.name)
+      elif not s.kind and s.name in self.avoided:
+        set_avoid(s.path, False)
+        self.avoided.discard(s.name)
+    self.avoided &= {s.name for s in scopes}
+    if self.avoided != before:
+      self.save_applied()
+
+  def track_idle(self, t, scopes):
+    seen = set()
+    for s in scopes:
+      seen.add(s.name)
+      prev = self.idle_since.get(s.name)
+      if prev is None or s.cpu - prev[0] > 2_000_000 * max(1.0, (t - prev[1]) / 60):  # > ~3 % of a core
+        self.idle_since[s.name] = (s.cpu, t)
+    for n in list(self.idle_since):
+      if n not in seen:
+        del self.idle_since[n]
+
+  def track_growth(self, t, scopes):
+    self.scope_rate = {}
+    for s in scopes:
+      total = s.current + s.swap  # a capped scope keeps growing in swap
+      prev = self.last_scope_mem.get(s.name)
+      if prev and t > prev[0]:
+        self.scope_rate[s.name] = (total - prev[1]) / (t - prev[0])
+      self.last_scope_mem[s.name] = (t, total)
+    live = {s.name for s in scopes}
+    for n in list(self.last_scope_mem):
+      if n not in live:
+        del self.last_scope_mem[n]
+
+  def track_vram(self, t, vram):
+    """Remember each non-Ollama process's VRAM, to tell who is asking for more."""
+    self.vram_seen = getattr(self, "vram_seen", {})
+    for p in (vram or {}).get("procs", []):
+      if comm_of(p["pid"]).startswith("ollama"):
+        continue
+      hist = self.vram_seen.setdefault(p["pid"], [])
+      hist.append((t, p["mem"]))
+      while hist and hist[0][0] < t - 30:
+        hist.pop(0)
+    live = {p["pid"] for p in (vram or {}).get("procs", [])}
+    for pid in list(self.vram_seen):
+      if pid not in live:
+        del self.vram_seen[pid]
+
+  def vram_competition(self):
+    """Bytes the fastest-growing non-Ollama GPU process added in the last 30 s."""
+    best = 0
+    for hist in getattr(self, "vram_seen", {}).values():
+      if len(hist) >= 2:
+        best = max(best, hist[-1][1] - min(m for _, m in hist))
+    return best
+
+  def reclaim_idle(self, t, scopes):
+    idle_after = self.cfg["reclaimIdleMin"] * 60
+    for s in scopes:
+      if s.kind or s.current < 64 * MB:
+        continue
+      since = self.idle_since.get(s.name, (0, t))[1]
+      if t - since < idle_after or t - self.reclaimed_at.get(s.name, -1e9) < 60:
+        continue
+      self.reclaimed_at[s.name] = t
+      before = s.current
+      reclaim(s.path, self.cfg["reclaimMB"] * MB)
+      after = int(read(s.path / "memory.current", str(before)).strip() or before)
+      if before - after > 16 * MB:
+        self.event(t, f"moved {human(before - after)} of idle {label(s)} to zram")
+
+  def freeze_batch(self, t):
+    for unit in FREEZABLE:
+      if unit in self.frozen or NEVER_FREEZE.search(unit) or not unit_active(unit):
+        continue
+      if freeze_unit(unit):
+        self.frozen[unit] = t
+        self.event(t, f"froze {unit} until memory is back to normal")
+        self.save_applied()
+
+  def throttle_runaway(self, t, scopes, protected_too):
+    """Cap the fastest-growing scope at its current size: it then reclaims from itself."""
+    best, best_rate = None, 0.0
+    for s in scopes:
+      rate = getattr(self, "scope_rate", {}).get(s.name)
+      if rate is None:
+        continue
+      if s.kind == "desktop" or (s.kind and not protected_too) or s.name in self.throttled:
+        continue
+      if rate > best_rate:
+        best, best_rate = s, rate
+    if best is None or best_rate < 50 * MB:
+      return
+    prev_high = read(best.path / "memory.high", "max").strip() or "max"
+    cap = max(best.current, 256 * MB)
+    if set_memory_high(best.path, cap):
+      self.throttled[best.name] = (best.path, prev_high)
+      self.event(t, f"slowed {label(best)} (+{human(best_rate)}/s): capped at {human(cap)} until memory is back to normal")
+      notify("Runaway memory slowed down", f"{label(best)} grew {human(best_rate)}/s. It keeps running, "
+             f"capped at {human(cap)} until there is room again. Nothing was closed.", "critical")
+      self.save_applied()
+
+  def relieve_vram(self, t, vram, vlvl):
+    """A full GPU is often intended (a big model, a training run): only act when
+    someone else is asking for VRAM that an idle Ollama model is holding."""
+    if not self.vepisode:
+      self.vepisode = True
+      self.event(t, f"VRAM level {vlvl}: {human(vram['free'])} free")
+      if vlvl >= 2:
+        top = sorted(vram["procs"], key=lambda p: -p["mem"])[:5]
+        notify("GPU memory is almost full", f"{human(vram['free'])} free of {human(vram['total'])}.\nUsing it: " +
+               ", ".join(f"{comm_of(p['pid']) or p['pid']} {human(p['mem'])}" for p in top), "critical")
+    if self.vram_competition() < self.cfg["vramGrowMB"] * MB or ollama_generating(vram):
+      return
+    for model in ollama_loaded():
+      if ollama_unload(model):
+        self.unloaded.append(model)
+        self.event(t, f"unloaded idle Ollama model {model} (it reloads on the next request)")
+
+  def release_calm(self, t):
+    """Calm for long enough: thaw jobs and lift caps, except a cap on a scope that
+    is still growing (into swap): lifting it would just start the runaway again."""
+    for unit in list(self.frozen):
+      thaw_unit(unit)
+      del self.frozen[unit]
+      self.event(t, f"thawed {unit}")
+    for name, (path, prev) in list(self.throttled.items()):
+      if getattr(self, "scope_rate", {}).get(name, 0) > 10 * MB:
+        continue
+      set_memory_high(path, prev or "max")
+      del self.throttled[name]
+      self.event(t, f"released the cap on {name}")
+    self.save_applied()
+    if not self.throttled:
+      self.undo_all(t, "memory back to normal")
+
+  def undo_all(self, t, why):
+    for unit in list(self.frozen):
+      thaw_unit(unit)
+      del self.frozen[unit]
+      self.event(t, f"thawed {unit}")
+    for name, (path, prev) in list(self.throttled.items()):
+      set_memory_high(path, prev or "max")
+      del self.throttled[name]
+      self.event(t, f"released the cap on {name}")
+    if self.episode:
+      self.event(t, why)
+      notify("Memory is back to normal", "Everything that was paused or slowed down is running normally again.")
+    self.episode = False
+    self.calm_since = None
+    self.save_applied()
+
+
+def dominant(scope):
+  """comm of the scope's biggest process (a unit can host something else: Chrome
+  opened from spotify-player lives in spotify-player.service)."""
+  best, rss = "", -1
+  for pid in scope.pids:
+    m = re.search(r"^VmRSS:\s+(\d+)", read(PROC / str(pid) / "status"), re.M)
+    if m and int(m.group(1)) > rss:
+      best, rss = comm_of(pid), int(m.group(1))
+  return best
+
+
+def label(scope):
+  m = re.match(r"app-(?:Hyprland-|flatpak-)?(.+?)(?:@[^.]*)?(?:-[0-9a-f]{6,})?\.(scope|service)$", scope.name)
+  name = (m.group(1) if m else scope.name).replace("\\x2d", "-")
+  top = dominant(scope)
+  return f"{name} ({top})" if top and top.lower() not in name.lower() else name
+
+
+def load_applied():
+  try:
+    data = json.loads(read(STATE / "applied.json") or "{}")
+  except ValueError:
+    return {}
+  return data if isinstance(data, dict) else {}
+
+
+def undo_leftovers():
+  """A previous instance that died (crash, SIGKILL) may have left jobs frozen or apps capped.
+  Its oomd marks stay: they are protection, and the new instance takes them over."""
+  data = load_applied()
+  done = []
+  for unit in data.get("frozen", []):
+    if thaw_unit(unit):
+      done.append(f"thawed {unit}")
+  for name, (path, prev) in data.get("throttled", {}).items():
+    if Path(path).exists() and set_memory_high(Path(path), prev or "max"):
+      done.append(f"released {name}")
+  try:
+    tmp = STATE / "applied.json.tmp"
+    tmp.write_text(json.dumps({"frozen": [], "throttled": {}, "avoided": data.get("avoided", [])}))
+    tmp.replace(STATE / "applied.json")
+  except OSError:
+    pass
+  return done
+
+
+def write_status(status):
+  try:
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = STATE / "status.json.tmp"
+    tmp.write_text(json.dumps(status))
+    tmp.replace(STATE / "status.json")
+  except OSError:
+    pass
+
+
+def daemon():
+  cfg = config()
+  STATE.mkdir(parents=True, exist_ok=True)
+  for line in undo_leftovers():
+    log("left over from a previous run:", line)
+  nv = open_nvml()
+  guard = Guard(cfg)
+
+  def stop(signum, frame):
+    raise SystemExit(0)
+
+  signal.signal(signal.SIGTERM, stop)
+  log(f"watching RAM{' and VRAM' if nv else ''} every {cfg['every']:g} s")
+  try:
+    while True:
+      t = time.monotonic()
+      try:
+        vram = nv.sample() if nv else None
+      except Exception:
+        vram = None
+      try:
+        cuda = {p["pid"] for p in vram["procs"] if "C" in p["type"]} if vram else set()
+        scopes = app_scopes(cuda)
+        guard.tick(t, meminfo(), effective_psi(scopes, guard.throttled), vram, scopes)
+        write_status(guard.status)
+      except Exception as e:  # one bad sample never stops the watch
+        log(f"tick failed: {type(e).__name__}: {e}")
+      time.sleep(cfg["every"])
+  finally:
+    guard.undo_all(time.monotonic(), "memguard stopped")
+
+
+# ------------------------------------------------------------------ CLI
+
+def status(as_json=False):
+  st = json.loads(read(STATE / "status.json") or "{}")
+  if as_json:
+    print(json.dumps(st, indent=1))
+    return 0
+  if not st:
+    print("no status yet (is omarchy-memguard.service running?)")
+    return 1
+  r, v = st.get("ram", {}), st.get("vram")
+  age = time.time() - st.get("t", 0)
+  print(f"level {st.get('level')} (VRAM {st.get('vramLevel')}), {age:.0f} s ago" +
+        (": " + "; ".join(st["reasons"]) if st.get("reasons") else ""))
+  print(f"RAM   {human(r.get('used', 0))} of {human(r.get('total', 0))}, {r.get('availPct')} % available, "
+        f"pressure on work {r.get('psiSome')} %, p95 {human(r.get('p95') or 0)}, p99 {human(r.get('p99') or 0)}")
+  if v:
+    print(f"VRAM  {human(v['used'])} of {human(v['total'])}, p95 {human(v.get('p95') or 0)}, p99 {human(v.get('p99') or 0)}")
+  for k in ("frozen", "throttled", "unloaded"):
+    if st.get(k):
+      print(f"{k}: {', '.join(st[k])}")
+  print(f"protected apps: {len(st.get('protected', []))}  (omarchy-memguard explain)")
+  return 0
+
+
+def explain():
+  nv = open_nvml()
+  vram = nv.sample() if nv else None
+  cuda = {p["pid"] for p in vram["procs"] if "C" in p["type"]} if vram else set()
+  for s in sorted(app_scopes(cuda), key=lambda s: -s.current):
+    mark = {"desktop": "desktop", "ai": "AI     ", "dev": "dev    "}.get(s.kind, "-      ")
+    print(f"{mark} {human(s.current):>9}  {label(s):<52} {('protected: ' + s.why) if s.kind else ''}")
+  return 0
+
+
+def smoke():
+  """Live read-only self-check. Exit 0 = no FAIL."""
+  rows = []
+
+  def emit(st, text):
+    rows.append((st, text))
+
+  mi = meminfo()
+  emit("PASS" if mi.get("MemAvailable") else "FAIL", f"meminfo readable ({human(mi.get('MemAvailable', 0))} available)")
+  emit("PASS" if read(PROC / "pressure" / "memory") else "FAIL", "memory pressure (PSI) readable")
+  app = user_cgroup() / "app.slice"
+  emit("PASS" if os.access(app / "cgroup.freeze", os.W_OK) else "FAIL", "app.slice is delegated (freeze writable)")
+  emit("PASS" if os.access(app / "memory.reclaim", os.W_OK) else "FAIL", "memory.reclaim writable")
+  scopes = app_scopes()
+  emit("PASS" if scopes else "FAIL", f"{len(scopes)} app scopes, {sum(1 for s in scopes if s.kind)} protected")
+  try:
+    os.listxattr(app)
+    emit("PASS", "cgroup xattrs available (oomd avoid marks)")
+  except OSError as e:
+    emit("FAIL", f"cgroup xattrs: {e}")
+  nv = open_nvml()
+  emit("PASS" if nv else "WARN", "NVML available (VRAM)" if nv else "NVML not available: VRAM not watched")
+  rc, out = run(["systemctl", "--user", "is-active", "omarchy-memguard.service"], timeout=5)
+  emit("PASS" if out == "active" else "FAIL", f"omarchy-memguard.service {out}")
+  st = read(STATE / "status.json")
+  try:
+    age = time.time() - json.loads(st)["t"]
+    emit("PASS" if age < 15 else "FAIL", f"status.json updated {age:.0f} s ago")
+  except (ValueError, KeyError):
+    emit("FAIL", "no status.json")
+  try:
+    data = json.loads(st)
+    stuck = (data.get("frozen") or data.get("throttled")) and data.get("level") == 0
+    emit("WARN" if stuck else "PASS", "nothing paused or capped while calm" if not stuck else
+         f"calm but still applied: {data.get('frozen')} {data.get('throttled')}")
+  except ValueError:
+    pass
+  if CONFIG.exists():
+    try:
+      ok = isinstance(json.loads(read(CONFIG)), dict)
+    except ValueError:
+      ok = False
+    emit("PASS" if ok else "WARN", f"{CONFIG} " + ("valid" if ok else "invalid: defaults in use"))
+  else:
+    emit("PASS", "no config file: defaults")
+  for st_, text in rows:
+    print(f"{st_} {text}")
+  return 1 if any(s == "FAIL" for s, _ in rows) else 0
+
+
+def main(argv):
+  cmd = argv[1] if len(argv) > 1 else "daemon"
+  if cmd == "daemon":
+    return daemon()
+  if cmd == "status":
+    return status("--json" in argv[2:])
+  if cmd == "explain":
+    return explain()
+  if cmd == "smoke":
+    return smoke()
+  print(__doc__)
+  return 3
+
+
+if __name__ == "__main__":
+  sys.exit(main(sys.argv))

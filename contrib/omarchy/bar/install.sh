@@ -38,7 +38,7 @@ RETIRED=(
   juansebas7ian.gdrive juansebas7ian.icloud juansebas7ian.gphotos
   juansebas7ian.sysmon juansebas7ian.cooling juansebas7ian.storage juansebas7ian.nvidia juansebas7ian.drivers
 )
-COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session omarchy-freeze-guard bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn omarchy-gcal)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session omarchy-freeze-guard omarchy-memguard bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn omarchy-gcal)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }
@@ -94,9 +94,9 @@ remove_all() {
     fi
   done
   systemctl --user disable --now omarchy-gcal.timer >/dev/null 2>&1 || true
-  systemctl --user disable --now omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.path opencode-ollama-sync.timer >/dev/null 2>&1 || true
+  systemctl --user disable --now omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.path opencode-ollama-sync.timer >/dev/null 2>&1 || true
   systemctl --user stop gphotos-sync.service >/dev/null 2>&1 || true
-  for unit in omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
+  for unit in omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
   for c in "${COLLECTORS[@]}"; do
@@ -159,7 +159,7 @@ say "Colectores de uso (Antigravity, opencode)"
 for c in "${COLLECTORS[@]}"; do
   install_file "$HERE/bin/$c" "$BIN/$c" 755 || say "  sin cambios: $BIN/$c"
 done
-for unit in omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
+for unit in omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
   install_file "$HERE/systemd/$unit" "$UNITS/$unit" 644 || say "  sin cambios: $UNITS/$unit"
 done
 
@@ -277,6 +277,8 @@ fi
 systemctl --user enable --now omarchy-session.service >/dev/null
 systemctl --user enable omarchy-freeze-guard.service >/dev/null
 systemctl --user restart omarchy-freeze-guard.service >/dev/null || warn "omarchy-freeze-guard no arrancó: journalctl --user -u omarchy-freeze-guard"
+systemctl --user enable omarchy-memguard.service >/dev/null
+systemctl --user restart omarchy-memguard.service >/dev/null || warn "omarchy-memguard no arrancó: journalctl --user -u omarchy-memguard"
 if [[ -e $UNITS/rclone-gdrive.service ]]; then
   systemctl --user enable --now rclone-gdrive.service >/dev/null || warn "el montaje de Drive no arrancó: journalctl --user -u rclone-gdrive"
 fi
