@@ -107,13 +107,21 @@ class GuardChecksTest(unittest.TestCase):
         self.bar, self.ubin, self.units, self.stubs = (os.path.join(t, d) for d in ("bar", "ubin", "units", "stubs"))
         for d in (os.path.join(self.bar, "bin"), self.ubin, self.units, self.stubs):
             os.makedirs(d)
+        ui = '{"apps": [], "config": {"schema": [{"key": "enabled"}]}}'
         for name in ("omarchy-freeze-guard", "omarchy-memguard"):
-            put(os.path.join(self.bar, "bin", name), "#!/bin/sh\necho PASS ok\n")
-            put(os.path.join(self.ubin, name), "#!/bin/sh\necho PASS ok\n")
+            body = "#!/bin/sh\n[ \"$1\" = ui ] && echo '%s' && exit 0\necho PASS ok\n" % ui
+            put(os.path.join(self.bar, "bin", name), body)
+            put(os.path.join(self.ubin, name), body)
             os.chmod(os.path.join(self.ubin, name), 0o755)
             put(os.path.join(self.units, name + ".service"),
                 "[Unit]\nStartLimitIntervalSec=0\n[Service]\nRestart=always\n")
         self.systemctl("enabled", "active")
+        self.plugins = os.path.join(t, "plugins")
+        for root in (os.path.join(self.bar, "plugins", "juansebas7ian.memguard"), os.path.join(self.plugins, "juansebas7ian.memguard")):
+            os.makedirs(root)
+            put(os.path.join(root, "Panel.qml"), "Panel {}\n")
+        self.shell = os.path.join(t, "shell.json")
+        put(self.shell, '{"bar": {"layout": {"right": [{"id": "juansebas7ian.memguard"}]}}}')
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -125,12 +133,12 @@ class GuardChecksTest(unittest.TestCase):
 
     def run_ids(self, ids):
         env = {**os.environ, "PATH": self.stubs + ":" + os.environ["PATH"], "BAR_DIR": self.bar,
-               "USER_BIN": self.ubin, "USER_UNITS": self.units}
+               "USER_BIN": self.ubin, "USER_UNITS": self.units, "PLUGINS_DIR": self.plugins, "SHELL_JSON": self.shell}
         p = subprocess.run(["bash", SMOKE, "--only", ids], capture_output=True, text=True, env=env)
         return {l.split()[1]: l.split()[0] for l in p.stdout.splitlines() if l.strip()}
 
     def test_all_good(self):
-        r = self.run_ids("GUARD01,GUARD02,GUARD03,MEMG01,MEMG02,MEMG03,MEMG04")
+        r = self.run_ids("GUARD01,GUARD02,GUARD03,MEMG01,MEMG02,MEMG03,MEMG04,MEMG05,MEMG06")
         self.assertEqual(set(r.values()), {"PASS"}, r)
 
     def test_inactive_service_fails(self):
@@ -149,6 +157,23 @@ class GuardChecksTest(unittest.TestCase):
     def test_unit_that_gives_up_fails(self):
         put(os.path.join(self.units, "omarchy-memguard.service"), "[Service]\nRestart=on-failure\n")
         self.assertEqual(self.run_ids("MEMG03"), {"MEMG03": "FAIL"})
+
+    def test_widget_missing_stale_or_off_the_bar(self):
+        put(self.shell, '{"bar": {"layout": {"right": []}}}')
+        self.assertEqual(self.run_ids("MEMG05"), {"MEMG05": "WARN"})
+        put(os.path.join(self.plugins, "juansebas7ian.memguard", "Panel.qml"), "old\n")
+        self.assertEqual(self.run_ids("MEMG05"), {"MEMG05": "WARN"})
+        import shutil
+        shutil.rmtree(os.path.join(self.plugins, "juansebas7ian.memguard"))
+        self.assertEqual(self.run_ids("MEMG05"), {"MEMG05": "FAIL"})
+
+    def test_installer_marker_is_not_a_difference(self):
+        put(os.path.join(self.plugins, "juansebas7ian.memguard", ".placed"), "")
+        self.assertEqual(self.run_ids("MEMG05"), {"MEMG05": "PASS"})
+
+    def test_widget_backend_json(self):
+        put(os.path.join(self.ubin, "omarchy-memguard"), "#!/bin/sh\necho not json\n")
+        self.assertEqual(self.run_ids("MEMG06"), {"MEMG06": "FAIL"})
 
     def test_memguard_self_check(self):
         mg = os.path.join(self.ubin, "omarchy-memguard")

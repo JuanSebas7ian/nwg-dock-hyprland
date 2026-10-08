@@ -1,6 +1,9 @@
 [Unit]
 Description=Sync opencode's Ollama models with the models Ollama has
 After=network.target
+# A model download changes many blobs in a second: the .path unit fires a burst.
+# The sync is idempotent and takes ~40 ms, so never refuse to start (2026-10-08: start-limit-hit).
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot

@@ -2,7 +2,8 @@
 # Read-only, root-less smoke test of the maintenance plan.
 # One line per check: PASS|FAIL|WARN|SKIP <id> <text>; --json for reward.py.
 # Env: SYSFS_ROOT, PROC_ROOT (fake trees for tests), SMARTD_CONF, BOOT_USED_PCT, DRIVERS_DIR (override),
-#      BAR_DIR, USER_BIN, USER_UNITS (the desktop guards: repo copy, installed binaries and units).
+#      BAR_DIR, USER_BIN, USER_UNITS (the desktop guards: repo copy, installed binaries and units),
+#      PLUGINS_DIR, SHELL_JSON (the memguard bar widget).
 # Option: --only ID,ID  runs just those checks.
 set -uo pipefail
 export LC_ALL=C
@@ -15,6 +16,8 @@ HOOK_ETC=${HOOK_ETC:-/etc/pacman.d/hooks}; HOOK_LIB=${HOOK_LIB:-/usr/local/lib/o
 BAR_DIR=${BAR_DIR:-$(cd "$(dirname "$0")/../bar" && pwd)}
 USER_BIN=${USER_BIN:-$HOME/.local/bin}
 USER_UNITS=${USER_UNITS:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}
+PLUGINS_DIR=${PLUGINS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins}
+SHELL_JSON=${SHELL_JSON:-${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json}
 JSON=0
 ONLY=""
 while [ $# -gt 0 ]; do
@@ -203,6 +206,23 @@ if want MEMG04; then
             if [ "$w" -eq 0 ]; then emit PASS MEMG04 "omarchy-memguard smoke sin fallos"
             else emit WARN MEMG04 "omarchy-memguard smoke: $(grep -m1 '^WARN' <<<"$mout")"; fi
         else emit FAIL MEMG04 "omarchy-memguard smoke: $(grep -m1 '^FAIL' <<<"$mout")"; fi
+    fi
+fi
+if want MEMG05; then  # the bar widget: installed, same as the repo, placed in the bar
+    w=juansebas7ian.memguard
+    if [ ! -d "$PLUGINS_DIR/$w" ]; then emit FAIL MEMG05 "widget $w no instalado"
+    elif ! diff -rq --exclude=__pycache__ --exclude=.placed "$BAR_DIR/plugins/$w" "$PLUGINS_DIR/$w" >/dev/null 2>&1; then
+        emit WARN MEMG05 "widget $w difiere del repo: contrib/omarchy/bar/install.sh"
+    elif ! grep -q "\"$w\"" "$SHELL_JSON" 2>/dev/null; then emit WARN MEMG05 "widget $w instalado pero no esta en la barra"
+    else emit PASS MEMG05 "widget $w instalado, al dia y en la barra"; fi
+fi
+if want MEMG06; then  # what the widget reads
+    if [ ! -x "$USER_BIN/omarchy-memguard" ]; then emit FAIL MEMG06 "omarchy-memguard no instalado"
+    else
+        uout=$(timeout 30 "$USER_BIN/omarchy-memguard" ui 2>/dev/null)
+        if python3 -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d["apps"], list) and d["config"]["schema"]' <<<"$uout" 2>/dev/null; then
+            emit PASS MEMG06 "omarchy-memguard ui: JSON valido para el widget"
+        else emit FAIL MEMG06 "omarchy-memguard ui no devuelve el JSON del widget"; fi
     fi
 fi
 

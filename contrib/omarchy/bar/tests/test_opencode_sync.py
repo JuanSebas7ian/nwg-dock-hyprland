@@ -68,5 +68,11 @@ class Sync(unittest.TestCase):
     self.assertEqual(sync.merge(once, found), once)
 
 
+class UnitTest(unittest.TestCase):
+  def test_a_burst_of_triggers_never_fails_the_service(self):
+    unit = (Path(__file__).resolve().parent.parent / "systemd" / "opencode-ollama-sync.service").read_text()
+    self.assertIn("StartLimitIntervalSec=0", unit.split("[Service]")[0])
+
+
 if __name__ == "__main__":
   unittest.main()
