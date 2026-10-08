@@ -1,0 +1,10 @@
+[Unit]
+Description=Google Calendar reminders and sync, every minute
+
+[Timer]
+OnStartupSec=30s
+OnUnitActiveSec=60s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

@@ -30,12 +30,15 @@ WIDGETS=(
   "juansebas7ian.hardware:juansebas7ian.ollama"
   "juansebas7ian.vpn:omarchy.network"
 )
+# Clones de widgets de Omarchy: al activarse ocupan el lugar del original con sus mismos ajustes
+# (omarchy plugin disable <clon> devuelve el original). juansebas7ian.clock = reloj + Google Calendar.
+CLONES=(juansebas7ian.clock)
 # Widgets que Nube y Hardware reemplazaron (2026-10-07): se quitan al instalar, con respaldo.
 RETIRED=(
   juansebas7ian.gdrive juansebas7ian.icloud juansebas7ian.gphotos
   juansebas7ian.sysmon juansebas7ian.cooling juansebas7ian.storage juansebas7ian.nvidia juansebas7ian.drivers
 )
-COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn omarchy-gcal)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }
@@ -81,7 +84,7 @@ remote_exists() {
 
 remove_all() {
   say "Quitando los extras de la barra"
-  for entry in "${WIDGETS[@]}"; do
+  for entry in "${WIDGETS[@]}" "${CLONES[@]/%/:}"; do
     id=${entry%%:*}
     omarchy plugin disable "$id" >/dev/null 2>&1 || true
     if [[ -d $PLUGINS/$id ]]; then
@@ -90,9 +93,10 @@ remove_all() {
       say "  quitado: $id"
     fi
   done
+  systemctl --user disable --now omarchy-gcal.timer >/dev/null 2>&1 || true
   systemctl --user disable --now omarchy-agent-usage-extra.timer omarchy-session.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.path opencode-ollama-sync.timer >/dev/null 2>&1 || true
   systemctl --user stop gphotos-sync.service >/dev/null 2>&1 || true
-  for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
+  for unit in omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
   for c in "${COLLECTORS[@]}"; do
@@ -144,7 +148,7 @@ if [[ ! -e $merged ]]; then
   mkdir -p "$(dirname "$merged")" && touch "$merged"
   say "  omarchy.dropbox: ahora es la pestaña Dropbox de Nube (deshacer: omarchy plugin enable omarchy.dropbox)"
 fi
-for entry in "${WIDGETS[@]}"; do
+for entry in "${WIDGETS[@]}" "${CLONES[@]/%/:}"; do
   id=${entry%%:*}
   omarchy plugin validate "$HERE/plugins/$id" >/dev/null || fail "manifiesto inválido: $id"
   install_dir "$HERE/plugins/$id" "$PLUGINS/$id"
@@ -155,7 +159,7 @@ say "Colectores de uso (Antigravity, opencode)"
 for c in "${COLLECTORS[@]}"; do
   install_file "$HERE/bin/$c" "$BIN/$c" 755 || say "  sin cambios: $BIN/$c"
 done
-for unit in omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
+for unit in omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
   install_file "$HERE/systemd/$unit" "$UNITS/$unit" 644 || say "  sin cambios: $UNITS/$unit"
 done
 
@@ -300,6 +304,15 @@ for entry in "${WIDGETS[@]}"; do
     touch "$PLUGINS/$id/.placed"
   fi
 done
+# Los clones reemplazan al widget original en su sitio (una vez: si luego lo quitas, se respeta).
+for id in "${CLONES[@]}"; do
+  if [[ ! -e $PLUGINS/$id/.placed ]]; then
+    omarchy plugin enable "$id" >/dev/null || warn "no se pudo activar $id"
+    touch "$PLUGINS/$id/.placed"
+  fi
+done
+systemctl --user daemon-reload
+systemctl --user enable --now omarchy-gcal.timer >/dev/null || warn "omarchy-gcal.timer no arrancó"
 omarchy restart shell >/dev/null 2>&1 || true
 
 cat <<EOF
@@ -308,6 +321,8 @@ Listo. Pasos que solo puedes hacer tú (una vez):
   - Spotify en este PC sin abrir la app (Premium): spotifyd authenticate && systemctl --user enable --now spotifyd
   - Listas de Spotify en el panel: spotify-bar-setup (o "Connect" en el panel) guía la creación de tu app
     de Spotify, guarda el Client ID y autoriza spotify-player.
+  - Google Calendar en el reloj: omarchy-gcal setup (o "Connect Google Calendar" en el panel del reloj):
+    tu cliente OAuth propio (el mismo proyecto sirve para Google Fotos) y el permiso en el navegador.
   - Google Fotos: gphotos-setup (o "Connect" en el panel): tu client ID de Google y el permiso; luego sube solo.
   - iCloud Drive: icloud-setup (o "Connect" en el panel de iCloud): Apple ID, contraseña y código 2FA.
     Apple caduca la sesión a los 30 días: icloud-setup reconnect (el widget avisa 3 días antes).

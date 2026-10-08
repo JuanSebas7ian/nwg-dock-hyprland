@@ -1,0 +1,435 @@
+#!/usr/bin/python3 -B
+"""omarchy-gcal: Google Calendar for the Omarchy clock panel (Calendar API v3, Python stdlib only).
+
+  omarchy-gcal setup                 one time, in a terminal: your OAuth client + sign in in the browser
+  omarchy-gcal status                JSON: connected?, account, calendars, last sync
+  omarchy-gcal sync                  download calendars and events (2 months back, 12 ahead) to the cache
+  omarchy-gcal events [--max-age S]  JSON from the cache; syncs first when the cache is older than S seconds
+  omarchy-gcal add '<json>'          {calendarId, summary, date, start, end, allDay, location, description, reminder}
+  omarchy-gcal delete <calendarId> <eventId> [--series]
+  omarchy-gcal tick                  for the timer: sync every 5 min, desktop reminders every minute
+  omarchy-gcal logout                forget the sign-in (revokes the token at Google)
+
+Why your own OAuth client: Google gives no shared client to scripts like this one. Create it once at
+console.cloud.google.com (Calendar API + "Desktop app" client); the same client can serve
+gphotos-setup. Files: ~/.config/omarchy-google/client.json (shared client), ~/.config/omarchy-gcal/
+token.json (refresh token), ~/.cache/omarchy-gcal/events.json (cache). All 0600.
+"""
+import base64
+import datetime as dt
+import hashlib
+import http.server
+import json
+import os
+import secrets
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+HOME = Path.home()
+CFG = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config"))
+CLIENT = CFG / "omarchy-google" / "client.json"
+TOKEN = CFG / "omarchy-gcal" / "token.json"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "omarchy-gcal"
+CACHE = CACHE_DIR / "events.json"
+STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "omarchy-gcal"
+NOTIFIED = STATE / "notified.json"
+
+API = "https://www.googleapis.com/calendar/v3"
+AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+TOKEN_URL = "https://oauth2.googleapis.com/token"
+REVOKE_URL = "https://oauth2.googleapis.com/revoke"
+SCOPES = "https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/calendar.calendarlist.readonly"
+SYNC_EVERY = 300
+PAST_DAYS = 62
+FUTURE_DAYS = 365
+
+
+# --------------------------------------------------------------------------- files
+
+def read_json(path, default=None):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path, data, private=True):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if private:
+        path.parent.chmod(0o700)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.chmod(0o600 if private else 0o644)
+    tmp.replace(path)
+
+
+def local_tz():
+    """IANA name of the system zone (America/Bogota), for events Google should show in local time."""
+    try:
+        target = os.readlink("/etc/localtime")
+        return target.split("zoneinfo/", 1)[1]
+    except (OSError, IndexError):
+        return "UTC"
+
+
+# --------------------------------------------------------------------------- OAuth
+
+def post_form(url, fields):
+    data = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode() or "{}")
+
+
+def access_token():
+    client, tok = read_json(CLIENT), read_json(TOKEN)
+    if not client:
+        raise NeedsSetup("no OAuth client yet: run omarchy-gcal setup")
+    if not tok or not tok.get("refresh_token"):
+        raise NeedsSetup("not signed in: run omarchy-gcal setup")
+    if tok.get("access_token") and tok.get("expires", 0) > time.time() + 60:
+        return tok["access_token"]
+    try:
+        r = post_form(TOKEN_URL, {"client_id": client["client_id"], "client_secret": client["client_secret"],
+                                  "refresh_token": tok["refresh_token"], "grant_type": "refresh_token"})
+    except urllib.error.HTTPError as e:
+        body = e.read().decode(errors="replace")
+        if "invalid_grant" in body:
+            raise NeedsSetup("Google withdrew the permission (expired or revoked): run omarchy-gcal setup again")
+        raise
+    tok.update(access_token=r["access_token"], expires=time.time() + int(r.get("expires_in", 3600)))
+    write_json(TOKEN, tok)
+    return tok["access_token"]
+
+
+class NeedsSetup(Exception):
+    pass
+
+
+def api(method, path, params=None, body=None):
+    url = API + path + ("?" + urllib.parse.urlencode(params, doseq=True) if params else "")
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method, headers={
+        "Authorization": "Bearer " + access_token(), "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read().decode()
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        try:
+            detail = json.loads(detail)["error"]["message"]
+        except (ValueError, KeyError, TypeError):
+            pass
+        raise RuntimeError(f"Google Calendar: {e.code} {detail}")
+
+
+def setup():
+    """Interactive: store the OAuth client, then the loopback sign-in with PKCE."""
+    print(__doc__.split("\n\n")[0])
+    client = read_json(CLIENT)
+    if client and input(f"\nUse the saved OAuth client ({client['client_id'][:24]}…)? [Y/n] ").strip().lower() in ("n", "no"):
+        client = None
+    if not client:
+        print("""
+Google Calendar: your own OAuth client (once, ~5 minutes, free)
+  1. https://console.cloud.google.com/projectcreate → create a project (e.g. "omarchy").
+  2. https://console.cloud.google.com/apis/library/calendar-json.googleapis.com → Enable.
+     (For Google Photos later: also enable "Photos Library API" in the same project.)
+  3. https://console.cloud.google.com/auth/branding → app name + your email → Audience: External.
+     Then Audience → "Publish app" (in "Testing" Google drops the permission after 7 days).
+  4. https://console.cloud.google.com/auth/clients → Create client → type "Desktop app"
+     → copy the client ID and the client secret.
+""")
+        cid = input("Client ID (ends in .apps.googleusercontent.com): ").strip()
+        if not cid.endswith(".apps.googleusercontent.com"):
+            sys.exit("That does not look like a Google client ID.")
+        import getpass
+        secret = getpass.getpass("Client secret (hidden): ").strip()
+        if not secret:
+            sys.exit("The secret cannot be empty.")
+        client = {"client_id": cid, "client_secret": secret}
+        write_json(CLIENT, client)
+
+    verifier = secrets.token_urlsafe(64)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = secrets.token_urlsafe(16)
+    got = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            if q.get("state", [""])[0] == state:
+                got.update({k: v[0] for k, v in q.items()})
+            ok = "code" in got
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(("<h2>" + ("Listo: Google Calendar conectado. Puedes cerrar esta pestaña." if ok
+                                        else "No se recibió el permiso: " + got.get("error", "?")) + "</h2>").encode())
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    redirect = f"http://127.0.0.1:{srv.server_port}"
+    url = AUTH_URL + "?" + urllib.parse.urlencode({
+        "client_id": client["client_id"], "redirect_uri": redirect, "response_type": "code", "scope": SCOPES,
+        "access_type": "offline", "prompt": "consent", "state": state,
+        "code_challenge": challenge, "code_challenge_method": "S256"})
+    print("\nOpening the browser to sign in with Google. If it does not open, visit:\n" + url + "\n")
+    print('If Google says "app isn\'t verified": Advanced → Go to <your app> (it is your own app).')
+    subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    t = threading.Thread(target=lambda: [srv.handle_request() for _ in range(5) if "code" not in got and "error" not in got])
+    t.daemon = True
+    t.start()
+    t.join(300)
+    if "code" not in got:
+        sys.exit("No permission received (" + got.get("error", "timed out") + ").")
+    r = post_form(TOKEN_URL, {"client_id": client["client_id"], "client_secret": client["client_secret"],
+                              "code": got["code"], "code_verifier": verifier, "redirect_uri": redirect,
+                              "grant_type": "authorization_code"})
+    if not r.get("refresh_token"):
+        sys.exit("Google gave no refresh token; run setup again.")
+    write_json(TOKEN, {"refresh_token": r["refresh_token"], "access_token": r["access_token"],
+                       "expires": time.time() + int(r.get("expires_in", 3600)), "since": int(time.time())})
+    data = sync()
+    print(f"\nConnected as {data['account']}: {len(data['calendars'])} calendar(s), {len(data['events'])} event(s).")
+    return 0
+
+
+# --------------------------------------------------------------------------- sync
+
+def iso(d):
+    return d.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def slim(ev, cal):
+    s, e = ev.get("start", {}), ev.get("end", {})
+    all_day = "date" in s
+    rem = ev.get("reminders", {})
+    if rem.get("useDefault", True):
+        mins = [r["minutes"] for r in cal.get("defaultReminders", []) if r.get("method") == "popup"]
+    else:
+        mins = [r["minutes"] for r in rem.get("overrides", []) if r.get("method") == "popup"]
+    return {
+        "id": ev["id"], "calendarId": cal["id"], "calendar": cal.get("summaryOverride") or cal.get("summary", ""),
+        "color": cal.get("backgroundColor", "#888888"), "summary": ev.get("summary") or "(no title)",
+        "allDay": all_day, "start": s.get("date") or s.get("dateTime"), "end": e.get("date") or e.get("dateTime"),
+        "location": ev.get("location", ""), "description": (ev.get("description") or "")[:2000],
+        "link": ev.get("htmlLink", ""), "meet": ev.get("hangoutLink", ""),
+        "recurring": bool(ev.get("recurringEventId")), "seriesId": ev.get("recurringEventId", ""),
+        "status": ev.get("status", ""), "reminders": mins,
+        "canEdit": cal.get("accessRole") in ("owner", "writer"),
+    }
+
+
+def sync():
+    cals = []
+    page = None
+    while True:
+        r = api("GET", "/users/me/calendarList", {"maxResults": 250, **({"pageToken": page} if page else {})})
+        cals += r.get("items", [])
+        page = r.get("nextPageToken")
+        if not page:
+            break
+    now = dt.datetime.now(dt.timezone.utc)
+    lo, hi = iso(now - dt.timedelta(days=PAST_DAYS)), iso(now + dt.timedelta(days=FUTURE_DAYS))
+    events = []
+    for cal in cals:
+        if cal.get("hidden") or not cal.get("selected", True):
+            continue
+        page = None
+        while True:
+            params = {"timeMin": lo, "timeMax": hi, "singleEvents": "true", "orderBy": "startTime",
+                      "maxResults": 2500, "timeZone": local_tz()}
+            if page:
+                params["pageToken"] = page
+            r = api("GET", f"/calendars/{urllib.parse.quote(cal['id'], safe='')}/events", params)
+            events += [slim(ev, cal) for ev in r.get("items", []) if ev.get("status") != "cancelled"]
+            page = r.get("nextPageToken")
+            if not page:
+                break
+    events.sort(key=lambda e: (e["start"] or "", e["summary"]))
+    primary = next((c for c in cals if c.get("primary")), {})
+    data = {
+        "ts": int(time.time()), "account": primary.get("id", ""), "timeZone": primary.get("timeZone") or local_tz(),
+        "calendars": [{"id": c["id"], "summary": c.get("summaryOverride") or c.get("summary", ""),
+                       "color": c.get("backgroundColor", "#888888"), "primary": bool(c.get("primary")),
+                       "canEdit": c.get("accessRole") in ("owner", "writer"),
+                       "shown": not c.get("hidden") and c.get("selected", True)} for c in cals],
+        "events": events,
+    }
+    write_json(CACHE, data)
+    return data
+
+
+def events(max_age=None):
+    data = read_json(CACHE)
+    configured = CLIENT.exists() and TOKEN.exists()
+    err = ""
+    if configured and (data is None or (max_age is not None and time.time() - data.get("ts", 0) > max_age)):
+        try:
+            data = sync()
+        except NeedsSetup as e:
+            err, configured = str(e), False
+        except Exception as e:  # noqa: BLE001 - offline: serve the cache
+            err = str(e)[:200]
+    out = data or {"ts": 0, "account": "", "calendars": [], "events": []}
+    return dict(out, ok=True, configured=configured, error=err)
+
+
+# --------------------------------------------------------------------------- write
+
+def build_event(s, tz):
+    """Calendar API body from the panel's form (local date/times, all-day end is exclusive)."""
+    summary = (s.get("summary") or "").strip()
+    if not summary:
+        raise RuntimeError("the event needs a title")
+    date = dt.date.fromisoformat(s["date"])
+    body = {"summary": summary}
+    if s.get("location"):
+        body["location"] = s["location"]
+    if s.get("description"):
+        body["description"] = s["description"]
+    if s.get("allDay"):
+        end_date = dt.date.fromisoformat(s["endDate"]) if s.get("endDate") else date
+        body["start"] = {"date": date.isoformat()}
+        body["end"] = {"date": (end_date + dt.timedelta(days=1)).isoformat()}
+    else:
+        start = dt.datetime.combine(date, dt.time.fromisoformat(s["start"]))
+        end = dt.datetime.combine(date, dt.time.fromisoformat(s["end"])) if s.get("end") else start + dt.timedelta(hours=1)
+        if end <= start:
+            end += dt.timedelta(days=1)   # 23:00 → 01:00 ends the next day
+        body["start"] = {"dateTime": start.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": tz}
+        body["end"] = {"dateTime": end.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": tz}
+    if s.get("reminder") not in (None, "", "default"):
+        mins = int(s["reminder"])
+        body["reminders"] = {"useDefault": False, "overrides": [{"method": "popup", "minutes": mins}] if mins >= 0 else []}
+    return body
+
+
+def add(spec):
+    s = json.loads(spec)
+    cal = s.get("calendarId") or "primary"
+    body = build_event(s, local_tz())
+    ev = api("POST", f"/calendars/{urllib.parse.quote(cal, safe='')}/events", body=body)
+    sync()
+    return {"ok": True, "id": ev.get("id"), "summary": body["summary"], "link": ev.get("htmlLink", "")}
+
+
+def delete(cal, event_id, series=False):
+    if series:
+        ev = api("GET", f"/calendars/{urllib.parse.quote(cal, safe='')}/events/{urllib.parse.quote(event_id, safe='')}")
+        event_id = ev.get("recurringEventId") or event_id
+    api("DELETE", f"/calendars/{urllib.parse.quote(cal, safe='')}/events/{urllib.parse.quote(event_id, safe='')}")
+    sync()
+    return {"ok": True}
+
+
+def logout():
+    tok = read_json(TOKEN)
+    if tok and tok.get("refresh_token"):
+        try:
+            post_form(REVOKE_URL, {"token": tok["refresh_token"]})
+        except Exception:  # noqa: BLE001 - already revoked or offline: forget it anyway
+            pass
+    TOKEN.unlink(missing_ok=True)
+    CACHE.unlink(missing_ok=True)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- reminders
+
+def parse_start(ev):
+    s = ev["start"]
+    if ev["allDay"]:
+        return dt.datetime.combine(dt.date.fromisoformat(s), dt.time(9, 0)).astimezone()
+    return dt.datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone()
+
+
+def due_reminders(evs, now, notified):
+    """(key, event, minutes) for every popup reminder whose time fell in the last 2 minutes."""
+    out = []
+    for ev in evs:
+        try:
+            start = parse_start(ev)
+        except (ValueError, TypeError):
+            continue
+        for m in ev.get("reminders") or []:
+            at = start - dt.timedelta(minutes=m)
+            key = f"{ev['calendarId']}|{ev['id']}|{m}"
+            if at <= now < at + dt.timedelta(minutes=2) and key not in notified:
+                out.append((key, ev, m))
+    return out
+
+
+def tick():
+    data = read_json(CACHE)
+    if CLIENT.exists() and TOKEN.exists() and (not data or time.time() - data.get("ts", 0) > SYNC_EVERY):
+        try:
+            data = sync()
+        except Exception:  # noqa: BLE001 - offline: remind from the cache
+            pass
+    if not data:
+        return {"ok": True}
+    now = dt.datetime.now().astimezone()
+    notified = read_json(NOTIFIED, {})
+    for key, ev, m in due_reminders(data["events"], now, notified):
+        when = "now" if m == 0 else f"in {m} min" if m < 60 else f"in {m // 60} h" if m < 1440 else f"in {m // 1440} day(s)"
+        start = parse_start(ev)
+        body = ("All day" if ev["allDay"] else start.strftime("%H:%M")) + (" · " + ev["location"] if ev["location"] else "")
+        subprocess.run(["notify-send", "-a", "Google Calendar", "-i", "x-office-calendar",
+                        f"{ev['summary']} — {when}", body], capture_output=True)
+        notified[key] = int(time.time())
+    cutoff = time.time() - 3 * 86400
+    write_json(NOTIFIED, {k: v for k, v in notified.items() if v > cutoff})
+    return {"ok": True}
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    cmd, args = argv[0], argv[1:]
+    if cmd == "setup":
+        return setup()
+    try:
+        if cmd == "status":
+            d = read_json(CACHE) or {}
+            res = {"ok": True, "configured": CLIENT.exists() and TOKEN.exists(), "client": CLIENT.exists(),
+                   "account": d.get("account", ""), "calendars": d.get("calendars", []), "lastSync": d.get("ts", 0)}
+        elif cmd == "sync":
+            d = sync()
+            res = {"ok": True, "events": len(d["events"]), "calendars": len(d["calendars"])}
+        elif cmd == "events":
+            max_age = int(args[args.index("--max-age") + 1]) if "--max-age" in args else None
+            res = events(max_age)
+        elif cmd == "add":
+            res = add(args[0])
+        elif cmd == "delete":
+            res = delete(args[0], args[1], series="--series" in args)
+        elif cmd == "tick":
+            res = tick()
+        elif cmd == "logout":
+            res = logout()
+        else:
+            print(__doc__, file=sys.stderr)
+            return 3
+    except NeedsSetup as e:
+        res = {"ok": False, "needsSetup": True, "error": str(e)}
+    except Exception as e:  # noqa: BLE001 - the panel shows the message
+        res = {"ok": False, "error": str(e)}
+    print(json.dumps(res))
+    return 0 if res.get("ok") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

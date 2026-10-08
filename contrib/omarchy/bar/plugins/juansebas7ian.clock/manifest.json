@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.clock",
+  "name": "Calendar",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "description": "Omarchy clock with Google Calendar: events on the month grid, the day and the agenda, new events and deleting them, desktop reminders.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Calendar",
+    "description": "Left = calendar with Google Calendar · right = label format · middle = timezone",
+    "category": "Time",
+    "allowMultiple": false
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.clock"
+  }
+}

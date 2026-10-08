@@ -1,0 +1,8 @@
+[Unit]
+Description=Google Calendar: sync every 5 min and desktop reminders (omarchy-gcal tick)
+After=graphical-session.target network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omarchy-gcal tick
+Nice=10
