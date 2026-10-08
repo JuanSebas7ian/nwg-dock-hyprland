@@ -91,12 +91,34 @@ def log(*a):
   print("omarchy-freeze-guard:", *a, file=sys.stderr, flush=True)
 
 
+POSITIVE = ("probeEvery", "probeTimeout", "renderTimeout", "shellEvery", "shellPanelEvery")
+
+
 def config():
-  cfg = dict(DEFAULTS)
+  """Defaults, overridden by the valid numbers in the config file. A bad file or
+  value is ignored, never fatal: the guard must keep running whatever is there."""
+  cfg = {k: float(v) for k, v in DEFAULTS.items()}
   try:
-    cfg.update(json.loads(CONFIG.read_text()))
+    user = json.loads(CONFIG.read_text())
   except (OSError, ValueError):
-    pass
+    return cfg
+  if not isinstance(user, dict):
+    log(f"{CONFIG}: not a JSON object, using defaults")
+    return cfg
+  for k, v in user.items():
+    if k not in DEFAULTS:
+      log(f"{CONFIG}: unknown key {k!r} ignored")
+      continue
+    try:
+      if isinstance(v, str):
+        raise ValueError
+      f = float(v)
+      if not (0 <= f < float("inf")) or (k in POSITIVE and f <= 0):
+        raise ValueError
+    except (TypeError, ValueError):
+      log(f"{CONFIG}: {k}={v!r} is not valid, keeping {cfg[k]:g}")
+      continue
+    cfg[k] = f
   return cfg
 
 
@@ -684,7 +706,8 @@ class Guard:
                   + (" with a panel open (keyboard and clicks captured)" if panel else ""))
     ok, out = restart_shell()
     self.shell_restarts.append(t)
-    self.shell_fail, self.shell_ok_seen = 0, ok
+    # Keep watching even if it did not come back: the next misses try again (rate limited).
+    self.shell_fail, self.shell_ok_seen = 0, True
     note(path, f"ACTION: shell killed and relaunched -> {'answers again' if ok else 'still not answering'}\n{out}")
     log("shell restarted:", "ok" if ok else "failed")
     notify("The bar/shell was frozen", ("Restarted it." if ok else "Restart did not help.") + f"\nReport: {path}",
