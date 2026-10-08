@@ -41,6 +41,11 @@ class Gcal(unittest.TestCase):
     b = gcal.build_event({"summary": "a", "date": "2026-10-08", "start": "09:00", "reminder": "-1"}, "UTC")
     self.assertEqual(b["reminders"], {"useDefault": False, "overrides": []})
 
+  def test_secret_pasted_twice_or_with_spaces(self):
+    self.assertEqual(gcal.clean_secret("GOCSPX-abcGOCSPX-abcGOCSPX-abc"), "GOCSPX-abc")
+    self.assertEqual(gcal.clean_secret(" GOCSPX-abc \n"), "GOCSPX-abc")
+    self.assertEqual(gcal.clean_secret("GOCSPX-abcGOCSPX-xyz"), "GOCSPX-abcGOCSPX-xyz")
+
   def test_title_required(self):
     with self.assertRaises(RuntimeError):
       gcal.build_event({"summary": "  ", "date": "2026-10-08", "start": "09:00"}, "UTC")

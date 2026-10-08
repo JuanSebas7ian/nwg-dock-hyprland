@@ -131,6 +131,36 @@ def api(method, path, params=None, body=None):
         raise RuntimeError(f"Google Calendar: {e.code} {detail}")
 
 
+def clean_secret(raw):
+    """A hidden prompt hides double pastes: 'GOCSPX-abcGOCSPX-abc' → 'GOCSPX-abc'."""
+    s = "".join(raw.split())
+    parts = s.split("GOCSPX-")
+    if s.startswith("GOCSPX-") and len(parts) > 2 and len(set(parts[1:])) == 1:
+        return "GOCSPX-" + parts[1]
+    return s
+
+
+def setup_main():
+    """Keep the terminal open on any outcome: it closes as soon as the program ends."""
+    try:
+        rc = setup()
+    except SystemExit as e:
+        if e.code not in (None, 0):
+            print(f"\nERROR: {e.code}")
+        rc = 0 if e.code in (None, 0) else 1
+    except Exception as e:  # noqa: BLE001 - show it, do not vanish
+        print(f"\nERROR: {e}")
+        if isinstance(e, urllib.error.HTTPError):
+            print(e.read().decode(errors="replace")[:500])
+        rc = 1
+    if sys.stdin.isatty():
+        try:
+            input("\nPress Enter to close…")
+        except EOFError:
+            pass
+    return rc
+
+
 def setup():
     """Interactive: store the OAuth client, then the loopback sign-in with PKCE."""
     print(__doc__.split("\n\n")[0])
@@ -152,9 +182,10 @@ Google Calendar: your own OAuth client (once, ~5 minutes, free)
         if not cid.endswith(".apps.googleusercontent.com"):
             sys.exit("That does not look like a Google client ID.")
         import getpass
-        secret = getpass.getpass("Client secret (hidden): ").strip()
+        secret = clean_secret(getpass.getpass("Client secret (hidden, paste once): "))
         if not secret:
             sys.exit("The secret cannot be empty.")
+        print(f"Secret received: {secret[:7]}…{secret[-3:]} ({len(secret)} characters)")
         client = {"client_id": cid, "client_secret": secret}
         write_json(CLIENT, client)
 
@@ -400,7 +431,7 @@ def main(argv):
         return 0
     cmd, args = argv[0], argv[1:]
     if cmd == "setup":
-        return setup()
+        return setup_main()
     try:
         if cmd == "status":
             d = read_json(CACHE) or {}
