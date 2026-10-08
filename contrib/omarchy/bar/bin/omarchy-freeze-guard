@@ -34,9 +34,12 @@ Rescue ladder while Hyprland answers but no frame comes out (screens on):
   If Hyprland is in state D (inside the kernel, usually the GPU driver) no
   signal can reach it: only SysRq or a reset helps, and the report says so.
 
-A shell that stops answering for `shellFailures` checks in a row is restarted
-with `omarchy restart shell` (it re-locks the session if it was locked); at
-most 3 times in 15 min. Memory thrashing is left to systemd-oomd (Omarchy
+A shell that stops answering for `shellFailures` checks in a row is killed
+and relaunched (and the session re-locked if it was locked); at most 3 times
+in 15 min. While one of its panels is open it holds the keyboard and every
+click, so a hung shell then means no typing anywhere: it is checked every
+`shellPanelEvery` s and replaced after `shellPanelFailures` misses (the
+2026-10-08 09:40 freeze: a layout loop in the Cloud panel spun the shell). Memory thrashing is left to systemd-oomd (Omarchy
 configures it: 50 % stall for 20 s kills the app).
 
 Always on: an fsynced copy of the hyprland.log tail (the real one lives in
@@ -46,7 +49,8 @@ boot ended (clean, reset, or never woke from suspend).
 Config (optional): ~/.config/omarchy-freeze-guard/config.json
   {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 10, "xwaylandAfter": 20,
    "recoverAfter": 30, "shellEvery": 10, "shellFailures": 3, "renderEvery": 4,
-   "renderTimeout": 3, "renderKickAfter": 6, "renderDpmsAfter": 12, "renderRecoverAfter": 30}
+   "renderTimeout": 3, "renderKickAfter": 6, "renderDpmsAfter": 12, "renderRecoverAfter": 30,
+   "shellPanelEvery": 3, "shellPanelFailures": 2}
   Any *After / renderEvery / shellFailures = 0 turns that step off.
 """
 
@@ -70,7 +74,7 @@ RUN = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
 DEFAULTS = {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 8, "xwaylandAfter": 12,
             "recoverAfter": 30, "shellEvery": 10, "shellFailures": 3,
             "renderEvery": 4, "renderTimeout": 3, "renderKickAfter": 6, "renderDpmsAfter": 12,
-            "renderRecoverAfter": 30}
+            "renderRecoverAfter": 30, "shellPanelEvery": 3, "shellPanelFailures": 2}
 SHELL_RESTARTS = (3, 900)  # at most 3 shell restarts in 15 min
 KEEP_REPORTS = 20
 KEEP_LOGS = 5
@@ -306,9 +310,56 @@ def shell_ping():
     return False
 
 
+def shell_pids():
+  """Quickshell instances running the Omarchy shell."""
+  out = []
+  for pid in pids_named("quickshell"):
+    if "/shell" in read(f"/proc/{pid}/cmdline").replace("\0", " "):
+      out.append(pid)
+  return out
+
+
+def keyboard_panel_open():
+  """An Omarchy panel is mapped: it owns the keyboard (and clicks) while open."""
+  try:
+    return b"omarchy-keyboard-panel" in hypr_request(b"j/layers", 2)
+  except OSError:
+    return False
+
+
+def session_locked():
+  try:
+    return subprocess.run([omarchy_bin("omarchy-hyprland-session-locked")], timeout=5).returncode == 0
+  except (subprocess.TimeoutExpired, OSError):
+    return False
+
+
 def restart_shell():
-  out = run([omarchy_bin("omarchy-restart-shell")], timeout=60)
-  return shell_ping(), out
+  """Replace a shell that does not answer. `omarchy restart shell` asks the old
+  one to quit over IPC, which a hung shell never reads (09:41: "failed"), so kill
+  it outright: omarchy-launch-shell relaunches a shell that died by a signal."""
+  locked = session_locked()
+  old = shell_pids()
+  lines = [f"shell pids {old}, session {'locked' if locked else 'unlocked'}"]
+  for pid in old:
+    lines.append(f"  {pid} state {proc_state(pid)}\n" + threads(pid))
+    try:
+      os.kill(pid, signal.SIGKILL)
+    except OSError:
+      pass
+  ok = False
+  for i in range(30):
+    time.sleep(0.5)
+    if i == 10 and not shell_pids():  # no supervisor brought it back: launch one
+      run(["hyprctl", "dispatch", 'hl.dsp.exec_cmd("omarchy-launch-shell")'], timeout=5)
+      lines.append("no supervisor relaunch: started omarchy-launch-shell")
+    if shell_pids() and shell_ping():
+      ok = True
+      break
+  if ok and locked:
+    run([omarchy_bin("omarchy-shell"), "lock", "lock"], timeout=10)
+    lines.append("session re-locked")
+  return ok, "\n".join(lines)
 
 
 def submap_reset():
@@ -609,7 +660,10 @@ class Guard:
     sf = self.cfg["shellFailures"]
     if sf <= 0 or t < self.shell_next:
       return
-    self.shell_next = t + self.cfg["shellEvery"]
+    panel = keyboard_panel_open()
+    if panel and self.cfg["shellPanelFailures"] > 0:
+      sf = self.cfg["shellPanelFailures"]
+    self.shell_next = t + (self.cfg["shellPanelEvery"] if panel else self.cfg["shellEvery"])
     if shell_ping():
       self.shell_ok_seen, self.shell_fail = True, 0
       return
@@ -624,11 +678,12 @@ class Guard:
         notify("The Omarchy shell keeps freezing", "Restarted 3 times in 15 min; leaving it alone.\n"
                "Try: omarchy restart shell", "critical")
       return
-    path = report(f"the Omarchy shell has not answered {self.shell_fail} checks in a row")
+    path = report(f"the Omarchy shell has not answered {self.shell_fail} checks in a row"
+                  + (" with a panel open (keyboard and clicks captured)" if panel else ""))
     ok, out = restart_shell()
     self.shell_restarts.append(t)
     self.shell_fail, self.shell_ok_seen = 0, ok
-    note(path, f"ACTION: omarchy restart shell -> {'answers again' if ok else 'still not answering'}\n{out}")
+    note(path, f"ACTION: shell killed and relaunched -> {'answers again' if ok else 'still not answering'}\n{out}")
     log("shell restarted:", "ok" if ok else "failed")
     notify("The bar/shell was frozen", ("Restarted it." if ok else "Restart did not help.") + f"\nReport: {path}",
            "normal" if ok else "critical")

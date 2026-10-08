@@ -297,7 +297,11 @@ Panel {
         Loader {
           id: loader
           // Leave room for the scrollbar so it never covers the value column.
-          width: flick.width - (flick.interactive ? Style.space(12) : 0)
+          // Always leave the scrollbar gutter. Making the width depend on flick.interactive
+          // was a loop: scrollbar on -> narrower -> content (photo grid) shorter -> no
+          // scrollbar -> wider -> taller -> ... The shell spun at 100 % and its panel kept the
+          // keyboard, so nothing could be typed anywhere (2026-10-08 09:40).
+          width: flick.width - Style.space(12)
           onLoaded: item.width = Qt.binding(function() { return loader.width })
         }
       }

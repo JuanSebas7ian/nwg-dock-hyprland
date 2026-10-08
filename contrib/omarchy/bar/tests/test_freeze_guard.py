@@ -127,6 +127,7 @@ class Ladder(unittest.TestCase):
     m.restart_xwayland = lambda pid: self.x_restarts.append(pid) or True
     m.shell_ping = lambda: self.state["shell"].pop(0) if self.state["shell"] else True
     m.restart_shell = lambda: self.shell_restarts.append(1) or (True, "")
+    m.keyboard_panel_open = lambda: self.state.get("panel", False)
     self.frames, self.kicks, self.dpms = [], [], []
     m.screens_on = lambda: self.state.get("screens", True)
     m.render_probe = lambda timeout: self.frames.pop(0) if self.frames else None
@@ -234,6 +235,35 @@ class Ladder(unittest.TestCase):
     g, t, out = self.drive([None] * 30, every=4)
     self.assertIsNone(out)
     self.assertEqual((self.kicks, self.recovers), ([], []))
+
+
+  def test_hung_shell_with_panel_open_is_replaced_fast(self):
+    # 2026-10-08 09:40: the Cloud panel was open, the shell spun, nothing could be typed.
+    self.state["panel"] = True
+    self.state["shell"] = [True, False, False]
+    g, t, out = self.drive([None] * 8, every=1)
+    # ok at 1 s, misses at 4 s and 7 s (checks every 3 s, 2 misses) -> replaced at 7 s, not 30 s
+    self.assertEqual(self.shell_restarts, [1])
+
+
+class ShellKill(unittest.TestCase):
+  def test_hung_shell_is_killed_not_asked(self):
+    m = load(tempfile.mkdtemp())
+    killed, pings = [], [False, False, True]
+    alive = {"pids": [500]}
+    m.session_locked = lambda: False
+    m.shell_pids = lambda: list(alive["pids"])
+    m.proc_state = lambda pid: "R"
+    m.threads = lambda pid: ""
+    m.time = types.SimpleNamespace(sleep=lambda s: None)
+    m.shell_ping = lambda: pings.pop(0) if pings else True
+    def kill(pid, sig):
+      killed.append((pid, sig))
+      alive["pids"] = [501]  # the launcher relaunched it
+    m.os = types.SimpleNamespace(kill=kill)
+    ok, out = m.restart_shell()
+    self.assertTrue(ok)
+    self.assertEqual(killed, [(500, m.signal.SIGKILL)])
 
 
 if __name__ == "__main__":
