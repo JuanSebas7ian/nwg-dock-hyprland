@@ -14,6 +14,7 @@ Column {
 
   readonly property var st: vpn ? vpn.st : null
   readonly property int inbox: vpn ? vpn.inbox.length : 0
+  readonly property var key: vpn ? vpn.ssKey : null
 
   // ---- import
   Notice {
@@ -33,14 +34,14 @@ Column {
     onClicked: acc.vpn.run("import", ["import"])
   }
 
-  // ---- Surfshark
+  // ---- Surfshark: key made here (recommended) or taken from a downloaded .conf
   Section { title: "SURFSHARK" }
   RowLayout {
     width: parent.width
     spacing: Style.space(10)
     Text {
-      text: acc.vpn && acc.vpn.surfsharkReady ? "✓" : "!"
-      color: acc.vpn && acc.vpn.surfsharkReady ? Theme.foreground : Theme.urgent
+      text: acc.key && acc.key.verified ? "✓" : acc.key ? "2" : "1"
+      color: acc.key && acc.key.verified ? Theme.foreground : Theme.urgent
       font.family: Theme.fontFamily
       font.pixelSize: Style.font.body
       font.bold: true
@@ -49,7 +50,9 @@ Column {
       Layout.fillWidth: true
       spacing: 0
       Text {
-        text: acc.vpn && acc.vpn.surfsharkReady ? "WireGuard key installed" : "Not set up yet"
+        text: !acc.key ? "Step 1 · Create your WireGuard key"
+          : !acc.key.verified ? "Step 2 · Register the public key"
+          : "Key working"
         color: Theme.foreground
         font.family: Theme.fontFamily
         font.pixelSize: Style.font.bodySmall
@@ -57,24 +60,108 @@ Column {
       }
       Text {
         Layout.fillWidth: true
-        text: acc.st ? acc.st.setup.surfsharkLocations + " locations available with one key" : ""
+        text: !acc.key ? "Made on this PC: the private key never leaves it"
+          : !acc.key.verified ? "Surfshark must know it before the first connection"
+          : (acc.key.source === "generated" ? "Created here" : "From a downloaded .conf") + (acc.key.created ? " " + Theme.ago(acc.key.created) : "")
+            + " · " + (acc.st ? acc.st.setup.surfsharkLocations : "") + " locations"
         color: Theme.dim
         font.family: Theme.fontFamily
         font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+      }
+    }
+  }
+
+  // Step 1
+  Button {
+    visible: !acc.key
+    width: parent.width
+    text: acc.vpn && acc.vpn.busy === "keygen" ? "Creating…" : "Create the key on this PC"
+    iconText: "󰌆"
+    bordered: true
+    selected: true
+    foreground: Theme.foreground
+    fontFamily: Theme.fontFamily
+    onClicked: acc.vpn.run("keygen", ["surfshark-keygen"])
+  }
+  Line {
+    visible: !acc.key
+    small: true
+    tone: "dim"
+    text: "Or download any .conf at my.surfshark.com → VPN → Manual setup → WireGuard and import it from ~/Downloads (above)."
+  }
+
+  // Public key (step 2 and afterwards)
+  Rectangle {
+    visible: !!acc.key && acc.key.publicKey !== ""
+    width: parent.width
+    implicitHeight: keyCol.implicitHeight + Style.space(16)
+    radius: Style.cornerRadius
+    color: Qt.alpha(Theme.foreground, 0.06)
+    border.width: 1
+    border.color: Qt.alpha(Theme.foreground, acc.key && !acc.key.verified ? 0.4 : 0.15)
+    ColumnLayout {
+      id: keyCol
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.margins: Style.space(10)
+      spacing: Style.space(6)
+      Text { text: "PUBLIC KEY"; color: Theme.dim; font.family: Theme.fontFamily; font.pixelSize: Style.font.caption; font.bold: true }
+      TextEdit {
+        Layout.fillWidth: true
+        text: acc.key ? acc.key.publicKey : ""
+        readOnly: true
+        selectByMouse: true
+        wrapMode: TextEdit.WrapAnywhere
+        color: Theme.foreground
+        font.family: Theme.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+      RowLayout {
+        Layout.fillWidth: true
+        spacing: Style.space(6)
+        Button {
+          Layout.fillWidth: true
+          text: "Copy"
+          iconText: "󰆏"
+          bordered: true
+          foreground: Theme.foreground
+          fontFamily: Theme.fontFamily
+          fontSize: Style.font.caption
+          onClicked: acc.vpn.copy(acc.key.publicKey)
+        }
+        Button {
+          Layout.fillWidth: true
+          text: "Open Surfshark"
+          iconText: "󰖟"
+          bordered: true
+          foreground: Theme.foreground
+          fontFamily: Theme.fontFamily
+          fontSize: Style.font.caption
+          onClicked: acc.vpn.openUrl(acc.st.web.surfshark)
+        }
       }
     }
   }
   Line {
-    visible: !!acc.vpn && !acc.vpn.surfsharkReady
+    visible: !!acc.key && !acc.key.verified
     small: true
     tone: "dim"
-    text: "1. Open my.surfshark.com → VPN → Manual setup → Desktop or mobile → WireGuard.\n2. “I don't have a key pair” → name it → Generate.\n3. Choose any location and download the .conf.\n4. Import it here. That one key unlocks every location in the picker."
+    text: "At my.surfshark.com → VPN → Manual setup → Desktop or mobile → WireGuard → “I have a key pair”: name it (e.g. omarchy), paste the public key, Save. No file to download. Then test it:"
   }
-  ActionRow {
-    icon: "󰖟"
-    label: acc.vpn && acc.vpn.surfsharkReady ? "Manage keys on my.surfshark.com" : "Get the WireGuard config"
-    hint: "my.surfshark.com → VPN → Manual setup"
-    onActivated: acc.vpn.openUrl(acc.st.web.surfshark)
+  // Step 3
+  Button {
+    visible: !!acc.key && !acc.key.verified
+    width: parent.width
+    readonly property var loc: acc.vpn ? acc.vpn.testLocation() : null
+    text: acc.vpn && acc.vpn.busy !== "" && acc.vpn.busy !== "import" ? "Testing…" : "Step 3 · Test: connect to " + (loc ? acc.vpn.locLabel(loc) : "a location")
+    iconText: acc.vpn ? acc.vpn.glyphOn : ""
+    bordered: true
+    selected: true
+    foreground: Theme.foreground
+    fontFamily: Theme.fontFamily
+    onClicked: if (loc) acc.vpn.connectTo(loc)
   }
   ActionRow {
     visible: !!acc.st && acc.st.apps.surfshark.installed
@@ -84,10 +171,10 @@ Column {
     onActivated: acc.vpn.openApp("surfshark")
   }
   ActionRow {
-    visible: !!acc.vpn && acc.vpn.surfsharkReady
+    visible: !!acc.key
     icon: "󰆴"
     label: "Forget the Surfshark key"
-    hint: "Removes the key and its profile from this PC (revoke it on the website too)"
+    hint: "Removes it from this PC; delete it at my.surfshark.com too"
     onActivated: acc.vpn.run("forget", ["forget-surfshark"])
   }
 

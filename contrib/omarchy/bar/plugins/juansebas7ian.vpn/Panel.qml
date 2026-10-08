@@ -47,6 +47,7 @@ Panel {
   property bool messageIsError: false
   property string provider: "surfshark"   // provider shown in the picker
   property var selected: null             // location to connect when nothing is active
+  property var leakResult: null
 
   readonly property bool connected: !!st && st.connected
   readonly property var current: connected ? st.current : null
@@ -56,6 +57,7 @@ Panel {
   readonly property bool leak: !!st && st.ipv6Leak
   readonly property var inbox: st ? (st.inbox || []) : []
   readonly property bool surfsharkReady: !!st && st.setup.surfshark
+  readonly property var ssKey: st ? st.setup.surfsharkKey : null
   readonly property var protonServers: st ? st.setup.proton : []
   // What the big button connects to: the pick, else the last one used.
   readonly property var target: selected ? selected : (st && st.last && st.last.location ? st.last.location : null)
@@ -86,6 +88,21 @@ Panel {
     go("home")
   }
   function disconnect() { run("down", ["down"]) }
+  function runLeakTest() {
+    if (leakProc.running) return
+    leakResult = null
+    leakProc.command = [ctl, "leaktest"]
+    leakProc.running = true
+  }
+  function copy(text) { root.bar.run("wl-copy " + root.bar.shellQuote(text)); message = "Copied to the clipboard."; messageIsError = false }
+  // A location to try a fresh key with: the last one, else Bogotá, else the least loaded.
+  function testLocation() {
+    if (target && target.provider === "surfshark") return target
+    var all = locs ? locs.surfshark : []
+    var bog = all.filter(function(l) { return l.id.indexOf("co-bog") === 0 })[0]
+    if (bog) return bog
+    return all.slice().sort(function(a, b) { return (a.load || 100) - (b.load || 100) })[0] || null
+  }
   function primary() { if (connected) disconnect(); else connectTo(target) }
   function openApp(bin) { root.bar.run("uwsm-app -- " + bin); root.close() }
   function openUrl(u) { root.bar.run("xdg-open " + u); root.close() }
@@ -112,7 +129,7 @@ Panel {
   }
 
   onOpenedChanged: {
-    if (opened) { refresh(false); Qt.callLater(function() { keyCatcher.forceActiveFocus() }) }
+    if (opened) { refresh(false); loadLocations(false); Qt.callLater(function() { keyCatcher.forceActiveFocus() }) }
     else { message = ""; screen = "home" }
   }
   onScreenChanged: loadScreen()
@@ -140,6 +157,13 @@ Panel {
     }
   }
   Process {
+    id: leakProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { try { root.leakResult = JSON.parse(text) } catch (e) { root.leakResult = { ok: false, error: "leak test failed" } } }
+    }
+  }
+  Process {
     id: actionProc
     stdout: StdioCollector {
       waitForEnd: true
@@ -147,6 +171,10 @@ Panel {
         try {
           var r = JSON.parse(text)
           if (r.ok === false) { root.message = r.error || "failed"; root.messageIsError = true }
+          else if (r.publicKey) {
+            root.message = r.copied ? "Public key copied. Paste it at my.surfshark.com (step 2)." : "Key created. Copy the public key (step 2)."
+            root.messageIsError = false
+          }
           else if (r.imported) {
             root.message = "Imported: " + r.imported.map(function(i) { return i.name }).join(", ")
             root.messageIsError = false

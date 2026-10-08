@@ -16,6 +16,8 @@ Column {
   readonly property var loc: on ? vpn.currentLoc : null
   readonly property var ip4: vpn ? vpn.ip4 : null
   readonly property var ip6: vpn ? vpn.ip6 : null
+  readonly property var lr: vpn ? vpn.leakResult : null
+  property bool testing: false
 
   // ---- header card
   RowLayout {
@@ -73,6 +75,31 @@ Column {
   }
   Caption {
     text: det.vpn && det.vpn.st ? "Checked " + Theme.ago(det.vpn.st.ip.ts) + " via am.i.mullvad.net · r to check again" : ""
+  }
+
+  // ---- leak test (as Surfshark's guide recommends after connecting)
+  Section { title: "LEAK TEST" }
+  ActionRow {
+    icon: "󰒃"
+    label: det.vpn && det.vpn.leakResult === null && det.testing ? "Testing…" : "Run the IP + DNS leak test"
+    hint: "Which addresses and DNS resolvers websites see (bash.ws)"
+    onActivated: { det.testing = true; det.vpn.runLeakTest() }
+  }
+  Notice {
+    visible: !!det.lr
+    level: !det.lr ? "info" : det.lr.ok === false || (det.lr.leaks && det.lr.leaks.length > 0) ? "crit" : "info"
+    text: !det.lr ? "" : det.lr.ok === false ? det.lr.error
+      : (det.lr.leaks.length > 0 ? "✗ " : det.lr.connected ? "✓ " : "") + det.lr.verdict.charAt(0).toUpperCase() + det.lr.verdict.slice(1)
+  }
+  Repeater {
+    model: det.lr && det.lr.ok !== false ? det.lr.ips.concat(det.lr.dns) : []
+    Pair {
+      required property var modelData
+      small: true
+      hot: !!det.lr && det.lr.leaks.some(function(l) { return l.ip === modelData.ip })
+      label: (modelData.type === "dns" ? "DNS " : "IP ") + modelData.ip
+      value: (modelData.org || "") + (modelData.country ? " · " + modelData.country : "")
+    }
   }
 
   Section { title: "ACTIONS" }
