@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Instala los extras de la barra de Omarchy: los widgets Spotify, Nube (Google Drive, iCloud Drive,
 # Google Fotos y Dropbox en pestañas), Ollama y Hardware (resumen, CPU, GPU, discos, drivers y
-# periféricos en pestañas), más los colectores de uso de Antigravity y opencode para el panel de agentes.
+# periféricos en pestañas) y VPN (Surfshark + Proton VPN Free), más los colectores de uso de Antigravity y opencode para el panel de agentes.
 #
 # Uso, desde la raíz del repositorio:
 #   contrib/omarchy/bar/install.sh            # instala o actualiza (idempotente)
@@ -28,13 +28,14 @@ WIDGETS=(
   "juansebas7ian.cloud:juansebas7ian.spotify"
   "juansebas7ian.ollama:omarchy.agents"
   "juansebas7ian.hardware:juansebas7ian.ollama"
+  "juansebas7ian.vpn:omarchy.network"
 )
 # Widgets que Nube y Hardware reemplazaron (2026-10-07): se quitan al instalar, con respaldo.
 RETIRED=(
   juansebas7ian.gdrive juansebas7ian.icloud juansebas7ian.gphotos
   juansebas7ian.sysmon juansebas7ian.cooling juansebas7ian.storage juansebas7ian.nvidia juansebas7ian.drivers
 )
-COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.vpn",
+  "name": "VPN",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "Surfshark and Proton VPN (Free) in one panel: connect a server with one click (WireGuard profiles in NetworkManager, no root), public IP and country, DNS and IPv6 leak check, import configs from ~/Downloads, open the official apps.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "Panel.qml" },
+  "barWidget": {
+    "displayName": "VPN",
+    "description": "Left = panel · right = connect the last server / disconnect. Filled shield = connected; red = IPv6 leaking around the tunnel.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

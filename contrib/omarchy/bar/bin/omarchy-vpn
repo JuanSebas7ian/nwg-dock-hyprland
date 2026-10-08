@@ -1,0 +1,389 @@
+#!/usr/bin/python3 -B
+"""omarchy-vpn: Surfshark and Proton VPN (Free) through NetworkManager, for the VPN bar widget.
+
+Each server is a WireGuard profile in NetworkManager, imported from the .conf that the provider's
+web page generates (Surfshark: my.surfshark.com → VPN → Manual setup; Proton: account.protonvpn.com →
+Downloads → WireGuard). Activating a profile needs no root (polkit grants network-control to the
+active session). The official apps (surfshark, protonvpn-app) keep working alongside: they create
+their own NetworkManager connections, which `status` also reports.
+
+  omarchy-vpn status                  JSON: active VPN, profiles by provider, apps, public IP
+  omarchy-vpn up <uuid|name>          connect (first disconnects any other VPN)
+  omarchy-vpn down                    disconnect every VPN
+  omarchy-vpn toggle                  down if connected, else the last profile used
+  omarchy-vpn import [file.conf ...]  import configs (none = the WireGuard .conf files in ~/Downloads)
+  omarchy-vpn delete <uuid>           remove an imported profile
+  omarchy-vpn ip [--refresh]          public IPv4/IPv6 as seen from the internet
+
+Imported profiles: no autoconnect, DNS exclusive to the tunnel (dns-priority -50, no DNS leaks) and,
+when the provider gives no IPv6 (Surfshark), an IPv6 blackhole through the tunnel so IPv6 traffic
+cannot leak around it. The original .conf (it holds the private key) moves to
+~/.config/omarchy-vpn/configs/ with mode 0600.
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+HOME = Path.home()
+CONF_DIR = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "omarchy-vpn"
+CONFIGS = CONF_DIR / "configs"
+STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "omarchy-vpn"
+IP_CACHE = STATE / "ip.json"
+LAST = STATE / "last.json"
+DOWNLOADS = HOME / "Downloads"
+
+PROVIDERS = {
+    "surfshark": {"label": "Surfshark", "prefix": "ss", "app": "surfshark", "web": "https://my.surfshark.com/vpn/manual-setup/main/wireguard"},
+    "proton": {"label": "Proton", "prefix": "pv", "app": "protonvpn-app", "web": "https://account.protonvpn.com/downloads"},
+}
+VPN_TYPES = {"wireguard", "vpn", "tun"}
+# ULA used only to route IPv6 into a tunnel that has none: the provider drops it, apps fall back to IPv4.
+V6_BLACKHOLE = "fd00:5f5f:5f5f::2/128"
+IP_TTL = 300
+
+
+def nmcli(*args, check=True):
+    r = subprocess.run(["nmcli", *args], capture_output=True, text=True, env={**os.environ, "LC_ALL": "C"})
+    if check and r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip() or f"nmcli {args[0]} failed")
+    return r.stdout
+
+
+def split_terse(line):
+    # nmcli -t escapes ':' as '\:'
+    return [p.replace("\\:", ":") for p in re.split(r"(?<!\\):", line)]
+
+
+def provider_of(name):
+    n = name.lower()
+    if n.startswith("surfshark") or "surfshark" in n:
+        return "surfshark"
+    if n.startswith("proton") or "proton" in n or n.startswith("pvpn"):
+        return "proton"
+    return "other"
+
+
+def connections():
+    out = []
+    for line in nmcli("-t", "-f", "NAME,UUID,TYPE,DEVICE,ACTIVE,TIMESTAMP", "connection", "show").splitlines():
+        name, uuid, ctype, dev, active, ts = (split_terse(line) + [""] * 6)[:6]
+        ctype = ctype.replace("802-3-ethernet", "ethernet")
+        if ctype not in VPN_TYPES:
+            continue
+        out.append({
+            "name": name, "uuid": uuid, "type": ctype, "device": dev,
+            "active": active == "yes", "lastUsed": int(ts or 0),
+            "provider": provider_of(name), "imported": name.startswith(("Surfshark ", "Proton ")),
+        })
+    out.sort(key=lambda c: c["name"].lower())
+    return out
+
+
+def active_details(c):
+    d = {}
+    for line in nmcli("-t", "-f", "GENERAL.STATE,IP4.ADDRESS,IP4.DNS,IP6.ADDRESS", "connection", "show", c["uuid"], check=False).splitlines():
+        k, _, v = line.partition(":")
+        k = k.split("[")[0]
+        if k == "GENERAL.STATE":
+            d["state"] = v
+        elif v:
+            d.setdefault(k.lower().replace("ip4.", "ipv4_").replace("ip6.", "ipv6_"), []).append(v)
+    if c["type"] == "wireguard":
+        ep = nmcli("-t", "-f", "wireguard.peers", "connection", "show", c["uuid"], check=False)
+        m = re.search(r"endpoint=([^,\s]+)", ep)
+        if m:
+            d["endpoint"] = m.group(1)
+    return d
+
+
+def apps():
+    res = {}
+    for pid, p in PROVIDERS.items():
+        res[pid] = {"installed": shutil.which(p["app"]) is not None, "running": False}
+    for pid, pat in (("surfshark", "/opt/Surfshark/surfshark"), ("proton", "protonvpn-app")):
+        r = subprocess.run(["pgrep", "-f", "-u", str(os.getuid()), pat], capture_output=True)
+        res[pid]["running"] = r.returncode == 0
+    r = subprocess.run(["systemctl", "is-active", "surfsharkd2.service"], capture_output=True, text=True)
+    res["surfshark"]["daemon"] = r.stdout.strip()
+    return res
+
+
+def fetch_json(url, timeout=4):
+    req = urllib.request.Request(url, headers={"User-Agent": "omarchy-vpn"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+
+def public_ip(refresh=False, key=""):
+    """Public address via am.i.mullvad.net (no account, no key). Cached per VPN state (`key`)."""
+    try:
+        cached = json.loads(IP_CACHE.read_text())
+        if not refresh and cached.get("key") == key and time.time() - cached.get("ts", 0) < IP_TTL:
+            return cached
+    except (OSError, ValueError):
+        pass
+    res = {"key": key, "ts": int(time.time())}
+    try:
+        j = fetch_json("https://ipv4.am.i.mullvad.net/json")
+        res["ipv4"] = {k: j.get(k) for k in ("ip", "country", "city", "organization")}
+    except Exception as e:  # noqa: BLE001 - offline, DNS, timeout: report, do not fail
+        res["ipv4Error"] = str(e)[:120]
+    try:
+        j = fetch_json("https://ipv6.am.i.mullvad.net/json", timeout=3)
+        res["ipv6"] = {k: j.get(k) for k in ("ip", "country", "organization")}
+    except Exception:  # noqa: BLE001 - no IPv6 route = nothing can leak over IPv6
+        res["ipv6"] = None
+    STATE.mkdir(parents=True, exist_ok=True)
+    IP_CACHE.write_text(json.dumps(res))
+    return res
+
+
+def status(refresh_ip=False):
+    conns = connections()
+    active = [c for c in conns if c["active"]]
+    for c in active:
+        c.update(active_details(c))
+    key = ",".join(c["uuid"] for c in active)
+    ip = public_ip(refresh_ip, key)
+    # IPv6 leak: a tunnel is up but IPv6 still reaches the internet from the ISP's address.
+    v6 = ip.get("ipv6") or {}
+    v4 = ip.get("ipv4") or {}
+    leak = bool(active and v6.get("ip") and v4.get("organization") and v6.get("organization") != v4.get("organization"))
+    try:
+        last = json.loads(LAST.read_text())
+    except (OSError, ValueError):
+        last = {}
+    by = {p: [c for c in conns if c["provider"] == p] for p in (*PROVIDERS, "other")}
+    return {
+        "connected": bool(active), "active": active, "profiles": by, "apps": apps(),
+        "ip": ip, "ipv6Leak": leak, "last": last,
+        "inbox": [str(p) for p in downloads_candidates()],
+        "web": {p: v["web"] for p, v in PROVIDERS.items()},
+    }
+
+
+def find(ref):
+    for c in connections():
+        if ref in (c["uuid"], c["name"]):
+            return c
+    raise RuntimeError(f"no VPN profile '{ref}'")
+
+
+def down():
+    for c in connections():
+        if c["active"]:
+            nmcli("connection", "down", "uuid", c["uuid"], check=False)
+
+
+def up(ref):
+    c = find(ref)
+    for o in connections():
+        if o["active"] and o["uuid"] != c["uuid"]:
+            nmcli("connection", "down", "uuid", o["uuid"], check=False)
+    nmcli("--wait", "20", "connection", "up", "uuid", c["uuid"])
+    STATE.mkdir(parents=True, exist_ok=True)
+    LAST.write_text(json.dumps({"uuid": c["uuid"], "name": c["name"], "provider": c["provider"]}))
+    return c
+
+
+def toggle():
+    if any(c["active"] for c in connections()):
+        down()
+        return {"ok": True, "action": "down"}
+    try:
+        last = json.loads(LAST.read_text())
+    except (OSError, ValueError):
+        raise RuntimeError("no VPN used yet: pick one in the panel")
+    c = up(last["uuid"])
+    return {"ok": True, "action": "up", "name": c["name"]}
+
+
+# --------------------------------------------------------------------------- import
+
+def parse_conf(text):
+    sec, data = None, {"Interface": {}, "Peer": {}}
+    comments = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("#"):
+            comments.append(line)
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            sec = line[1:-1]
+            continue
+        if "=" in line and sec in data:
+            k, _, v = line.partition("=")
+            data[sec][k.strip()] = v.strip()
+    return data, comments
+
+
+def looks_like_wg(path):
+    try:
+        if path.stat().st_size > 20000:
+            return False
+        d, _ = parse_conf(path.read_text(errors="replace"))
+    except OSError:
+        return False
+    return bool(d["Interface"].get("PrivateKey") and d["Peer"].get("PublicKey") and d["Peer"].get("Endpoint"))
+
+
+def detect_provider(path, data, comments):
+    name = path.name.lower()
+    ep = data["Peer"].get("Endpoint", "").lower()
+    dns = data["Interface"].get("DNS", "")
+    if "surfshark" in name or "surfshark" in ep:
+        return "surfshark"
+    if name.startswith(("wg-", "proton")) or "10.2.0.1" in dns or any("netshield" in c.lower() or "proton" in c.lower() for c in comments):
+        return "proton"
+    return None
+
+
+def location_of(path, provider):
+    stem = path.stem
+    if provider == "surfshark":  # us-nyc.prod.surfshark.com_wg.conf
+        stem = stem.split(".")[0]
+    else:  # wg-US-FREE-12.conf, proton-JP-FREE-3.conf
+        stem = re.sub(r"^(wg|proton|protonvpn)[-_]", "", stem, flags=re.I)
+    return stem.upper().replace("_", "-")
+
+
+def add_v6_blackhole(text, data):
+    """Route IPv6 into the tunnel when the provider has none, so it cannot bypass it."""
+    addrs = data["Interface"].get("Address", "")
+    allowed = data["Peer"].get("AllowedIPs", "")
+    if ":" in addrs or "0.0.0.0/0" not in allowed:
+        return text, False
+    out = []
+    for line in text.splitlines():
+        s = line.strip()
+        if re.match(r"(?i)address\s*=", s):
+            line = f"{line.rstrip()}, {V6_BLACKHOLE}"
+        elif re.match(r"(?i)allowedips\s*=", s) and "::/0" not in s:
+            line = f"{line.rstrip()}, ::/0"
+        out.append(line)
+    return "\n".join(out) + "\n", True
+
+
+def iface_name(provider, location, taken):
+    base = PROVIDERS[provider]["prefix"] + "-" + re.sub(r"[^a-z0-9]", "", location.lower())
+    base = base[:13]
+    name, n = base, 2
+    while name in taken:
+        name = f"{base[:12]}{n}"
+        n += 1
+    return name
+
+
+def import_one(path, provider=None):
+    path = Path(path).expanduser()
+    text = path.read_text()
+    data, comments = parse_conf(text)
+    if not (data["Interface"].get("PrivateKey") and data["Peer"].get("Endpoint")):
+        raise RuntimeError(f"{path.name}: not a WireGuard config")
+    provider = provider or detect_provider(path, data, comments)
+    if provider not in PROVIDERS:
+        raise RuntimeError(f"{path.name}: provider not recognised (use --provider surfshark|proton)")
+    location = location_of(path, provider)
+    conn_name = f"{PROVIDERS[provider]['label']} {location}"
+    existing = {c["name"]: c for c in connections()}
+    if conn_name in existing:
+        nmcli("connection", "delete", "uuid", existing[conn_name]["uuid"])
+    taken = set(subprocess.run(["ls", "/sys/class/net"], capture_output=True, text=True).stdout.split())
+    taken |= {line for line in nmcli("-t", "-f", "connection.interface-name", "connection", "show", check=False).splitlines()}
+    iface = iface_name(provider, location, taken)
+    text2, blackhole = add_v6_blackhole(text, data)
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / f"{iface}.conf"
+        tmp.write_text(text2)
+        tmp.chmod(0o600)
+        out = nmcli("connection", "import", "type", "wireguard", "file", str(tmp))
+    m = re.search(r"\(([0-9a-f-]{36})\)", out)
+    if not m:
+        raise RuntimeError(f"{path.name}: nmcli import gave no uuid: {out.strip()}")
+    uuid = m.group(1)
+    nmcli("connection", "modify", "uuid", uuid,
+          "connection.id", conn_name,
+          "connection.autoconnect", "no",
+          "ipv4.dns-priority", "-50", "ipv6.dns-priority", "-50",
+          "ipv4.dns-search", "~.")
+    CONFIGS.mkdir(parents=True, exist_ok=True)
+    CONF_DIR.chmod(0o700)
+    CONFIGS.chmod(0o700)
+    dest = CONFIGS / path.name
+    if path.resolve() != dest.resolve():
+        shutil.move(str(path), dest)
+    dest.chmod(0o600)
+    return {"name": conn_name, "uuid": uuid, "provider": provider, "iface": iface, "ipv6Blackhole": blackhole}
+
+
+def downloads_candidates():
+    if not DOWNLOADS.is_dir():
+        return []
+    return sorted(p for p in DOWNLOADS.glob("*.conf") if looks_like_wg(p))
+
+
+def import_many(paths, provider=None):
+    paths = paths or downloads_candidates()
+    done, errors = [], []
+    for p in paths:
+        try:
+            done.append(import_one(p, provider))
+        except Exception as e:  # noqa: BLE001 - one bad file must not stop the rest
+            errors.append(f"{Path(p).name}: {e}")
+    return {"ok": not errors and bool(done), "imported": done, "errors": errors,
+            "error": "; ".join(errors) if errors else ("" if done else "no WireGuard .conf in ~/Downloads")}
+
+
+def delete(ref):
+    c = find(ref)
+    if not c["imported"]:
+        raise RuntimeError("only profiles imported here can be removed from the panel")
+    nmcli("connection", "delete", "uuid", c["uuid"])
+    return {"ok": True}
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__)
+        return 0
+    cmd, args = argv[0], argv[1:]
+    try:
+        if cmd == "status":
+            res = status(refresh_ip="--refresh" in args)
+        elif cmd == "up":
+            c = up(args[0])
+            res = {"ok": True, "name": c["name"]}
+        elif cmd == "down":
+            down()
+            res = {"ok": True}
+        elif cmd == "toggle":
+            res = toggle()
+        elif cmd == "import":
+            prov = None
+            if "--provider" in args:
+                i = args.index("--provider")
+                prov = args[i + 1]
+                args = args[:i] + args[i + 2:]
+            res = import_many(args, prov)
+        elif cmd == "delete":
+            res = delete(args[0])
+        elif cmd == "ip":
+            res = public_ip(refresh="--refresh" in args, key="manual")
+        else:
+            print(__doc__, file=sys.stderr)
+            return 3
+    except Exception as e:  # noqa: BLE001 - the panel shows the message
+        res = {"ok": False, "error": str(e)}
+    print(json.dumps(res, indent=None if sys.stdout.isatty() is False else 2))
+    return 0 if res.get("ok", True) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
