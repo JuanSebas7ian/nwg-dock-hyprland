@@ -5,6 +5,9 @@
 #   sudo contrib/omarchy/boot/install.sh tpm2            # initramfs con systemd + clave LUKS en el TPM2
 #   sudo contrib/omarchy/boot/install.sh remove-refind   # el firmware vuelve a arrancar Limine
 #   sudo contrib/omarchy/boot/install.sh remove-tpm2     # vuelve a pedir la contraseña del disco
+#   sudo contrib/omarchy/boot/install.sh splash          # UKI sin firmware de amdgpu + logo de Plymouth desde el inicio
+#   sudo contrib/omarchy/boot/install.sh remove-splash
+#   sudo contrib/omarchy/boot/install.sh splash-nodebug  # quita plymouth.debug tras revisar un arranque
 #        contrib/omarchy/boot/install.sh check           # estado, sin root
 #
 # Nunca toca archivos de Omarchy: el tema y la configuración de rEFInd van en /boot/EFI/refind, los
@@ -20,6 +23,7 @@ REFIND_LOADER='\EFI\refind\refind_x64.efi'
 LUKS_DEV=/dev/disk/by-partuuid/d714e6bc-ac05-42c0-9474-6e504b34d918
 TPM2_PCRS=${TPM2_PCRS:-0+7}
 DROPIN=/etc/mkinitcpio.conf.d/zz-claude-tpm2.conf
+NOKMS=/etc/mkinitcpio.conf.d/zz-claude-nokms.conf
 GUARD=/usr/local/lib/omarchy/refind-bootorder
 GUARD_UNIT=/etc/systemd/system/refind-bootorder.service
 KERNEL_PARAM=${KERNEL_PARAM:-/home/juansebas7ian/.claude/skills/omarchy-hardware/scripts/kernel-param.sh}
@@ -184,6 +188,56 @@ remove_tpm2() {
   "$KERNEL_PARAM" remove tpm2 || limine-update
 }
 
+# ------------------------------------------------------------------ arranque sin negro
+# La pantalla quedaba negra tras elegir Omarchy: (1) UKI de ~290 MB por el firmware de amdgpu que mete el
+# hook kms, lenta de leer para rEFInd; (2) Plymouth 26 ignora simpledrm y no dibuja nada hasta que carga
+# nvidia-drm (y, sin la contraseña del disco, nunca se veía).
+install_splash() {
+  need_root
+  [[ -x $KERNEL_PARAM ]] || fail "no encuentro kernel-param.sh en $KERNEL_PARAM"
+  local kver test_img uki=$ESP/EFI/Linux/omarchy_linux.efi before
+  kver=$(uname -r)
+  before=$(stat -c %s "$uki")
+  snapshot "claude $STAMP: antes de quitar kms del initramfs y del logo con simpledrm"
+
+  say "1/3 initramfs sin el hook kms ($NOKMS)"
+  install -m 644 "$HERE/splash/zz-claude-nokms.conf" "$NOKMS"
+  test_img=$(mktemp /tmp/claude-splash-test.XXXXXX.img)
+  if ! /usr/bin/mkinitcpio -k "$kver" -g "$test_img" || ! check_initramfs "$test_img" \
+    || ! lsinitcpio -l "$test_img" | grep -q 'nvidia-drm.ko'; then
+    rm -f "$NOKMS" "$test_img"
+    fail "el initramfs de prueba falló: quité $NOKMS, nada más cambió"
+  fi
+  lsinitcpio -l "$test_img" | grep -q 'amdgpu' && warn "amdgpu sigue en el initramfs (¿otro hook lo pide?)"
+  say "  initramfs de prueba correcto: $(du -h "$test_img" | cut -f1) (con NVIDIA, sin amdgpu)"
+  rm -f "$test_img"
+
+  say "2/3 logo desde el primer segundo + registro de Plymouth por un arranque (kernel-param.sh)"
+  "$KERNEL_PARAM" add plymouth-debug "plymouth.debug" \
+    "Registro /var/log/plymouth-debug.log para revisar un arranque; quitar con install.sh splash-nodebug" >/dev/null
+  "$KERNEL_PARAM" add plymouth-splash "plymouth.use-simpledrm" \
+    "Plymouth 26 ignora simpledrm: sin esto no dibuja hasta que carga nvidia-drm (pantalla negra tras rEFInd)"
+
+  say "3/3 verificar la UKI"
+  local tmpd
+  tmpd=$(mktemp -d)
+  objcopy -O binary --only-section=.cmdline "$uki" "$tmpd/cmdline"
+  objcopy -O binary --only-section=.initrd "$uki" "$tmpd/initrd"
+  grep -q 'plymouth.use-simpledrm' "$tmpd/cmdline" || fail "la UKI no trae plymouth.use-simpledrm: revisa antes de reiniciar"
+  grep -q 'rd.luks.name=' "$tmpd/cmdline" || fail "la UKI perdió rd.luks.name: revisa antes de reiniciar"
+  check_initramfs "$tmpd/initrd" || fail "el initramfs de la UKI está incompleto: revisa antes de reiniciar"
+  rm -rf "$tmpd"
+  say "  UKI: $((before / 1048576)) MB → $(($(stat -c %s "$uki") / 1048576)) MB; línea del kernel y TPM2 correctos"
+}
+
+remove_splash() {
+  need_root
+  snapshot "claude $STAMP: antes de devolver kms y quitar el logo con simpledrm"
+  rm -f "$NOKMS"
+  "$KERNEL_PARAM" remove plymouth-debug >/dev/null 2>&1 || true
+  "$KERNEL_PARAM" remove plymouth-splash || limine-update
+}
+
 check() {
   echo "== EFI"
   efibootmgr 2>/dev/null | sed -n '1,8p' || true
@@ -200,6 +254,9 @@ refind) install_refind ;;
 tpm2) install_tpm2 ;;
 remove-refind) remove_refind ;;
 remove-tpm2) remove_tpm2 ;;
+splash) install_splash ;;
+remove-splash) remove_splash ;;
+splash-nodebug) need_root; "$KERNEL_PARAM" remove plymouth-debug ;;
 check) check ;;
-*) sed -n '2,13p' "$0"; exit 3 ;;
+*) sed -n '2,16p' "$0"; exit 3 ;;
 esac
