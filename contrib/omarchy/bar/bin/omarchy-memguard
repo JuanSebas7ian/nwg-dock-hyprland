@@ -14,6 +14,9 @@ RAM, /proc/pressure/memory), RAM about to run out at the current growth rate,
 swap filling up, or VRAM nearly full. Every action can be undone and is
 undone when things calm down:
 
+  VRAM     idle Ollama models first, then the dictation model (voxtype): it
+           goes to on-demand loading (dictation keeps working, 1-2 s slower)
+           and comes back resident when the VRAM has been free for a while
   level 1  warn with the top consumers; push the cold memory of apps idle for
            10+ min into zram (memory.reclaim); unload Ollama models that are
            not generating (they reload on the next request)
@@ -71,6 +74,9 @@ DEFAULTS = {
   "vramWarnFreeMB": 1500,     # free VRAM below this while another process asks for more -> unload idle Ollama models
   "vramCritFreeMB": 600,      # -> also a critical warning with the VRAM users
   "vramGrowMB": 200,          # "asks for more": a non-Ollama process grew this much in the last 30 s
+  "voxtypeOffload": 1,        # dictation model resident in VRAM; moved to on-demand when someone needs the room
+  "voxtypeReloadFreeMB": 4500,  # free VRAM needed to load it back (1.6 GB model + ~0.9 GB while transcribing + margin)
+  "voxtypeReloadCalmMin": 5,  # ...for this long, with nobody asking for more
   "calmSeconds": 30,          # this long back at level 0 before undoing everything
   "reclaimIdleMin": 10,       # an app idle this long gives its cold memory to zram
   "reclaimMB": 512,           # per app and per minute
@@ -437,6 +443,29 @@ def ollama_unload(model):
     return False
 
 
+def voxtype_resident(vram):
+  """VRAM held by the dictation daemon (voxtype), 0 if not on the GPU."""
+  return sum(p["mem"] for p in (vram or {}).get("procs", []) if comm_of(p["pid"]).startswith("voxtype")
+             and "osd" not in cmdline_of(p["pid"]))
+
+
+def voxtype_idle():
+  """Not recording or transcribing right now (never interrupt a dictation)."""
+  rc, out = run(["voxtype", "status", "--format", "json"], timeout=5)
+  try:
+    return rc == 0 and json.loads(out.splitlines()[-1]).get("alt") == "idle"
+  except (ValueError, IndexError):
+    return False
+
+
+def voxtype_set_isolation(on):
+  """gpu_isolation = true: transcribe in a child process that frees the GPU afterwards."""
+  rc, _ = run(["voxtype", "config", "set", "whisper.gpu_isolation", "true" if on else "false"])
+  if rc != 0:
+    return False
+  return run(["systemctl", "--user", "restart", "voxtype.service"], timeout=30)[0] == 0
+
+
 def ollama_generating(vram):
   """True if an Ollama process is using the GPU's compute right now."""
   for p in (vram or {}).get("procs", []):
@@ -483,7 +512,10 @@ class Guard:
     self.calm_since = None
     self.frozen = {}         # unit -> since
     self.throttled = {}      # scope name -> (path, previous memory.high)
-    self.avoided = set(load_applied().get("avoided", []))  # scope names we marked (survives restarts)
+    applied = load_applied()
+    self.avoided = set(applied.get("avoided", []))  # scope names we marked (survives restarts)
+    self.voxtype_offloaded = applied.get("voxtypeOffloaded")  # t-like marker: we moved dictation off the GPU
+    self.voxtype_free_since = None
     self.reclaimed_at = {}   # scope name -> t
     self.idle_since = {}     # scope name -> (cpu usage, since)
     self.last_scope_mem = {}  # scope name -> (t, bytes)
@@ -508,7 +540,7 @@ class Guard:
 
   def save_applied(self):
     data = {"frozen": list(self.frozen), "throttled": {n: [str(p), prev] for n, (p, prev) in self.throttled.items()},
-            "avoided": sorted(self.avoided)}
+            "avoided": sorted(self.avoided), "voxtypeOffloaded": self.voxtype_offloaded}
     try:
       STATE.mkdir(parents=True, exist_ok=True)
       tmp = STATE / "applied.json.tmp"
@@ -597,6 +629,7 @@ class Guard:
           self.release_calm(t)
     self.level = lvl
 
+    self.maybe_reload_voxtype(t, vram)
     if vlvl > 0:
       self.relieve_vram(t, vram, vlvl)
     elif self.vepisode:
@@ -618,7 +651,8 @@ class Guard:
                    "vram": None if not vram else {"used": vram["used"], "total": vram["total"], "free": vram["free"],
                                                   "p95": self.hist.percentile(2, 95), "p99": self.hist.percentile(2, 99)},
                    "frozen": list(self.frozen), "throttled": list(self.throttled),
-                   "protected": sorted(s.name for s in scopes if s.kind), "unloaded": self.unloaded[-5:]}
+                   "protected": sorted(s.name for s in scopes if s.kind), "unloaded": self.unloaded[-5:],
+                   "dictation": "on demand (moved off the GPU)" if self.voxtype_offloaded is not None else "resident"}
     return lvl
 
   # -- actions
@@ -665,7 +699,7 @@ class Guard:
     """Remember each non-Ollama process's VRAM, to tell who is asking for more."""
     self.vram_seen = getattr(self, "vram_seen", {})
     for p in (vram or {}).get("procs", []):
-      if comm_of(p["pid"]).startswith("ollama"):
+      if comm_of(p["pid"]).startswith(("ollama", "voxtype")):  # their own load/transcription is not competition
         continue
       hist = self.vram_seen.setdefault(p["pid"], [])
       hist.append((t, p["mem"]))
@@ -742,10 +776,39 @@ class Guard:
                ", ".join(f"{comm_of(p['pid']) or p['pid']} {human(p['mem'])}" for p in top), "critical")
     if self.vram_competition() < self.cfg["vramGrowMB"] * MB or ollama_generating(vram):
       return
+    freed = False
     for model in ollama_loaded():
       if ollama_unload(model):
         self.unloaded.append(model)
+        freed = True
         self.event(t, f"unloaded idle Ollama model {model} (it reloads on the next request)")
+    if freed or not self.cfg["voxtypeOffload"] or self.voxtype_offloaded is not None:
+      return
+    held = voxtype_resident(vram)
+    if held >= 256 * MB and voxtype_idle() and voxtype_set_isolation(True):
+      self.voxtype_offloaded = t
+      self.voxtype_free_since = None
+      self.event(t, f"dictation model moved off the GPU ({human(held)} freed); dictation keeps working, 1-2 s slower")
+      notify("Dictation moved off the GPU", f"{human(held)} of VRAM freed for your work. Dictation keeps working, "
+             "1-2 s slower, and goes back to instant when the VRAM is free again.")
+      self.save_applied()
+
+  def maybe_reload_voxtype(self, t, vram):
+    """Back to resident once the VRAM has been free for a while and nobody asks for more."""
+    if self.voxtype_offloaded is None or not vram:
+      return
+    roomy = vram["free"] >= self.cfg["voxtypeReloadFreeMB"] * MB and self.vram_competition() < self.cfg["vramGrowMB"] * MB
+    if not roomy:
+      self.voxtype_free_since = None
+      return
+    self.voxtype_free_since = self.voxtype_free_since if self.voxtype_free_since is not None else t
+    if t - self.voxtype_free_since < self.cfg["voxtypeReloadCalmMin"] * 60 or not voxtype_idle():
+      return
+    if voxtype_set_isolation(False):
+      self.event(t, "dictation model back on the GPU (instant dictation)")
+      self.voxtype_offloaded = None
+      self.voxtype_free_since = None
+      self.save_applied()
 
   def release_calm(self, t):
     """Calm for long enough: thaw jobs and lift caps, except a cap on a scope that
@@ -820,7 +883,8 @@ def undo_leftovers():
       done.append(f"released {name}")
   try:
     tmp = STATE / "applied.json.tmp"
-    tmp.write_text(json.dumps({"frozen": [], "throttled": {}, "avoided": data.get("avoided", [])}))
+    tmp.write_text(json.dumps({"frozen": [], "throttled": {}, "avoided": data.get("avoided", []),
+                               "voxtypeOffloaded": data.get("voxtypeOffloaded")}))
     tmp.replace(STATE / "applied.json")
   except OSError:
     pass
@@ -887,6 +951,8 @@ def status(as_json=False):
         f"pressure on work {r.get('psiSome')} %, p95 {human(r.get('p95') or 0)}, p99 {human(r.get('p99') or 0)}")
   if v:
     print(f"VRAM  {human(v['used'])} of {human(v['total'])}, p95 {human(v.get('p95') or 0)}, p99 {human(v.get('p99') or 0)}")
+  if v and st.get("dictation"):
+    print(f"dictation model: {st['dictation']}")
   for k in ("frozen", "throttled", "unloaded"):
     if st.get(k):
       print(f"{k}: {', '.join(st[k])}")

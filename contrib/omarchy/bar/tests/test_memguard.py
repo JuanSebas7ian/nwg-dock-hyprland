@@ -91,7 +91,19 @@ class Machine:
 
     m.ollama_unload = unload
     m.ollama_generating = lambda vram: mc.ollama_sm >= 5
-    m.comm_of = lambda pid: "ollama" if pid == 900 else "python3"
+    m.comm_of = lambda pid: {900: "ollama", 950: "voxtype"}.get(pid, "python3")
+    self.vox_resident = 1552 * MB
+    self.vox_idle = True
+    self.vox_calls = []
+    m.voxtype_resident = lambda vram: mc.vox_resident
+    m.voxtype_idle = lambda: mc.vox_idle
+
+    def set_iso(on):
+      mc.vox_calls.append(on)
+      mc.vox_resident = 0 if on else 1552 * MB
+      return True
+
+    m.voxtype_set_isolation = set_iso
     m.label = lambda s: s.name
 
   def scope(self, name):
@@ -349,6 +361,86 @@ class Vram(Base):
     mc = Machine(self.m, vram=self.vram(300, [{"pid": 777, "mem": 11 * GB, "type": "C", "sm": 99}]))
     mc.run(300)
     self.assertEqual(sum(1 for s, _ in mc.notes if "almost full" in s), 1)
+
+
+class Dictation(Base):
+  """voxtype resident by default; moved off the GPU only when someone needs the room."""
+
+  def vram(self, free_mb, procs):
+    total = 12288 * MB
+    return {"total": total, "free": free_mb * MB, "used": total - free_mb * MB, "procs": procs}
+
+  def competing(self, start_free=1200, grow_until=40):
+    procs = [{"pid": 777, "mem": 4 * GB, "type": "C", "sm": 90}, {"pid": 950, "mem": 1552 * MB, "type": "C", "sm": 0}]
+
+    def script(mc, t):
+      if t <= grow_until:
+        procs[0]["mem"] += 100 * MB
+      free = start_free if t <= grow_until else 6000
+      mc.vram = self.vram(free, procs)
+    return procs, script
+
+  def test_ollama_goes_first_then_dictation(self):
+    procs, script = self.competing()
+    mc = Machine(self.m, vram=self.vram(1200, procs), script=script)
+    mc.run(30)
+    self.assertEqual(mc.unloaded, ["qwen2.5-coder:7b"])
+    self.assertEqual(mc.vox_calls, [True], "then dictation moves off the GPU")
+    ev = mc.guard.events
+    t_ollama = next(t for t, e in ev if "unloaded idle Ollama" in e)
+    t_vox = next(t for t, e in ev if "dictation model moved" in e)
+    self.assertLess(t_ollama, t_vox, "Ollama first; dictation only if that was not enough")
+
+  def test_never_while_dictating(self):
+    procs, script = self.competing()
+    mc = Machine(self.m, vram=self.vram(1200, procs), script=script)
+    mc.loaded_models = []
+    mc.vox_idle = False
+    mc.run(30)
+    self.assertEqual(mc.vox_calls, [])
+
+  def test_full_gpu_of_your_own_work_does_not_touch_dictation(self):
+    procs = [{"pid": 777, "mem": 9 * GB, "type": "C", "sm": 99}, {"pid": 950, "mem": 1552 * MB, "type": "C", "sm": 0}]
+    mc = Machine(self.m, vram=self.vram(800, procs))
+    mc.run(300)
+    self.assertEqual(mc.vox_calls, [], "nobody is asking for more: leave it instant")
+
+  def test_dictating_is_not_competition(self):
+    procs = [{"pid": 950, "mem": 1552 * MB, "type": "C", "sm": 80}, {"pid": 900, "mem": 9 * GB, "type": "C", "sm": 0}]
+
+    def transcribing(mc, t):
+      procs[0]["mem"] += 300 * MB if t < 10 else 0  # whisper's buffers while transcribing
+      mc.vram = self.vram(900, procs)
+
+    mc = Machine(self.m, vram=self.vram(900, procs), script=transcribing)
+    mc.run(20)
+    self.assertEqual((mc.unloaded, mc.vox_calls), ([], []))
+
+  def test_back_on_the_gpu_after_five_free_minutes(self):
+    procs, script = self.competing(grow_until=40)
+    mc = Machine(self.m, vram=self.vram(1200, procs), script=script)
+    mc.run(40 + 4 * 60)
+    self.assertEqual(mc.vox_calls, [True], "4 min free: not yet")
+    mc2 = Machine(self.m, vram=self.vram(1200, procs), script=script)
+    procs[0]["mem"] = 4 * GB
+    mc2.vox_resident = 0
+    mc2.run(40 + 6 * 60)
+    self.assertIn(False, mc2.vox_calls, "reloaded (the offload survived a Guard restart)")
+
+  def test_not_reloaded_while_dictating(self):
+    procs, script = self.competing(grow_until=40)
+    mc = Machine(self.m, vram=self.vram(1200, procs), script=script)
+    mc.run(40)
+    mc.vox_idle = False
+    mc.run(10 * 60)
+    self.assertNotIn(False, mc.vox_calls)
+
+  def test_can_be_switched_off(self):
+    procs, script = self.competing()
+    mc = Machine(self.m, vram=self.vram(1200, procs), script=script)
+    mc.loaded_models = []
+    mc.run(30, cfg={"voxtypeOffload": 0})
+    self.assertEqual(mc.vox_calls, [])
 
 
 class Classify(Base):
