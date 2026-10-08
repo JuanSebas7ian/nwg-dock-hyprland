@@ -127,6 +127,11 @@ class Ladder(unittest.TestCase):
     m.restart_xwayland = lambda pid: self.x_restarts.append(pid) or True
     m.shell_ping = lambda: self.state["shell"].pop(0) if self.state["shell"] else True
     m.restart_shell = lambda: self.shell_restarts.append(1) or (True, "")
+    self.frames, self.kicks, self.dpms = [], [], []
+    m.screens_on = lambda: self.state.get("screens", True)
+    m.render_probe = lambda timeout: self.frames.pop(0) if self.frames else None
+    m.kick_renderer = lambda: self.kicks.append(1)
+    m.dpms_cycle = lambda: self.dpms.append(1)
 
   def drive(self, answers, cfg=None, every=2):
     g = self.m.Guard(dict(self.m.DEFAULTS, **(cfg or {})))
@@ -144,7 +149,7 @@ class Ladder(unittest.TestCase):
     self.state["hypr"] = "D"
     g, t, out = self.drive(["no answer"] * 100)
     self.assertEqual(out, "recovered")
-    self.assertTrue(60 <= t <= 64)
+    self.assertTrue(30 <= t <= 34, t)
     self.assertEqual(len(self.reports), 1)
     self.assertEqual(self.x_restarts, [], "Xwayland is not touched when Hyprland is inside the kernel")
     self.assertIn("state D", self.reports[0].read_text())
@@ -198,6 +203,37 @@ class Ladder(unittest.TestCase):
     self.state["shell"] = ([True] + [False] * 3) * 6
     self.drive([None] * 200, {"shellEvery": 2})
     self.assertEqual(len(self.shell_restarts), 3)
+
+
+  # frozen picture while the socket still answers
+  def test_frozen_picture_ladder(self):
+    self.frames = ["no frame in 3 s"] * 100
+    g, t, out = self.drive([None] * 100, every=4)
+    self.assertEqual(out, "recovered")
+    self.assertEqual(self.kicks, [1])
+    self.assertEqual(self.dpms, [1])
+    self.assertEqual(self.recovers, [4242])
+    self.assertTrue(28 <= t <= 36, t)
+    self.assertIn("rendered no frame", self.reports[0].read_text())
+
+  def test_frozen_picture_fixed_by_dpms(self):
+    self.frames = ["no frame in 3 s"] * 4
+    g, t, out = self.drive([None] * 10, every=4)
+    self.assertIsNone(out)
+    self.assertEqual((self.kicks, self.dpms, self.recovers), ([1], [1], []))
+    self.assertIn("FRAMES AGAIN", self.reports[0].read_text())
+
+  def test_one_slow_frame_is_ignored(self):
+    self.frames = ["no frame in 3 s"]
+    self.drive([None] * 10, every=4)
+    self.assertEqual((self.kicks, self.reports), ([], []))
+
+  def test_screens_off_no_frames_expected(self):
+    self.state["screens"] = False
+    self.frames = ["no frame in 3 s"] * 100
+    g, t, out = self.drive([None] * 30, every=4)
+    self.assertIsNone(out)
+    self.assertEqual((self.kicks, self.recovers), ([], []))
 
 
 if __name__ == "__main__":

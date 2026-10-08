@@ -13,16 +13,24 @@ Detection, every `probeEvery` seconds:
     kernel and services alive, desktop dead);
   * the Omarchy shell (bar, menus, notifications, lock screen): `shell ping`
     every `shellEvery` s;
+  * the picture: a 1x1 screencopy (grim) every `renderEvery` s makes
+    Hyprland render a frame (~8 ms). It catches a frozen screen while
+    Hyprland still answers its socket (GPU flips stuck);
   * stopped processes (state T) among Hyprland, Xwayland and the shell.
 
 Rescue ladder while Hyprland does not answer (seconds since the last answer):
   0 s    SIGCONT anything of the desktop that is stopped;
-  10 s   report: thread states and kernel wait channels, nvidia-smi, PSI,
+  8 s    report: thread states and kernel wait channels, nvidia-smi, PSI,
          journal, log tail -> ~/.local/state/omarchy-freeze/freeze-*.txt;
-  20 s   if Xwayland does not answer either, restart it: Hyprland blocks on
+  12 s   if Xwayland does not answer either, restart it: Hyprland blocks on
          it synchronously. Only X11 apps close; Wayland windows stay;
-  60 s   abort Hyprland (SIGABRT -> coredumpctl; SIGKILL 15 s later). SDDM
+  30 s   abort Hyprland (SIGABRT -> coredumpctl; SIGKILL 15 s later). SDDM
          comes back and omarchy-session reopens the windows.
+
+Rescue ladder while Hyprland answers but no frame comes out (screens on):
+  6 s    report + force_renderer_reload + release_input_capture;
+  12 s   screens off and on again (DPMS), which resets the display pipeline;
+  30 s   abort Hyprland, as above.
   If Hyprland is in state D (inside the kernel, usually the GPU driver) no
   signal can reach it: only SysRq or a reset helps, and the report says so.
 
@@ -37,8 +45,9 @@ boot ended (clean, reset, or never woke from suspend).
 
 Config (optional): ~/.config/omarchy-freeze-guard/config.json
   {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 10, "xwaylandAfter": 20,
-   "recoverAfter": 60, "shellEvery": 10, "shellFailures": 3}
-  recoverAfter / xwaylandAfter / shellFailures = 0 turns that step off.
+   "recoverAfter": 30, "shellEvery": 10, "shellFailures": 3, "renderEvery": 4,
+   "renderTimeout": 3, "renderKickAfter": 6, "renderDpmsAfter": 12, "renderRecoverAfter": 30}
+  Any *After / renderEvery / shellFailures = 0 turns that step off.
 """
 
 import datetime
@@ -58,8 +67,10 @@ STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / "o
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "omarchy-freeze-guard" / "config.json"
 SESSION_DIR = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / "omarchy-session"
 RUN = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
-DEFAULTS = {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 10, "xwaylandAfter": 20,
-            "recoverAfter": 60, "shellEvery": 10, "shellFailures": 3}
+DEFAULTS = {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 8, "xwaylandAfter": 12,
+            "recoverAfter": 30, "shellEvery": 10, "shellFailures": 3,
+            "renderEvery": 4, "renderTimeout": 3, "renderKickAfter": 6, "renderDpmsAfter": 12,
+            "renderRecoverAfter": 30}
 SHELL_RESTARTS = (3, 900)  # at most 3 shell restarts in 15 min
 KEEP_REPORTS = 20
 KEEP_LOGS = 5
@@ -152,26 +163,52 @@ def hypr_pid():
   return pid if Path(f"/proc/{pid}").exists() else None
 
 
-def probe(timeout):
-  """None if Hyprland answered, else why not."""
+def hypr_request(cmd, timeout):
   s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
   s.settimeout(timeout)
   try:
     s.connect(str(hypr_dir() / ".socket.sock"))
-    s.sendall(b"j/version")
+    s.sendall(cmd)
     got = b""
     while True:
       chunk = s.recv(65536)
       if not chunk:
         break
       got += chunk
-    return None if got else "empty answer"
+    return got
+  finally:
+    s.close()
+
+
+def probe(timeout):
+  """None if Hyprland answered, else why not."""
+  try:
+    return None if hypr_request(b"j/version", timeout) else "empty answer"
   except socket.timeout:
     return f"no answer in {timeout} s"
   except OSError as e:
     return str(e)
-  finally:
-    s.close()
+
+
+def screens_on():
+  """True if some monitor is enabled and lit: only then must frames come out."""
+  try:
+    mons = json.loads(hypr_request(b"j/monitors", 2))
+  except (OSError, ValueError):
+    return False
+  return any(m.get("dpmsStatus") and not m.get("disabled") for m in mons)
+
+
+def render_probe(timeout):
+  """None if Hyprland rendered a frame for a 1x1 screencopy, else why not.
+  A quick refusal (locked session, no grim) is not a freeze."""
+  try:
+    subprocess.run(["grim", "-g", "0,0 1x1", "-t", "ppm", "-"], capture_output=True, timeout=timeout)
+    return None
+  except subprocess.TimeoutExpired:
+    return f"no frame in {timeout:g} s"
+  except OSError:
+    return None
 
 
 def threads(pid):
@@ -276,6 +313,18 @@ def restart_shell():
 
 def submap_reset():
   run(["hyprctl", "dispatch", 'hl.dsp.submap("reset")'], timeout=3)
+
+
+def kick_renderer():
+  """Rebuild the renderer's state and drop any input capture that kept the keyboard."""
+  run(["hyprctl", "dispatch", "hl.dsp.force_renderer_reload()"], timeout=5)
+  run(["hyprctl", "dispatch", "hl.dsp.release_input_capture()"], timeout=5)
+
+
+def dpms_cycle():
+  run(["hyprctl", "dispatch", 'hl.dsp.dpms({ action = "disable" })'], timeout=5)
+  time.sleep(1.5)
+  run(["hyprctl", "dispatch", 'hl.dsp.dpms({ action = "enable" })'], timeout=5)
 
 
 def restart_dock():
@@ -449,6 +498,11 @@ class Guard:
     self.shell_fail = 0
     self.shell_next = 0.0
     self.shell_restarts = []
+    self.render_since = None
+    self.render_report = None
+    self.render_steps = set()
+    self.render_actions = []
+    self.render_next = 0.0
 
   def act(self, text):
     self.actions.append(text)
@@ -471,7 +525,10 @@ class Guard:
                  (f"\nDone: {'; '.join(self.actions)}" if self.actions else "") +
                  (f"\nReport: {self.reported}" if self.reported else ""))
       self.since, self.failures, self.reported, self.actions, self.x_checked = None, [], None, [], False
-      self.check_shell(t)
+      if self.check_render(t, pid) == "recovered":
+        return "recovered"
+      if self.render_since is None:
+        self.check_shell(t)
       return None
     self.since = self.since if self.since is not None else t - self.cfg["probeTimeout"]
     self.failures.append(f"{datetime.datetime.now():%H:%M:%S} {why}")
@@ -502,6 +559,51 @@ class Guard:
       return
     if restart_xwayland(xpid):
       self.act(f"Xwayland {disp} did not answer either: restarted it (X11 apps closed)")
+
+  def reset_render(self):
+    self.render_since, self.render_report, self.render_steps, self.render_actions = None, None, set(), []
+
+  def render_act(self, text):
+    self.render_actions.append(text)
+    log(text)
+    note(self.render_report, f"ACTION: {text}")
+
+  def check_render(self, t, pid):
+    if self.cfg["renderEvery"] <= 0 or (self.render_since is None and t < self.render_next):
+      return None
+    self.render_next = t + self.cfg["renderEvery"]
+    if not screens_on():
+      self.reset_render()
+      return None
+    why = render_probe(self.cfg["renderTimeout"])
+    if why is None:
+      if self.render_since is not None and (self.render_report or self.render_actions):
+        stuck = t - self.render_since
+        done = "; ".join(self.render_actions)
+        note(self.render_report, f"\nFRAMES AGAIN after {stuck:.0f} s" + (f" (steps: {done})" if done else ""))
+        notify("The screen was frozen", f"Back after {stuck:.0f} s." + (f"\nDone: {done}" if done else "") +
+               (f"\nReport: {self.render_report}" if self.render_report else ""))
+      self.reset_render()
+      return None
+    if self.render_since is None:
+      self.render_since = t - self.cfg["renderTimeout"]
+    stuck = t - self.render_since
+    c = self.cfg
+    if c["renderKickAfter"] > 0 and stuck >= c["renderKickAfter"] and "kick" not in self.render_steps:
+      self.render_steps.add("kick")
+      self.render_report = report(f"Hyprland answers but has rendered no frame for {stuck:.0f} s ({why})", pid)
+      kick_renderer()
+      self.render_act("force_renderer_reload + release_input_capture")
+    if c["renderDpmsAfter"] > 0 and stuck >= c["renderDpmsAfter"] and "dpms" not in self.render_steps:
+      self.render_steps.add("dpms")
+      dpms_cycle()
+      self.render_act("screens off and on (DPMS)")
+    if c["renderRecoverAfter"] > 0 and stuck >= c["renderRecoverAfter"]:
+      if not self.render_report:
+        self.render_report = report(f"no frame for {stuck:.0f} s", pid)
+      self.render_act(f"Hyprland restarted after {stuck:.0f} s without frames: {recover(pid)}")
+      return "recovered"
+    return None
 
   def check_shell(self, t):
     sf = self.cfg["shellFailures"]
@@ -545,8 +647,9 @@ def daemon():
     log("previous boot check failed:", e)
   guard = Guard(cfg)
   every = float(cfg["probeEvery"])
-  log(f"watching {instance()} (report {cfg['reportAfter']:g} s, Xwayland {cfg['xwaylandAfter']:g} s, "
-      f"restart {cfg['recoverAfter']:g} s, shell every {cfg['shellEvery']:g} s)")
+  log(f"watching {instance()}: socket (report {cfg['reportAfter']:g} s, Xwayland {cfg['xwaylandAfter']:g} s, "
+      f"restart {cfg['recoverAfter']:g} s), frames every {cfg['renderEvery']:g} s (kick {cfg['renderKickAfter']:g} s, "
+      f"DPMS {cfg['renderDpmsAfter']:g} s, restart {cfg['renderRecoverAfter']:g} s), shell every {cfg['shellEvery']:g} s")
   size, mirrored = -1, 0.0
   mono, boot = time.monotonic(), time.clock_gettime(time.CLOCK_BOOTTIME)
   while True:
@@ -560,10 +663,11 @@ def daemon():
       return 0
     if slept:
       guard.since, guard.failures, guard.shell_fail = None, [], 0
+      guard.reset_render()
       continue
     if guard.tick(m, pid) == "recovered":
       return 0
-    if guard.since is None and m - mirrored >= MIRROR_EVERY:
+    if guard.since is None and guard.render_since is None and m - mirrored >= MIRROR_EVERY:
       size, mirrored = mirror_log(size), m
 
 
@@ -577,7 +681,8 @@ def rescue(hard=False):
   alive = pid is not None and probe(2) is None
   if alive:
     submap_reset()
-    done.append("keybinding submap reset")
+    kick_renderer()
+    done.append("submap reset, renderer reload, input capture released")
   xpid, disp = xwayland()
   if xpid and not xwayland_ping(disp):
     if restart_xwayland(xpid):
@@ -595,7 +700,7 @@ def rescue(hard=False):
     elif hard:
       done.append(f"Hyprland restarted: {recover(pid)}")
     else:
-      done.append("Hyprland still frozen: the daemon restarts it at 60 s, or run: omarchy-freeze-guard rescue --hard")
+      done.append("Hyprland still frozen: the daemon restarts it at 30 s, or run: omarchy-freeze-guard rescue --hard")
   path = report("manual rescue")
   note(path, "\n".join(f"ACTION: {d}" for d in done) or "ACTION: nothing needed")
   summary = "; ".join(done) or "nothing was stuck"
