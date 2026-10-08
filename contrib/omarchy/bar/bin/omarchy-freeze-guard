@@ -1,37 +1,51 @@
 #!/usr/bin/python3
-"""Catch desktop freezes: record what was going on, and get out of them
-without a hard reset.
+"""Background rescuer for desktop freezes: detect them, try to thaw the
+desktop without losing windows, and only as a last resort restart it.
 
-  omarchy-freeze-guard daemon     watch Hyprland (systemd user service)
-  omarchy-freeze-guard report     write a diagnostic report now
-  omarchy-freeze-guard last       how the previous boot ended + latest reports
+  omarchy-freeze-guard daemon          watch in the background (systemd user service)
+  omarchy-freeze-guard rescue [--hard] thaw now (SUPER+CTRL+SHIFT+ESCAPE; also from a TTY/ssh)
+  omarchy-freeze-guard report          write a diagnostic report now
+  omarchy-freeze-guard last            how the previous boot ended + latest reports
 
-What the daemon does:
-  * asks Hyprland for its version on its control socket every couple of
-    seconds. Hyprland answers from its main loop, so no answer = the screen is
-    frozen (the kernel and every service may still be fine: that is what the
-    2026-10-07 20:44 freeze looked like);
-  * keeps a copy of the tail of hyprland.log on disk, fsynced. The real log
-    lives in /run (tmpfs) and is gone after a reset;
-  * after `reportAfter` seconds without an answer, writes a report (Hyprland
-    thread states and kernel wait channels, nvidia-smi, PSI, recent journal,
-    the log tail) to ~/.local/state/omarchy-freeze/ and syncs the disks;
-  * after `recoverAfter` seconds (0 = never), aborts Hyprland (SIGABRT, so
-    systemd-coredump keeps a backtrace; SIGKILL 15 s later if needed). SDDM
-    comes back, you log in, and omarchy-session reopens the windows. Unsaved
-    work inside apps is lost, as with a reset, but the disks are clean and
-    you keep the evidence;
-  * once per boot, looks at how the previous boot ended (clean shutdown,
-    reset, or never woke from suspend) and notifies if it was not clean.
+Detection, every `probeEvery` seconds:
+  * Hyprland: asks its version on the control socket. Hyprland answers from
+    its main loop, so no answer = frozen screen (the 2026-10-07 20:44 freeze:
+    kernel and services alive, desktop dead);
+  * the Omarchy shell (bar, menus, notifications, lock screen): `shell ping`
+    every `shellEvery` s;
+  * stopped processes (state T) among Hyprland, Xwayland and the shell.
+
+Rescue ladder while Hyprland does not answer (seconds since the last answer):
+  0 s    SIGCONT anything of the desktop that is stopped;
+  10 s   report: thread states and kernel wait channels, nvidia-smi, PSI,
+         journal, log tail -> ~/.local/state/omarchy-freeze/freeze-*.txt;
+  20 s   if Xwayland does not answer either, restart it: Hyprland blocks on
+         it synchronously. Only X11 apps close; Wayland windows stay;
+  60 s   abort Hyprland (SIGABRT -> coredumpctl; SIGKILL 15 s later). SDDM
+         comes back and omarchy-session reopens the windows.
+  If Hyprland is in state D (inside the kernel, usually the GPU driver) no
+  signal can reach it: only SysRq or a reset helps, and the report says so.
+
+A shell that stops answering for `shellFailures` checks in a row is restarted
+with `omarchy restart shell` (it re-locks the session if it was locked); at
+most 3 times in 15 min. Memory thrashing is left to systemd-oomd (Omarchy
+configures it: 50 % stall for 20 s kills the app).
+
+Always on: an fsynced copy of the hyprland.log tail (the real one lives in
+/run and dies with a reset), and once per boot a note on how the previous
+boot ended (clean, reset, or never woke from suspend).
 
 Config (optional): ~/.config/omarchy-freeze-guard/config.json
-  {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 10, "recoverAfter": 60}
+  {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 10, "xwaylandAfter": 20,
+   "recoverAfter": 60, "shellEvery": 10, "shellFailures": 3}
+  recoverAfter / xwaylandAfter / shellFailures = 0 turns that step off.
 """
 
 import datetime
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -44,7 +58,9 @@ STATE = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / "o
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME") or HOME / ".config") / "omarchy-freeze-guard" / "config.json"
 SESSION_DIR = Path(os.environ.get("XDG_STATE_HOME") or HOME / ".local" / "state") / "omarchy-session"
 RUN = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
-DEFAULTS = {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 10, "recoverAfter": 60}
+DEFAULTS = {"probeEvery": 2, "probeTimeout": 2, "reportAfter": 10, "xwaylandAfter": 20,
+            "recoverAfter": 60, "shellEvery": 10, "shellFailures": 3}
+SHELL_RESTARTS = (3, 900)  # at most 3 shell restarts in 15 min
 KEEP_REPORTS = 20
 KEEP_LOGS = 5
 LOG_TAIL_BYTES = 512 * 1024
@@ -166,6 +182,108 @@ def threads(pid):
     if m:
       rows.append(f"  {t.name:>8} {m.group(2)} {read(t / 'wchan') or '-':<32} {m.group(1)}")
   return "\n".join(rows)
+
+
+# ------------------------------------------------------------------ rescue steps
+
+def proc_state(pid):
+  m = re.match(r"\d+ \(.*\) (\S)", read(f"/proc/{pid}/stat"))
+  return m.group(1) if m else None
+
+
+def pids_named(name):
+  out = []
+  for d in Path("/proc").glob("[0-9]*"):
+    try:
+      if read(d / "comm").strip() == name and d.stat().st_uid == os.getuid():
+        out.append(int(d.name))
+    except OSError:  # exited meanwhile
+      pass
+  return out
+
+
+def desktop_pids():
+  pids = {}
+  hp = hypr_pid()
+  if hp:
+    pids[hp] = "Hyprland"
+  for name in ("Xwayland", "quickshell"):
+    for pid in pids_named(name):
+      pids[pid] = name
+  return pids
+
+
+def thaw_stopped():
+  """SIGCONT stopped desktop processes. Returns what it woke."""
+  woke = []
+  for pid, name in desktop_pids().items():
+    if proc_state(pid) in ("T", "t"):
+      try:
+        os.kill(pid, signal.SIGCONT)
+        woke.append(f"{name} ({pid})")
+      except OSError:
+        pass
+  return woke
+
+
+def xwayland():
+  """(pid, display) of this session's Xwayland, or (None, None)."""
+  for pid in pids_named("Xwayland"):
+    args = read(f"/proc/{pid}/cmdline").split("\0")
+    disp = next((a for a in args if re.fullmatch(r":\d+", a)), None)
+    if disp:
+      return pid, disp
+  return None, None
+
+
+def xwayland_ping(disp, timeout=3):
+  try:
+    p = subprocess.run(["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"], capture_output=True, timeout=timeout,
+                       env=dict(os.environ, DISPLAY=disp))
+    return p.returncode == 0
+  except subprocess.TimeoutExpired:
+    return False
+  except OSError:
+    return True  # no xprop: cannot tell, do not touch Xwayland
+
+
+def restart_xwayland(pid):
+  """Hyprland starts a new Xwayland on demand. Only X11 apps are lost."""
+  try:
+    os.kill(pid, signal.SIGKILL)
+  except OSError:
+    return False
+  return True
+
+
+def omarchy_bin(name):
+  return shutil.which(name) or f"/usr/share/omarchy/bin/{name}"
+
+
+def shell_ping():
+  try:
+    p = subprocess.run([omarchy_bin("omarchy-shell"), "shell", "ping"], capture_output=True, text=True, timeout=6,
+                       env=dict(os.environ, OMARCHY_SHELL_IPC_TIMEOUT="3s"))
+    return p.returncode == 0
+  except (subprocess.TimeoutExpired, OSError):
+    return False
+
+
+def restart_shell():
+  out = run([omarchy_bin("omarchy-restart-shell")], timeout=60)
+  return shell_ping(), out
+
+
+def submap_reset():
+  run(["hyprctl", "dispatch", 'hl.dsp.submap("reset")'], timeout=3)
+
+
+def restart_dock():
+  """The dock's supervisor relaunches it in ~2 s; its DnD once froze the whole desktop."""
+  if not pids_named("nwg-dock-hyprla"):
+    return False
+  run(["pkill", "-x", "nwg-dock-hyprla"], timeout=3)
+  return True
 
 
 # ------------------------------------------------------------------ reports
@@ -307,6 +425,113 @@ def check_previous_boot(force=False):
 
 # ------------------------------------------------------------------ daemon
 
+def note(path, text):
+  """Append to a report, durably."""
+  if not path:
+    return
+  with open(path, "a") as f:
+    f.write(text + "\n")
+    f.flush()
+    os.fsync(f.fileno())
+
+
+class Guard:
+  """One step per tick; time comes from the caller so tests can drive it."""
+
+  def __init__(self, cfg):
+    self.cfg = {k: float(v) for k, v in cfg.items()}
+    self.since = None        # monotonic time Hyprland stopped answering
+    self.failures = []
+    self.reported = None
+    self.actions = []
+    self.x_checked = False
+    self.shell_ok_seen = False
+    self.shell_fail = 0
+    self.shell_next = 0.0
+    self.shell_restarts = []
+
+  def act(self, text):
+    self.actions.append(text)
+    log(text)
+    note(self.reported, f"ACTION: {text}")
+
+  def tick(self, t, pid):
+    """Returns "recovered" when the ladder ended by restarting Hyprland."""
+    woke = thaw_stopped()
+    if woke:
+      self.act("SIGCONT to stopped " + ", ".join(woke))
+    why = probe(self.cfg["probeTimeout"])
+    if why is None:
+      if self.since is not None:
+        frozen = t - self.since
+        note(self.reported, f"\nTHAWED after {frozen:.0f} s" +
+             (f" (steps: {'; '.join(self.actions)})" if self.actions else " by itself"))
+        if self.reported or self.actions:
+          notify("The desktop was frozen", f"Back after {frozen:.0f} s." +
+                 (f"\nDone: {'; '.join(self.actions)}" if self.actions else "") +
+                 (f"\nReport: {self.reported}" if self.reported else ""))
+      self.since, self.failures, self.reported, self.actions, self.x_checked = None, [], None, [], False
+      self.check_shell(t)
+      return None
+    self.since = self.since if self.since is not None else t - self.cfg["probeTimeout"]
+    self.failures.append(f"{datetime.datetime.now():%H:%M:%S} {why}")
+    frozen = t - self.since
+    if not self.reported and frozen >= self.cfg["reportAfter"]:
+      self.reported = report(f"Hyprland has not answered for {frozen:.0f} s", pid, self.failures)
+      log("freeze report:", self.reported)
+    xa = self.cfg["xwaylandAfter"]
+    if xa > 0 and not self.x_checked and frozen >= xa:
+      self.x_checked = True
+      self.try_xwayland(pid)
+    ra = self.cfg["recoverAfter"]
+    if ra > 0 and frozen >= ra:
+      result = recover(pid)
+      self.act(f"Hyprland restarted after {frozen:.0f} s: {result}")
+      return "recovered"
+    return None
+
+  def try_xwayland(self, pid):
+    if proc_state(pid) == "D":
+      note(self.reported, "Hyprland is in state D (inside the kernel): Xwayland is not the cause")
+      return
+    xpid, disp = xwayland()
+    if not xpid:
+      return
+    if xwayland_ping(disp):
+      note(self.reported, f"Xwayland ({disp}) answers: not the cause")
+      return
+    if restart_xwayland(xpid):
+      self.act(f"Xwayland {disp} did not answer either: restarted it (X11 apps closed)")
+
+  def check_shell(self, t):
+    sf = self.cfg["shellFailures"]
+    if sf <= 0 or t < self.shell_next:
+      return
+    self.shell_next = t + self.cfg["shellEvery"]
+    if shell_ping():
+      self.shell_ok_seen, self.shell_fail = True, 0
+      return
+    if not self.shell_ok_seen:  # still starting, or not part of this session
+      return
+    self.shell_fail += 1
+    if self.shell_fail < sf:
+      return
+    self.shell_restarts = [r for r in self.shell_restarts if t - r < SHELL_RESTARTS[1]]
+    if len(self.shell_restarts) >= SHELL_RESTARTS[0]:
+      if self.shell_fail == sf:
+        notify("The Omarchy shell keeps freezing", "Restarted 3 times in 15 min; leaving it alone.\n"
+               "Try: omarchy restart shell", "critical")
+      return
+    path = report(f"the Omarchy shell has not answered {self.shell_fail} checks in a row")
+    ok, out = restart_shell()
+    self.shell_restarts.append(t)
+    self.shell_fail, self.shell_ok_seen = 0, ok
+    note(path, f"ACTION: omarchy restart shell -> {'answers again' if ok else 'still not answering'}\n{out}")
+    log("shell restarted:", "ok" if ok else "failed")
+    notify("The bar/shell was frozen", ("Restarted it." if ok else "Restart did not help.") + f"\nReport: {path}",
+           "normal" if ok else "critical")
+
+
 def daemon():
   cfg = config()
   STATE.mkdir(parents=True, exist_ok=True)
@@ -318,11 +543,11 @@ def daemon():
     check_previous_boot()
   except Exception as e:  # never let the boot check stop the watchdog
     log("previous boot check failed:", e)
-  every, timeout = float(cfg["probeEvery"]), float(cfg["probeTimeout"])
-  report_after, recover_after = float(cfg["reportAfter"]), float(cfg["recoverAfter"])
-  log(f"watching {instance()} (report after {report_after:g} s, recover after {recover_after:g} s)")
+  guard = Guard(cfg)
+  every = float(cfg["probeEvery"])
+  log(f"watching {instance()} (report {cfg['reportAfter']:g} s, Xwayland {cfg['xwaylandAfter']:g} s, "
+      f"restart {cfg['recoverAfter']:g} s, shell every {cfg['shellEvery']:g} s)")
   size, mirrored = -1, 0.0
-  since, failures, reported = None, [], None
   mono, boot = time.monotonic(), time.clock_gettime(time.CLOCK_BOOTTIME)
   while True:
     time.sleep(every)
@@ -334,33 +559,51 @@ def daemon():
       log("Hyprland is gone; stopping")
       return 0
     if slept:
-      since, failures = None, []
+      guard.since, guard.failures, guard.shell_fail = None, [], 0
       continue
-    why = probe(timeout)
-    if why is None:
-      if reported:
-        frozen = time.monotonic() - since
-        with open(reported, "a") as f:
-          f.write(f"\nRECOVERED by itself after {frozen:.0f} s\n")
-        notify("The desktop was frozen", f"It recovered by itself after {frozen:.0f} s.\nReport: {reported}")
-      since, failures, reported = None, [], None
-      if m - mirrored >= MIRROR_EVERY:
-        size, mirrored = mirror_log(size), m
-      continue
-    since = since or time.monotonic() - timeout
-    failures.append(f"{datetime.datetime.now():%H:%M:%S} {why}")
-    frozen = time.monotonic() - since
-    if not reported and frozen >= report_after:
-      reported = report(f"Hyprland has not answered for {frozen:.0f} s", pid, failures)
-      log("freeze report:", reported)
-    if recover_after > 0 and frozen >= recover_after:
-      result = recover(pid)
-      with open(reported, "a") as f:
-        f.write(f"\nRECOVERY after {frozen:.0f} s: {result}\n")
-        f.flush()
-        os.fsync(f.fileno())
-      log("recovery:", result)
+    if guard.tick(m, pid) == "recovered":
       return 0
+    if guard.since is None and m - mirrored >= MIRROR_EVERY:
+      size, mirrored = mirror_log(size), m
+
+
+def rescue(hard=False):
+  """Manual thaw: everything that does not lose windows; --hard also restarts Hyprland."""
+  done = []
+  woke = thaw_stopped()
+  if woke:
+    done.append("SIGCONT to " + ", ".join(woke))
+  pid = hypr_pid()
+  alive = pid is not None and probe(2) is None
+  if alive:
+    submap_reset()
+    done.append("keybinding submap reset")
+  xpid, disp = xwayland()
+  if xpid and not xwayland_ping(disp):
+    if restart_xwayland(xpid):
+      done.append(f"Xwayland {disp} restarted (X11 apps closed)")
+  if alive or pid is None:
+    if not shell_ping():
+      ok, _ = restart_shell()
+      done.append("shell restarted" + ("" if ok else " (still not answering)"))
+    if restart_dock():
+      done.append("dock restarted")
+  elif pid:
+    time.sleep(5)
+    if probe(2) is None:
+      done.append("Hyprland answers again")
+    elif hard:
+      done.append(f"Hyprland restarted: {recover(pid)}")
+    else:
+      done.append("Hyprland still frozen: the daemon restarts it at 60 s, or run: omarchy-freeze-guard rescue --hard")
+  path = report("manual rescue")
+  note(path, "\n".join(f"ACTION: {d}" for d in done) or "ACTION: nothing needed")
+  summary = "; ".join(done) or "nothing was stuck"
+  print(summary)
+  print(path)
+  if alive:
+    notify("Desktop rescue", f"{summary}\nReport: {path}")
+  return 0
 
 
 def last():
@@ -378,6 +621,8 @@ def main(argv):
   cmd = argv[1] if len(argv) > 1 else "daemon"
   if cmd == "daemon":
     return daemon()
+  if cmd == "rescue":
+    return rescue(hard="--hard" in argv[2:])
   if cmd == "report":
     print(report("manual report"))
     return 0

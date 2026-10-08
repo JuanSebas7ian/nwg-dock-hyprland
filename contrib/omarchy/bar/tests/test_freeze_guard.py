@@ -101,57 +101,103 @@ class PreviousBoot(unittest.TestCase):
     self.assertEqual(self.verdict([]), "unknown")
 
 
-class Daemon(unittest.TestCase):
-  def run_daemon(self, answers, cfg):
-    tmp = tempfile.mkdtemp()
-    m = load(tmp)
+class Ladder(unittest.TestCase):
+  """Drives Guard.tick with a fake clock; nothing is signalled for real."""
+
+  def setUp(self):
+    self.m = load(tempfile.mkdtemp())
     os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = "sig"
-    clock = [0.0]
-    m.time = types.SimpleNamespace(
-      sleep=lambda s: clock.__setitem__(0, clock[0] + s),
-      monotonic=lambda: clock[0], clock_gettime=lambda c: clock[0], CLOCK_BOOTTIME=7)
-    script = list(answers)
-    m.probe = lambda t: script.pop(0) if script else None
-    m.hypr_pid = lambda: 4242 if script or not cfg.get("exit_when_done") else None
-    m.config = lambda: dict(m.DEFAULTS, **{k: v for k, v in cfg.items() if k in m.DEFAULTS})
-    m.check_previous_boot = lambda: None
-    m.mirror_log = lambda size: size
-    reports, recovers = [], []
+    m = self.m
+    self.reports, self.recovers, self.x_restarts, self.shell_restarts = [], [], [], []
+    self.state = {"hypr": "S", "x_answers": True, "shell": [], "stopped": []}
 
     def report(reason, pid=None, failures=()):
-      p = m.STATE / f"freeze-{len(reports)}.txt"
       m.STATE.mkdir(parents=True, exist_ok=True)
+      p = m.STATE / f"freeze-{len(self.reports)}.txt"
       p.write_text(reason + "\n")
-      reports.append((clock[0], p))
+      self.reports.append(p)
       return p
 
     m.report = report
-    m.recover = lambda pid: recovers.append((clock[0], pid)) or "aborted"
-    rc = m.daemon()
-    return rc, reports, recovers
+    m.recover = lambda pid: self.recovers.append(pid) or "aborted"
+    m.proc_state = lambda pid: self.state["hypr"]
+    m.thaw_stopped = lambda: self.state["stopped"] and [self.state["stopped"].pop()]
+    m.xwayland = lambda: (77, ":0")
+    m.xwayland_ping = lambda d: self.state["x_answers"]
+    m.restart_xwayland = lambda pid: self.x_restarts.append(pid) or True
+    m.shell_ping = lambda: self.state["shell"].pop(0) if self.state["shell"] else True
+    m.restart_shell = lambda: self.shell_restarts.append(1) or (True, "")
 
-  def test_freeze_reports_then_recovers(self):
-    rc, reports, recovers = self.run_daemon(["no answer in 2 s"] * 100, {"reportAfter": 10, "recoverAfter": 60})
-    self.assertEqual(rc, 0)
-    self.assertEqual(len(reports), 1)
-    self.assertTrue(10 <= reports[0][0] <= 14, reports)
-    self.assertEqual(len(recovers), 1)
-    self.assertTrue(60 <= recovers[0][0] <= 64, recovers)
-    self.assertIn("RECOVERY", reports[0][1].read_text())
+  def drive(self, answers, cfg=None, every=2):
+    g = self.m.Guard(dict(self.m.DEFAULTS, **(cfg or {})))
+    script = list(answers)
+    self.m.probe = lambda timeout: script.pop(0)
+    t, out = 0.0, None
+    while script:
+      t += every
+      out = g.tick(t, 4242)
+      if out:
+        break
+    return g, t, out
 
-  def test_short_hiccup_only_reports(self):
-    rc, reports, recovers = self.run_daemon(["no answer in 2 s"] * 8 + [None],
-                                            {"reportAfter": 10, "recoverAfter": 60, "exit_when_done": True})
-    self.assertEqual(rc, 0)
-    self.assertEqual(len(reports), 1)
-    self.assertEqual(recovers, [])
-    self.assertIn("RECOVERED by itself", reports[0][1].read_text())
+  def test_gpu_freeze_goes_to_restart(self):
+    self.state["hypr"] = "D"
+    g, t, out = self.drive(["no answer"] * 100)
+    self.assertEqual(out, "recovered")
+    self.assertTrue(60 <= t <= 64)
+    self.assertEqual(len(self.reports), 1)
+    self.assertEqual(self.x_restarts, [], "Xwayland is not touched when Hyprland is inside the kernel")
+    self.assertIn("state D", self.reports[0].read_text())
 
-  def test_recover_disabled(self):
-    rc, reports, recovers = self.run_daemon(["no answer in 2 s"] * 100,
-                                            {"reportAfter": 10, "recoverAfter": 0, "exit_when_done": True})
-    self.assertEqual(len(reports), 1)
-    self.assertEqual(recovers, [])
+  def test_hung_xwayland_is_restarted_and_desktop_thaws(self):
+    self.state["x_answers"] = False
+    g, t, out = self.drive(["no answer"] * 11 + [None, None])
+    self.assertIsNone(out)
+    self.assertEqual(self.x_restarts, [77])
+    self.assertEqual(self.recovers, [])
+    text = self.reports[0].read_text()
+    self.assertIn("Xwayland :0 did not answer", text)
+    self.assertIn("THAWED", text)
+
+  def test_xwayland_fine_is_left_alone(self):
+    g, t, out = self.drive(["no answer"] * 100)
+    self.assertEqual(self.x_restarts, [])
+    self.assertIn("Xwayland (:0) answers", self.reports[0].read_text())
+    self.assertEqual(out, "recovered")
+
+  def test_short_hiccup_no_report(self):
+    g, t, out = self.drive(["no answer"] * 3 + [None])
+    self.assertEqual(self.reports, [])
+    self.assertEqual(self.recovers, [])
+
+  def test_steps_can_be_turned_off(self):
+    self.state["x_answers"] = False
+    g, t, out = self.drive(["no answer"] * 100, {"recoverAfter": 0, "xwaylandAfter": 0})
+    self.assertIsNone(out)
+    self.assertEqual(self.recovers, [])
+    self.assertEqual(self.x_restarts, [])
+
+  def test_stopped_process_gets_sigcont(self):
+    self.state["stopped"] = ["Hyprland (4242)"]
+    g, t, out = self.drive(["no answer", None])
+    self.assertEqual(self.state["stopped"], [])
+    self.assertEqual(self.reports, [], "a thawed hiccup needs no report")
+
+  def test_hung_shell_restarted_after_three_failures(self):
+    # ok once (seen), then 3 failures -> one restart
+    self.state["shell"] = [True, False, False, False]
+    self.drive([None] * 30, {"shellEvery": 10})
+    self.assertEqual(self.shell_restarts, [1])
+
+  def test_shell_never_seen_is_not_restarted(self):
+    self.state["shell"] = [False] * 20
+    self.drive([None] * 40, {"shellEvery": 10})
+    self.assertEqual(self.shell_restarts, [])
+
+  def test_shell_restart_rate_limited(self):
+    self.state["shell"] = ([True] + [False] * 3) * 6
+    self.drive([None] * 200, {"shellEvery": 2})
+    self.assertEqual(len(self.shell_restarts), 3)
 
 
 if __name__ == "__main__":
