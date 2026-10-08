@@ -9,6 +9,8 @@
 set -uo pipefail
 
 REMOTE=gphotos
+# Cliente OAuth compartido con omarchy-gcal (mismo proyecto de Google Cloud)
+SHARED_CLIENT=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-google/client.json
 
 say() { printf '\n==> %s\n' "$*"; }
 finish() {
@@ -25,6 +27,19 @@ if [[ ${1:-} == reconnect ]]; then
   say "Se abrirá el navegador: entra con tu cuenta de Google y acepta."
   rclone config reconnect "$REMOTE:" --auto-confirm || finish "No se pudo renovar el permiso." 1
 else
+  client_id="" client_secret=""
+  if [[ -s $SHARED_CLIENT ]] && command -v jq >/dev/null; then
+    shared_id=$(jq -r '.client_id // empty' "$SHARED_CLIENT")
+    printf 'Hay un cliente OAuth guardado (el de Google Calendar): %s…\n' "${shared_id:0:24}"
+    printf 'Antes, en ese mismo proyecto, habilita "Photos Library API":\n'
+    printf '  https://console.cloud.google.com/apis/library/photoslibrary.googleapis.com\n'
+    read -rp "¿Usarlo también para Google Fotos? [S/n] " ans
+    if [[ ! $ans =~ ^[nN] ]]; then
+      client_id=$shared_id
+      client_secret=$(jq -r '.client_secret // empty' "$SHARED_CLIENT")
+    fi
+  fi
+  if [[ -z $client_id ]]; then
   cat <<'EOF'
 Google Fotos: crear tu client ID (una sola vez, ~5 minutos, gratis)
 
@@ -43,9 +58,11 @@ EOF
   printf '\n'
   read -rp "ID de cliente (termina en .apps.googleusercontent.com): " client_id
   [[ $client_id == *.apps.googleusercontent.com ]] || finish "Ese no parece un ID de cliente de Google." 1
-  read -rsp "Secreto del cliente: " client_secret
+  read -rsp "Secreto del cliente (pégalo una sola vez): " client_secret
   echo
+  client_secret=${client_secret//[[:space:]]/}
   [[ -n $client_secret ]] || finish "El secreto no puede ir vacío." 1
+  fi
 
   if [[ $'\n'$remotes == *$'\n'$REMOTE:* ]]; then
     say "Ya existe el remoto $REMOTE: se reemplaza su client ID"
@@ -53,12 +70,14 @@ EOF
   fi
   say "Se abrirá el navegador: entra con tu cuenta de Google y acepta subir fotos."
   rclone config create "$REMOTE" googlephotos client_id="$client_id" client_secret="$client_secret" \
-    read_only=false include_archived=false ||
+    read_only=false include_archived=false >/dev/null ||
     finish "rclone no pudo crear el remoto. Revisa el ID, el secreto y que la API esté habilitada." 1
 fi
 
 say "Probando la conexión"
 if ! rclone lsd "$REMOTE:album" >/dev/null 2>&1; then
+  err=$(rclone lsd "$REMOTE:album" 2>&1 | grep -m1 -o 'Photos Library API has not been used[^.]*')
+  [[ -n $err ]] && finish "Falta habilitar la Photos Library API en tu proyecto: https://console.cloud.google.com/apis/library/photoslibrary.googleapis.com — luego vuelve a ejecutar gphotos-setup reconnect (o espera 1-2 minutos y repite)." 1
   finish "La conexión no responde. Prueba: rclone lsd $REMOTE:album -vv" 1
 fi
 echo "Conectado."
