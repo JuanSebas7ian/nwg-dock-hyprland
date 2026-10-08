@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Read-only, root-less smoke test of the maintenance plan.
 # One line per check: PASS|FAIL|WARN|SKIP <id> <text>; --json for reward.py.
-# Env: SYSFS_ROOT, PROC_ROOT (fake trees for tests), SMARTD_CONF, BOOT_USED_PCT, DRIVERS_DIR (override).
+# Env: SYSFS_ROOT, PROC_ROOT (fake trees for tests), SMARTD_CONF, BOOT_USED_PCT, DRIVERS_DIR (override),
+#      BAR_DIR, USER_BIN, USER_UNITS (the desktop guards: repo copy, installed binaries and units).
 # Option: --only ID,ID  runs just those checks.
 set -uo pipefail
 export LC_ALL=C
@@ -11,6 +12,9 @@ PROC_ROOT=${PROC_ROOT:-/proc}
 SMARTD_CONF=${SMARTD_CONF:-/etc/smartd.conf}
 DRIVERS_DIR=${DRIVERS_DIR:-$(cd "$(dirname "$0")/../drivers" && pwd)}
 HOOK_ETC=${HOOK_ETC:-/etc/pacman.d/hooks}; HOOK_LIB=${HOOK_LIB:-/usr/local/lib/omarchy}
+BAR_DIR=${BAR_DIR:-$(cd "$(dirname "$0")/../bar" && pwd)}
+USER_BIN=${USER_BIN:-$HOME/.local/bin}
+USER_UNITS=${USER_UNITS:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}
 JSON=0
 ONLY=""
 while [ $# -gt 0 ]; do
@@ -163,6 +167,43 @@ if want HOOK01; then  # not part of the reward: informational only
     [ -x "$HOOK_LIB/compat.py" ] && cmp -s "$DRIVERS_DIR/compat.py" "$HOOK_LIB/compat.py" || bad="$bad compat.py"
     if [ -z "$bad" ]; then emit PASS HOOK01 "drivers: gancho de pacman instalado y al día"
     else emit WARN HOOK01 "drivers: gancho de pacman ausente o desactualizado:$bad"; fi
+fi
+
+# --- desktop guards (contrib/omarchy/bar): GUARD = freeze-guard, MEMG = memguard ---
+# <prefix> <name>: 01 enabled+active, 02 installed copy = repo, 03 the unit restarts it always.
+guard_checks() {
+    local p=$1 name=$2 en act unit=$USER_UNITS/$2.service
+    if want "${p}01"; then
+        en=$(systemctl --user is-enabled "$name.service" 2>&1); act=$(systemctl --user is-active "$name.service" 2>&1)
+        if [[ "$en$act" == *"Failed to connect"* || "$en$act" == *"No medium"* ]]; then emit SKIP "${p}01" "$name: sin sesion de usuario"
+        elif [ "$en" = enabled ] && [ "$act" = active ]; then emit PASS "${p}01" "$name enabled y activo"
+        else emit FAIL "${p}01" "$name: $en / $act"; fi
+    fi
+    if want "${p}02"; then
+        if [ ! -x "$USER_BIN/$name" ]; then emit FAIL "${p}02" "$name no instalado en $USER_BIN"
+        elif cmp -s "$BAR_DIR/bin/$name" "$USER_BIN/$name"; then emit PASS "${p}02" "$name instalado = repo"
+        else emit WARN "${p}02" "$name instalado difiere del repo: contrib/omarchy/bar/install.sh"; fi
+    fi
+    if want "${p}03"; then
+        if [ ! -r "$unit" ]; then emit FAIL "${p}03" "falta $unit"
+        elif grep -qx 'Restart=always' "$unit" && grep -qx 'StartLimitIntervalSec=0' "$unit"; then
+            emit PASS "${p}03" "$name.service se relanza siempre (Restart=always, sin limite)"
+        else emit FAIL "${p}03" "$name.service no se relanza siempre"; fi
+    fi
+}
+guard_checks GUARD omarchy-freeze-guard
+guard_checks MEMG omarchy-memguard
+if want MEMG04; then
+    if [ ! -x "$USER_BIN/omarchy-memguard" ]; then emit FAIL MEMG04 "omarchy-memguard no instalado"
+    else
+        mout=$(timeout 60 "$USER_BIN/omarchy-memguard" smoke 2>&1); mrc=$?
+        if grep -q '^FAIL.*Failed to connect' <<<"$mout"; then emit SKIP MEMG04 "omarchy-memguard smoke: sin sesion de usuario"
+        elif [ "$mrc" -eq 0 ]; then
+            w=$(grep -c '^WARN' <<<"$mout")
+            if [ "$w" -eq 0 ]; then emit PASS MEMG04 "omarchy-memguard smoke sin fallos"
+            else emit WARN MEMG04 "omarchy-memguard smoke: $(grep -m1 '^WARN' <<<"$mout")"; fi
+        else emit FAIL MEMG04 "omarchy-memguard smoke: $(grep -m1 '^FAIL' <<<"$mout")"; fi
+    fi
 fi
 
 if [ "$JSON" -eq 1 ]; then

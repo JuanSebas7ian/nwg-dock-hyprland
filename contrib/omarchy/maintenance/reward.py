@@ -12,8 +12,9 @@ import json
 import sys
 
 WEIGHTS = {
-    "TRIM": 22, "SMART": 17, "PACCACHE": 8, "SCRUB": 8, "ORPHAN": 4,
-    "PKG": 8, "BOOT": 4, "SVC": 9, "HYPR": 5, "DRIVERS": 15,
+    "TRIM": 20, "SMART": 15, "PACCACHE": 7, "SCRUB": 7, "ORPHAN": 4,
+    "PKG": 7, "BOOT": 4, "SVC": 8, "HYPR": 5, "DRIVERS": 15,
+    "GUARD": 4, "MEMG": 4,  # the desktop guards (freeze-guard, memguard): not blocking
 }
 THRESHOLD = 90
 BLOCKING = ("TRIM", "SMART", "DRIVERS")

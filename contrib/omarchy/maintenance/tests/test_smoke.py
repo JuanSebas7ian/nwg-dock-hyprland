@@ -98,6 +98,66 @@ class SmokeTest(unittest.TestCase):
         self.assertTrue(p.stdout.startswith("FAIL SMART02"), p.stdout)
 
 
+class GuardChecksTest(unittest.TestCase):
+    """GUARD/MEMG: the desktop guards are enabled, current and always restarted."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = self.tmp.name
+        self.bar, self.ubin, self.units, self.stubs = (os.path.join(t, d) for d in ("bar", "ubin", "units", "stubs"))
+        for d in (os.path.join(self.bar, "bin"), self.ubin, self.units, self.stubs):
+            os.makedirs(d)
+        for name in ("omarchy-freeze-guard", "omarchy-memguard"):
+            put(os.path.join(self.bar, "bin", name), "#!/bin/sh\necho PASS ok\n")
+            put(os.path.join(self.ubin, name), "#!/bin/sh\necho PASS ok\n")
+            os.chmod(os.path.join(self.ubin, name), 0o755)
+            put(os.path.join(self.units, name + ".service"),
+                "[Unit]\nStartLimitIntervalSec=0\n[Service]\nRestart=always\n")
+        self.systemctl("enabled", "active")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def systemctl(self, enabled, active):
+        p = os.path.join(self.stubs, "systemctl")
+        put(p, '#!/bin/sh\ncase "$2" in is-enabled) echo %s;; is-active) echo %s;; esac\n' % (enabled, active))
+        os.chmod(p, 0o755)
+
+    def run_ids(self, ids):
+        env = {**os.environ, "PATH": self.stubs + ":" + os.environ["PATH"], "BAR_DIR": self.bar,
+               "USER_BIN": self.ubin, "USER_UNITS": self.units}
+        p = subprocess.run(["bash", SMOKE, "--only", ids], capture_output=True, text=True, env=env)
+        return {l.split()[1]: l.split()[0] for l in p.stdout.splitlines() if l.strip()}
+
+    def test_all_good(self):
+        r = self.run_ids("GUARD01,GUARD02,GUARD03,MEMG01,MEMG02,MEMG03,MEMG04")
+        self.assertEqual(set(r.values()), {"PASS"}, r)
+
+    def test_inactive_service_fails(self):
+        self.systemctl("enabled", "inactive")
+        self.assertEqual(self.run_ids("GUARD01,MEMG01"), {"GUARD01": "FAIL", "MEMG01": "FAIL"})
+
+    def test_no_user_session_skips(self):
+        self.systemctl("Failed to connect to bus", "Failed to connect to bus")
+        self.assertEqual(self.run_ids("GUARD01"), {"GUARD01": "SKIP"})
+
+    def test_stale_install_warns_missing_fails(self):
+        put(os.path.join(self.ubin, "omarchy-memguard"), "#!/bin/sh\nold\n")
+        os.remove(os.path.join(self.ubin, "omarchy-freeze-guard"))
+        self.assertEqual(self.run_ids("GUARD02,MEMG02"), {"GUARD02": "FAIL", "MEMG02": "WARN"})
+
+    def test_unit_that_gives_up_fails(self):
+        put(os.path.join(self.units, "omarchy-memguard.service"), "[Service]\nRestart=on-failure\n")
+        self.assertEqual(self.run_ids("MEMG03"), {"MEMG03": "FAIL"})
+
+    def test_memguard_self_check(self):
+        mg = os.path.join(self.ubin, "omarchy-memguard")
+        put(mg, "#!/bin/sh\necho PASS a\necho WARN NVML not available\n")
+        self.assertEqual(self.run_ids("MEMG04"), {"MEMG04": "WARN"})
+        put(mg, "#!/bin/sh\necho FAIL no status.json\nexit 1\n")
+        self.assertEqual(self.run_ids("MEMG04"), {"MEMG04": "FAIL"})
+
+
 class NotifyTest(unittest.TestCase):
     def test_logs_and_notifies(self):
         with tempfile.TemporaryDirectory() as t:

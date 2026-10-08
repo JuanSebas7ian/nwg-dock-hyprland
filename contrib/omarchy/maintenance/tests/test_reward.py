@@ -9,7 +9,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 import reward  # noqa: E402
 
-GROUPS = ["TRIM", "SMART", "PACCACHE", "SCRUB", "ORPHAN", "PKG", "BOOT", "SVC", "HYPR", "DRIVERS"]
+GROUPS = list(reward.WEIGHTS)
 
 
 def checks(**over):
@@ -17,6 +17,11 @@ def checks(**over):
 
 
 class RewardTest(unittest.TestCase):
+    def test_guards_count_but_do_not_block(self):
+        r = reward.score(checks(GUARD="FAIL", MEMG="FAIL"))
+        self.assertEqual(r["score"], 100 - reward.WEIGHTS["GUARD"] - reward.WEIGHTS["MEMG"])
+        self.assertEqual(r["blockers"], [])
+
     def test_weights_sum_to_100(self):
         self.assertEqual(sum(reward.WEIGHTS.values()), 100)
         self.assertEqual(reward.WEIGHTS["DRIVERS"], 15)
@@ -29,10 +34,10 @@ class RewardTest(unittest.TestCase):
 
     def test_threshold_boundary(self):
         W = reward.WEIGHTS
-        r = reward.score(checks(PKG="FAIL"))  # 100 - 8 = 92
+        r = reward.score(checks(PKG="FAIL"))  # 100 - 7 = 93
         self.assertEqual(r["score"], 100 - W["PKG"])
         self.assertTrue(r["stable"])
-        r = reward.score(checks(PKG="FAIL", SVC="FAIL"))  # 100 - 8 - 9 = 83
+        r = reward.score(checks(PKG="FAIL", SVC="FAIL"))  # 100 - 7 - 8 = 85
         self.assertEqual(r["score"], 100 - W["PKG"] - W["SVC"])
         self.assertFalse(r["stable"])
 
