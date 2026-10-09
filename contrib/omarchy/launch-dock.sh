@@ -15,7 +15,8 @@ LOCK="${XDG_RUNTIME_DIR:-/tmp}/launch-dock.lock"
 exec 9>"$LOCK"
 flock -n 9 || exit 0
 
-DOCK_ARGS=(-d -i 48 -mb 10 -f -w 8 -hd 300)
+# -x: siempre visible y reserva su espacio (las ventanas no lo tapan). Antes: -d (autohide) -hd 300
+DOCK_ARGS=(-x -i 48 -mb 10 -f -w 8)
 DND_BIN="$HOME/.local/bin/nwg-dock-hyprland-dnd"
 OFFICIAL_BIN=/usr/bin/nwg-dock-hyprland
 # Solo procesos cuyo ejecutable sea uno de los dos docks
