@@ -13,6 +13,7 @@
 @HOME@/.local/share/mise/installs
 @HOME@/.local/share/flatpak
 @HOME@/.ollama/models
+@HOME@/ai/tools/ollama-*
 @HOME@/.config/*/Cache
 @HOME@/.config/*/Code Cache
 @HOME@/.config/*/GPUCache
