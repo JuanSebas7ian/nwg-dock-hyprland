@@ -91,7 +91,8 @@ class Machine:
 
     m.ollama_unload = unload
     m.ollama_generating = lambda vram: mc.ollama_sm >= 5
-    m.comm_of = lambda pid: {900: "ollama", 950: "voxtype"}.get(pid, "python3")
+    m.comm_of = lambda pid: {900: "ollama", 901: "ollama", 950: "voxtype"}.get(pid, "python3")
+    m.is_main_ollama = lambda pid: pid == 900  # 901 = a second Ollama (test build in a user unit)
     self.vox_resident = 1552 * MB
     self.vox_idle = True
     self.vox_calls = []
@@ -391,6 +392,29 @@ class Vram(Base):
     mc.run(20)
     self.assertEqual(mc.unloaded, ["qwen2.5-coder:7b"])
 
+  def test_a_second_ollama_loading_a_model_counts_as_asking_for_vram(self):
+    # 2026-10-08: a test Ollama 0.40.1 on port 11435 loaded a 9B model (8.9 GB)
+    procs = [{"pid": 900, "mem": 2 * GB, "type": "C", "sm": 0}, {"pid": 901, "mem": 1 * GB, "type": "C", "sm": 50}]
+
+    def loads(mc, t):
+      procs[1]["mem"] += 500 * MB
+      mc.vram = self.vram(1000, procs)
+
+    mc = Machine(self.m, vram=self.vram(1000, procs), script=loads)
+    mc.run(20)
+    self.assertEqual(mc.unloaded, ["qwen2.5-coder:7b"], "the main Ollama's idle model makes room")
+
+  def test_the_main_ollama_loading_its_own_model_is_not_competition(self):
+    procs = [{"pid": 900, "mem": 2 * GB, "type": "C", "sm": 0}]
+
+    def loads(mc, t):
+      procs[0]["mem"] += 500 * MB
+      mc.vram = self.vram(1000, procs)
+
+    mc = Machine(self.m, vram=self.vram(1000, procs), script=loads)
+    mc.run(20)
+    self.assertEqual(mc.unloaded, [])
+
   def test_model_answering_a_request_is_never_unloaded(self):
     procs = [{"pid": 900, "mem": 6 * GB, "type": "C", "sm": 80}, {"pid": 777, "mem": 4 * GB, "type": "C", "sm": 90}]
 
@@ -487,6 +511,18 @@ class Dictation(Base):
     mc.loaded_models = []
     mc.run(30, cfg={"voxtypeOffload": 0})
     self.assertEqual(mc.vox_calls, [])
+
+
+class MainOllama(Base):
+  def test_main_ollama_is_the_system_service(self):
+    m = self.m
+    m.comm_of = lambda pid: "ollama"
+    cg = {1: "0::/system.slice/ollama.service\n",
+          2: "0::/user.slice/user-1000.slice/user@1000.service/app.slice/ollama-test.service\n"}
+    real = m.read
+    m.read = lambda p, default="": cg[int(str(p).split("/")[2])] if str(p).endswith("/cgroup") else real(p, default)
+    self.assertTrue(m.is_main_ollama(1))
+    self.assertFalse(m.is_main_ollama(2))
 
 
 class Classify(Base):

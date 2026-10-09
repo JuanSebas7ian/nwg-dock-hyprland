@@ -535,10 +535,17 @@ def voxtype_set_isolation(on):
   return run(["systemctl", "--user", "restart", "voxtype.service"], timeout=30)[0] == 0
 
 
+def is_main_ollama(pid):
+  """The Ollama memguard talks to (system ollama.service, port 11434). Another
+  instance (e.g. a test build in a transient user unit on 11435) is just
+  another process asking for VRAM."""
+  return comm_of(pid).startswith("ollama") and "/system.slice/ollama.service" in read(PROC / str(pid) / "cgroup")
+
+
 def ollama_generating(vram):
-  """True if an Ollama process is using the GPU's compute right now."""
+  """True if the main Ollama is using the GPU's compute right now."""
   for p in (vram or {}).get("procs", []):
-    if comm_of(p["pid"]).startswith("ollama") and p.get("sm", 0) >= 5:
+    if is_main_ollama(p["pid"]) and p.get("sm", 0) >= 5:
       return True
   return False
 
@@ -801,7 +808,7 @@ class Guard:
     """Remember each non-Ollama process's VRAM, to tell who is asking for more."""
     self.vram_seen = getattr(self, "vram_seen", {})
     for p in (vram or {}).get("procs", []):
-      if comm_of(p["pid"]).startswith(("ollama", "voxtype")):  # their own load/transcription is not competition
+      if is_main_ollama(p["pid"]) or comm_of(p["pid"]).startswith("voxtype"):  # their own load/transcription is not competition
         continue
       hist = self.vram_seen.setdefault(p["pid"], [])
       hist.append((t, p["mem"]))
