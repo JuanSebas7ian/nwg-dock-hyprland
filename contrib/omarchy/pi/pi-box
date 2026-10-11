@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# pi-box: run Pi inside Docker ("YOLO" mode without risking the host).
+# Only the current folder is mounted (read-write, as /workspace); Pi's config
+# lives in ~/.local/share/pi-box/home (sessions, caches), seeded each run with models.json, mcp.json, AGENTS.md and
+# settings.json (never auth.json). --network host lets it reach the local
+# llama.cpp router on 127.0.0.1:8080. Files keep your user and group.
+#   pi-box [pi args…]        e.g.  pi-box   |   pi-box -p "write the tests" </dev/null
+#   pi-box --build           (re)build the image
+set -euo pipefail
+image=pi-box:latest
+if [[ ${1:-} == --build ]] || ! docker image inspect "$image" >/dev/null 2>&1; then
+  src=${PI_BOX_SRC:-$HOME/src/nwg-dock-hyprland-dnd/contrib/omarchy/pi}
+  docker build -t "$image" "$src"
+  [[ ${1:-} == --build ]] && exit 0
+fi
+[[ $PWD == "$HOME" || $PWD == / ]] && { echo "pi-box: run it inside a project folder, not $PWD" >&2; exit 2; }
+boxhome=${PI_BOX_HOME:-$HOME/.local/share/pi-box/home}
+mkdir -p "$boxhome/.pi/agent"
+for f in models.json mcp.json AGENTS.md settings.json; do
+  [[ -f $HOME/.pi/agent/$f ]] && cp "$HOME/.pi/agent/$f" "$boxhome/.pi/agent/"
+done
+# the container has no ~/src or ~/ai/projects: the filesystem MCP serves /workspace
+[[ -f $boxhome/.pi/agent/mcp.json ]] && sed -i 's#"~/src", "~/ai/projects"#"/workspace"#' "$boxhome/.pi/agent/mcp.json"
+tty=(); [[ -t 0 && -t 1 ]] && tty=(-it)
+exec docker run --rm "${tty[@]}" \
+  --network host --user "$(id -u):$(id -g)" \
+  --memory 6g --pids-limit 1024 --security-opt no-new-privileges \
+  -e HOME=/home/pi -e LLAMA_BASE_URL=http://127.0.0.1:8080 \
+  -v "$boxhome:/home/pi" \
+  -v "$PWD:/workspace" -w /workspace \
+  "$image" "$@"

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# pi-web: Pi with the pi-web-access extension (web search, URL/PDF/YouTube) for
+# this session only. It adds ~3.2k tokens to every request, so plain `pi` keeps
+# it off; URL fetching alone is already there through the "fetch" MCP server.
+exec pi -e npm:pi-web-access@0.38.0 "$@"
