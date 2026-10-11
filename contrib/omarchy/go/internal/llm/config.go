@@ -57,7 +57,7 @@ func DefaultConfig(home string) Config {
 		OllamaURL:      "http://127.0.0.1:11434",
 		IdleSeconds:    900,
 		MaxLoaded:      1,
-		Defaults: Params{Ctx: 32768, GPULayers: 99, FlashAttn: "on", CacheK: "q8_0", CacheV: "q8_0",
+		Defaults: Params{Ctx: 32768, FlashAttn: "on", CacheK: "q8_0", CacheV: "q8_0",
 			Threads: 6, ThreadsBatch: 12, Batch: 2048, UBatch: 512, Parallel: 1, Jinja: boolPtr(true)},
 		Models: map[string]Params{},
 	}

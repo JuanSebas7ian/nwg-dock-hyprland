@@ -143,7 +143,7 @@ func TestMergedOverridesOnlyWhatIsSet(t *testing.T) {
 	c.Models["m"] = Params{Ctx: 4096, CacheK: "f16", Extra: "seed = 1"}
 	c.Defaults.Extra = "temp = 0.2"
 	p := c.Merged("m")
-	if p.Ctx != 4096 || p.CacheK != "f16" || p.CacheV != "q8_0" || p.GPULayers != 99 || p.Extra != "temp = 0.2; seed = 1" {
+	if p.Ctx != 4096 || p.CacheK != "f16" || p.CacheV != "q8_0" || p.GPULayers != 0 || p.Extra != "temp = 0.2; seed = 1" {
 		t.Fatalf("%+v", p)
 	}
 }

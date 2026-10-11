@@ -603,7 +603,7 @@ Panel {
             Repeater {
               model: [
                 { key: "ctx", label: "Context (tokens)", hint: "32768 for agents; more context = more VRAM" },
-                { key: "gpuLayers", label: "GPU layers", hint: "99 = everything on the GPU" },
+                { key: "gpuLayers", label: "GPU layers", hint: "0 = auto: llama.cpp puts on the GPU what fits (big models spill to RAM)" },
                 { key: "flashAttn", label: "Flash attention", hint: "on | off | auto" },
                 { key: "cacheK", label: "KV cache K", hint: "q8_0 halves the memory of the context; f16 is exact" },
                 { key: "cacheV", label: "KV cache V", hint: "q8_0 | f16 | q4_0" },
