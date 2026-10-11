@@ -15,6 +15,7 @@ WEIGHTS = {
     "TRIM": 20, "SMART": 15, "PACCACHE": 7, "SCRUB": 7, "ORPHAN": 4,
     "PKG": 7, "BOOT": 4, "SVC": 8, "HYPR": 5, "DRIVERS": 15,
     "GUARD": 4, "MEMG": 4,  # the desktop guards (freeze-guard, memguard): not blocking
+    "STAB": 4, "SPLASH": 2, "WIDG": 4, "LLM": 4,  # 2026-10-11: watchdog, boot, Go widgets, llama.cpp
 }
 THRESHOLD = 90
 BLOCKING = ("TRIM", "SMART", "DRIVERS")

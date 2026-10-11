@@ -19,6 +19,9 @@ ExecStart=/usr/bin/rclone mount rclone: %h/GoogleDrive \
 ExecStop=/usr/bin/fusermount3 -uz %h/GoogleDrive
 Restart=on-failure
 RestartSec=15
+# A revoked login fails forever: back off to one try every 10 min instead of every few seconds.
+RestartSteps=8
+RestartMaxDelaySec=10min
 
 [Install]
 WantedBy=default.target

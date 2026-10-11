@@ -226,6 +226,63 @@ if want MEMG06; then  # what the widget reads
     fi
 fi
 
+# ---------------------------------------------------------------- stability (hard lockups)
+if want STAB01; then
+    wd=$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null)
+    if [ -n "$wd" ] && [ "$wd" != "0" ] && [ "$wd" != "infinity" ]; then emit PASS STAB01 "watchdog de hardware activo ($wd): un cuelgue del kernel reinicia solo"
+    else emit WARN STAB01 "watchdog de hardware sin usar: sudo contrib/omarchy/stability/install.sh"; fi
+fi
+if want STAB02; then
+    hp=$(cat "$PROC_ROOT/sys/kernel/hardlockup_panic" 2>/dev/null); pn=$(cat "$PROC_ROOT/sys/kernel/panic" 2>/dev/null)
+    if [ "$hp" = 1 ] && [ "${pn:-0}" -gt 0 ] 2>/dev/null; then emit PASS STAB02 "bloqueo duro -> panico -> reinicio en ${pn}s"
+    else emit WARN STAB02 "un bloqueo duro deja el PC congelado (hardlockup_panic=$hp, panic=$pn)"; fi
+fi
+# ---------------------------------------------------------------- boot splash
+if want SPLASH01; then
+    if grep -qw plymouth.debug "$PROC_ROOT/cmdline" 2>/dev/null; then
+        if ls /etc/limine-entry-tool.d/claude-plymouth-debug.conf >/dev/null 2>&1; then emit WARN SPLASH01 "plymouth.debug activo: texto de terminal al arrancar (boot/install.sh splash-smooth)"
+        else emit WARN SPLASH01 "plymouth.debug ya quitado: falta reiniciar"; fi
+    else emit PASS SPLASH01 "arranque sin texto de depuracion de Plymouth"; fi
+fi
+# ---------------------------------------------------------------- Go widget backends
+gojson() { # bin args... ; python assertion on stdin
+    local bin=$1; shift; local check=$1; shift
+    [ -x "$USER_BIN/$bin" ] || return 2
+    timeout 60 "$USER_BIN/$bin" "$@" 2>/dev/null | python3 -c "import json,sys; d=json.loads(sys.stdin.read().strip().splitlines()[-1]); assert $check" 2>/dev/null
+}
+if want WIDG01; then
+    if gojson omarchy-spotify 'd["installed"] and d["authenticated"]' setup-state; then emit PASS WIDG01 "omarchy-spotify: spotifyd instalado y cuenta conectada"
+    else emit WARN WIDG01 "omarchy-spotify no responde o la cuenta no esta conectada (spotify-bar-setup)"; fi
+fi
+if want WIDG02; then
+    if systemctl --user is-active -q omarchy-spotify-heal.service 2>/dev/null; then emit PASS WIDG02 "omarchy-spotify-heal vigila spotifyd"
+    else emit WARN WIDG02 "omarchy-spotify-heal no esta activo"; fi
+fi
+if want WIDG03; then
+    if gojson omarchy-drivers 'd["state"] in ("ok","update","reboot") and d["components"]' status; then emit PASS WIDG03 "omarchy-drivers: estado de drivers valido"
+    else emit FAIL WIDG03 "omarchy-drivers no devuelve el estado de los drivers"; fi
+fi
+if want WIDG04; then
+    if gojson omarchy-agent-usage-pi 'd["id"]=="pi" and isinstance(d["limits"], list)'; then emit PASS WIDG04 "Pi en el panel de agentes (registro valido)"
+    else emit WARN WIDG04 "omarchy-agent-usage-pi no devuelve el registro de Pi"; fi
+fi
+# ---------------------------------------------------------------- local models (llama.cpp)
+if want LLM01; then
+    if systemctl --user is-active -q llama-router.service 2>/dev/null && curl -fsS -m 5 http://127.0.0.1:8080/models >/dev/null 2>&1; then
+        emit PASS LLM01 "llama-router activo y responde en :8080"
+    else emit FAIL LLM01 "llama-router no responde (journalctl --user -u llama-router)"; fi
+fi
+if want LLM02; then
+    if gojson omarchy-llm 'len(d["llama"]["models"]) > 0 and d["backend"] in ("llama","ollama")' status; then emit PASS LLM02 "omarchy-llm: modelos detectados para llama.cpp"
+    else emit WARN LLM02 "omarchy-llm sin modelos o sin respuesta"; fi
+fi
+if want LLM03; then
+    oc=${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json; pim=$HOME/.pi/agent/models.json
+    if python3 -c "import json,sys; o=json.load(open('$oc')); assert o['provider']['llama']['models']; p=json.load(open('$pim')); assert p['providers']['llama-local']['models']" 2>/dev/null; then
+        emit PASS LLM03 "opencode (llama) y Pi (llama-local) ven los modelos de llama.cpp"
+    else emit WARN LLM03 "opencode o Pi sin el proveedor de llama.cpp (omarchy-llm sync)"; fi
+fi
+
 if [ "$JSON" -eq 1 ]; then
     printf '%s\n' "${LINES[@]}" | python3 -c '
 import json, sys

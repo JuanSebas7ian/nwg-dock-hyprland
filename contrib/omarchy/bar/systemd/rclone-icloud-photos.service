@@ -25,6 +25,9 @@ ExecStart=/usr/bin/rclone mount icloud: %h/iCloudPhotos \
 ExecStop=/usr/bin/fusermount3 -uz %h/iCloudPhotos
 Restart=on-failure
 RestartSec=30
+# A revoked login fails forever: back off to one try every 10 min instead of every few seconds.
+RestartSteps=8
+RestartMaxDelaySec=10min
 
 [Install]
 WantedBy=default.target
