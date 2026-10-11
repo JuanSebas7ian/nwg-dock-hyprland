@@ -1,0 +1,9 @@
+[package]
+name = "omarchy-freeze-guard"
+version = "2.0.0"
+edition = "2021"
+description = "Detects desktop freezes (Hyprland, picture, shell) and thaws them without losing windows"
+
+[dependencies]
+serde_json = "1"
+libc = "0.2"

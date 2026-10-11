@@ -39,7 +39,7 @@ RETIRED=(
   juansebas7ian.gdrive juansebas7ian.icloud juansebas7ian.gphotos
   juansebas7ian.sysmon juansebas7ian.cooling juansebas7ian.storage juansebas7ian.nvidia juansebas7ian.drivers
 )
-COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session omarchy-freeze-guard omarchy-memguard bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn omarchy-gcal oc-run pi-web)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session omarchy-memguard bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn omarchy-gcal oc-run pi-web)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }
@@ -104,7 +104,7 @@ remove_all() {
   for unit in omarchy-spotify-heal.service llama-router.service; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
-  for c in "${COLLECTORS[@]}" omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers pi-box; do
+  for c in "${COLLECTORS[@]}" omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers omarchy-freeze-guard pi-box; do
     [[ -e $BIN/$c ]] && backup "$BIN/$c" && rm -f "$BIN/$c"
   done
   rm -f "${XDG_STATE_HOME:-$HOME/.local/state}"/omarchy/agents/usage/{antigravity,opencode}.json
@@ -178,6 +178,23 @@ if command -v go >/dev/null; then
   fi
 else
   warn "sin Go no se compilan los backends: omarchy pkg add go"
+fi
+
+# --------------------------------------------------------------- demonios en Rust
+# contrib/omarchy/rust: los guardianes del escritorio. Se prueban antes de instalar.
+RUST_TOOLS=(omarchy-freeze-guard)
+RUST_SRC=$(cd "$HERE/../rust" && pwd)
+if command -v cargo >/dev/null; then
+  say "Demonios en Rust (${RUST_TOOLS[*]})"
+  if (cd "$RUST_SRC" && cargo test --release -q >/dev/null 2>&1 && cargo build --release -q); then
+    for t in "${RUST_TOOLS[@]}"; do
+      install_file "$RUST_SRC/target/release/$t" "$BIN/$t" 755 || say "  sin cambios: $BIN/$t"
+    done
+  else
+    warn "las pruebas de Rust fallan (cd $RUST_SRC && cargo test): se deja el binario instalado"
+  fi
+else
+  warn "sin cargo no se compilan los guardianes: omarchy pkg add rustup && rustup default stable"
 fi
 
 # --------------------------------------------------------------- Pi en Docker (contrib/omarchy/pi)

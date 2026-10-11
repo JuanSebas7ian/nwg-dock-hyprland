@@ -184,6 +184,8 @@ guard_checks() {
     fi
     if want "${p}02"; then
         if [ ! -x "$USER_BIN/$name" ]; then emit FAIL "${p}02" "$name no instalado en $USER_BIN"
+        elif [ -e "$BAR_DIR/../rust/target/release/$name" ] && cmp -s "$BAR_DIR/../rust/target/release/$name" "$USER_BIN/$name"; then
+            emit PASS "${p}02" "$name instalado = compilado del repo (Rust)"
         elif cmp -s "$BAR_DIR/bin/$name" "$USER_BIN/$name"; then emit PASS "${p}02" "$name instalado = repo"
         else emit WARN "${p}02" "$name instalado difiere del repo: contrib/omarchy/bar/install.sh"; fi
     fi
