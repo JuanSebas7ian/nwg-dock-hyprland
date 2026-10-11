@@ -42,7 +42,7 @@ func SyncPi(agentDir string, c Config, models []Model) (bool, error) {
 	}
 	list := []any{}
 	for _, m := range models {
-		p := c.Merged(m.ID)
+		p := c.Effective(m)
 		ctxLen := p.Ctx
 		if ctxLen == 0 {
 			ctxLen = 4096

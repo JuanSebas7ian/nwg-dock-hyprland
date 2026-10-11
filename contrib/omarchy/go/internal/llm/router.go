@@ -23,7 +23,7 @@ func RenderPreset(c Config, models []Model) string {
 		fmt.Fprintf(&b, "\n[*]\nsleep-idle-seconds = %d\n", c.IdleSeconds)
 	}
 	for _, m := range models {
-		p := c.Merged(m.ID)
+		p := c.Effective(m)
 		fmt.Fprintf(&b, "\n[%s]\nmodel = %s\n", m.ID, m.Path)
 		if m.MMProj != "" {
 			fmt.Fprintf(&b, "mmproj = %s\n", m.MMProj)
@@ -49,6 +49,7 @@ func RenderPreset(c Config, models []Model) string {
 		kv("batch-size", p.Batch)
 		kv("ubatch-size", p.UBatch)
 		kv("parallel", p.Parallel)
+		kv("cache-reuse", p.CacheReuse)
 		if p.Jinja != nil {
 			if *p.Jinja {
 				b.WriteString("jinja = on\n")
@@ -231,7 +232,7 @@ func SyncOpencode(path string, c Config, models []Model, now time.Time) (bool, e
 	llama["options"] = map[string]any{"baseURL": fmt.Sprintf("http://%s:%d/v1", c.Host, c.Port)}
 	entries := map[string]any{}
 	for _, m := range models {
-		p := c.Merged(m.ID)
+		p := c.Effective(m)
 		ctxLen := p.Ctx
 		if ctxLen == 0 {
 			ctxLen = 4096

@@ -21,6 +21,9 @@ type Model struct {
 	MMProj string `json:"mmproj,omitempty"`
 	Size   int64  `json:"size"`
 	Quant  string `json:"quant,omitempty"`
+	Tuned  *Tuned `json:"tuned,omitempty"` // auto-tuner's choice (Discover with a VRAM size)
+	Native int    `json:"nativeCtx,omitempty"`
+	MoE    bool   `json:"moe,omitempty"`
 }
 
 var idUnsafe = regexp.MustCompile(`[^a-z0-9._-]+`)
@@ -199,6 +202,13 @@ func Discover(c Config) []Model {
 			all[i].Arch = info.Arch
 			if all[i].Quant == "" {
 				all[i].Quant = info.Quant
+			}
+			prof := Profile(info)
+			all[i].Native, all[i].MoE = prof.Native, prof.Experts > 0
+			if c.AutoTune {
+				weights, _ := ModelProfile(Model{Size: all[i].Size, MMProj: all[i].MMProj})
+				t := Tune(weights, prof, c.VRAM)
+				all[i].Tuned = &t
 			}
 		}
 	}

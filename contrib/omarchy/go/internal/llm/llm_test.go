@@ -91,7 +91,7 @@ func TestConfigDefaultsLoadSaveAndValidate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "c.json")
 	c, err := LoadConfig(path, "/home/u")
-	if err != nil || c.DefaultBackend != "llama" || c.Port != 8080 || c.Defaults.Ctx != 32768 || c.ModelsDir != "/home/u/ai/models/gguf" {
+	if err != nil || c.DefaultBackend != "llama" || c.Port != 8080 || c.Defaults.Ctx != 0 || !c.AutoTune || c.Defaults.UBatch != 1024 || c.ModelsDir != "/home/u/ai/models/gguf" {
 		t.Fatalf("%v %+v", err, c)
 	}
 	if err := c.Set("", "defaultBackend", "vllm"); err == nil || c.DefaultBackend != "llama" {
@@ -143,7 +143,7 @@ func TestMergedOverridesOnlyWhatIsSet(t *testing.T) {
 	c.Models["m"] = Params{Ctx: 4096, CacheK: "f16", Extra: "seed = 1"}
 	c.Defaults.Extra = "temp = 0.2"
 	p := c.Merged("m")
-	if p.Ctx != 4096 || p.CacheK != "f16" || p.CacheV != "q8_0" || p.GPULayers != 0 || p.Extra != "temp = 0.2; seed = 1" {
+	if p.Ctx != 4096 || p.CacheK != "f16" || p.CacheV != "" || p.GPULayers != 0 || p.Extra != "temp = 0.2; seed = 1" {
 		t.Fatalf("%+v", p)
 	}
 }
@@ -301,7 +301,7 @@ func TestDiscoverDeduplicatesIDs(t *testing.T) {
 func TestRenderPresetIsDeterministicAndComplete(t *testing.T) {
 	c := DefaultConfig("/h")
 	c.Models["b"] = Params{Ctx: 8192, Jinja: boolPtr(false), Extra: "temp = 0.3"}
-	ms := []Model{{ID: "a", Path: "/m/a.gguf", MMProj: "/m/p.gguf"}, {ID: "b", Path: "/m/b.gguf"}}
+	ms := []Model{{ID: "a", Path: "/m/a.gguf", MMProj: "/m/p.gguf", Tuned: &Tuned{Ctx: 32768, Cache: "q8_0"}}, {ID: "b", Path: "/m/b.gguf"}}
 	out := RenderPreset(c, ms)
 	if out != RenderPreset(c, ms) {
 		t.Fatal("not deterministic")
@@ -636,5 +636,116 @@ func TestParseNvidiaSmi(t *testing.T) {
 	}
 	if _, ok := ParseNvidiaSmi("No devices were found"); ok {
 		t.Fatal("garbage parsed")
+	}
+}
+
+// ---------------------------------------------------------------- auto-tuner
+
+func gg(ints map[string]int64, arrays map[string][]int64) GGUFInfo {
+	if arrays == nil {
+		arrays = map[string][]int64{}
+	}
+	return GGUFInfo{Ints: ints, Arrays: arrays}
+}
+
+func TestProfileDenseSWAHybridAndMLA(t *testing.T) {
+	// qwen2.5-7b: 28 layers, 4 KV heads of 128 -> 57 344 B/token in f16 (1.75 GiB at 32k)
+	q := Profile(gg(map[string]int64{"block_count": 28, "attention.head_count": 28, "attention.head_count_kv": 4, "embedding_length": 3584, "context_length": 32768}, nil))
+	if q.PerToken != 28*4*256*2 || q.SWAFixed != 0 || q.Native != 32768 || q.Experts != 0 {
+		t.Fatalf("%+v", q)
+	}
+	// gemma-style: 5 of 6 layers sliding (window 1024), per-layer KV heads
+	g := Profile(gg(map[string]int64{"block_count": 6, "attention.head_count": 16, "attention.key_length": 512, "attention.value_length": 512,
+		"attention.key_length_swa": 256, "attention.value_length_swa": 256, "attention.sliding_window": 1024, "expert_count": 128},
+		map[string][]int64{"attention.head_count_kv": {8, 8, 8, 8, 8, 2}, "attention.sliding_window_pattern": {1, 1, 1, 1, 1, 0}}))
+	if g.PerToken != 2*1024*2 || g.SWAFixed != 5*8*512*2*1024 || g.Experts != 128 {
+		t.Fatalf("%+v", g)
+	}
+	// hybrid (Qwen3.5/3.6): only every 4th layer keeps a KV cache
+	h := Profile(gg(map[string]int64{"block_count": 8, "attention.head_count": 8, "attention.head_count_kv": 2, "attention.key_length": 256, "full_attention_interval": 4}, nil))
+	if h.PerToken != 2*2*512*2 {
+		t.Fatalf("%+v", h)
+	}
+	m := Profile(gg(map[string]int64{"block_count": 10, "attention.kv_lora_rank": 512, "rope.dimension_count": 64}, nil))
+	if m.PerToken != 10*576*2 {
+		t.Fatalf("%+v", m)
+	}
+	if u := Profile(gg(map[string]int64{}, nil)); u.PerToken == 0 {
+		t.Fatal("unknown architecture needs a fallback")
+	}
+}
+
+func TestTuneChoices(t *testing.T) {
+	gb := int64(1 << 30)
+	vram := 12 * gb
+	qwen := KVProfile{PerToken: 57344, Native: 32768}
+	if r := Tune(4600*(1<<20), qwen, vram); r.Ctx != 32768 || r.Cache != "f16" || r.Fit != "gpu" {
+		t.Fatalf("7B: %+v", r)
+	}
+	gemma := KVProfile{PerToken: 4096 * 5, SWAFixed: 400 << 20, Native: 262144}
+	if r := Tune(7400*(1<<20), gemma, vram); r.Ctx != 65536 || r.Cache != "f16" {
+		t.Fatalf("SWA model gets 64k f16: %+v", r)
+	}
+	// 14B-ish: f16 at 32k does not fit, q8_0 does
+	big := KVProfile{PerToken: 196608, Native: 131072}
+	if r := Tune(7500*(1<<20), big, vram); r.Cache != "q8_0" || r.Fit != "gpu" || r.Ctx < 16384 {
+		t.Fatalf("q8_0 fallback: %+v", r)
+	}
+	if r := Tune(17*gb, KVProfile{PerToken: 16384, Native: 262144}, vram); r.Fit != "partial" || r.Ctx != 16384 {
+		t.Fatalf("dense spill keeps 16k: %+v", r)
+	}
+	if r := Tune(16*gb, KVProfile{PerToken: 4096, Native: 262144, Experts: 128}, vram); r.Fit != "partial" || r.Ctx != 32768 {
+		t.Fatalf("MoE spill keeps 32k: %+v", r)
+	}
+	if r := Tune(gb, KVProfile{PerToken: 1000, Native: 4096}, vram); r.Ctx != 4096 {
+		t.Fatalf("never above the native context: %+v", r)
+	}
+	if r := Tune(gb, qwen, 0); r.Fit != "partial" {
+		t.Fatalf("no GPU: %+v", r)
+	}
+}
+
+func TestEffectiveLayers(t *testing.T) {
+	c := DefaultConfig("/h")
+	m := Model{ID: "q", Tuned: &Tuned{Ctx: 65536, Cache: "f16"}}
+	if p := c.Effective(m); p.Ctx != 65536 || p.CacheK != "f16" || p.CacheV != "f16" {
+		t.Fatalf("auto: %+v", p)
+	}
+	c.Defaults.CacheK = "q8_0" // chosen by hand for every model
+	if p := c.Effective(m); p.CacheK != "q8_0" || p.CacheV != "f16" {
+		t.Fatalf("global setting wins: %+v", p)
+	}
+	c.Models["q"] = Params{Ctx: 8192}
+	if p := c.Effective(m); p.Ctx != 8192 {
+		t.Fatalf("per-model setting wins: %+v", p)
+	}
+	c.AutoTune = false
+	if p := c.Effective(Model{ID: "z", Tuned: m.Tuned}); p.Ctx != 0 {
+		t.Fatalf("autoTune off: %+v", p)
+	}
+	if err := c.Set("", "cacheK", "auto"); err != nil || c.Defaults.CacheK != "" {
+		t.Fatal("auto resets to the tuner")
+	}
+	if err := c.Set("", "autoTune", "maybe"); err == nil {
+		t.Fatal("bad autoTune accepted")
+	}
+}
+
+func TestOldConfigMigratesToMeasuredDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	_ = os.WriteFile(path, []byte(`{"defaultBackend":"llama","defaultModel":"x","host":"127.0.0.1","port":8080,"idleSeconds":900,"maxLoaded":1,
+"defaults":{"ctx":32768,"gpuLayers":99,"flashAttn":"on","cacheK":"q8_0","cacheV":"q8_0","threads":6,"threadsBatch":12,"batch":2048,"ubatch":512,"jinja":true,"extra":"seed = 1"},
+"models":{"x":{"ctx":4096}}}`), 0o644)
+	c, err := LoadConfig(path, "/h")
+	if err != nil || c.Profile != currentProfile || !c.AutoTune || c.Defaults.Ctx != 0 || c.Defaults.CacheK != "" || c.Defaults.ThreadsBatch != 6 ||
+		c.Defaults.UBatch != 1024 || c.Defaults.GPULayers != 0 || c.Defaults.Extra != "seed = 1" || c.Models["x"].Ctx != 4096 || c.DefaultModel != "x" {
+		t.Fatalf("%v %+v", err, c)
+	}
+	_ = c.Save(path)
+	c2, _ := LoadConfig(path, "/h")
+	c2.Defaults.Ctx = 1 // a saved current-profile config is not migrated again
+	_ = c2.Save(path)
+	if c3, _ := LoadConfig(path, "/h"); c3.Defaults.Ctx != 1 {
+		t.Fatal("migrated twice")
 	}
 }

@@ -25,6 +25,7 @@ type Params struct {
 	Batch        int    `json:"batch,omitempty"`
 	UBatch       int    `json:"ubatch,omitempty"`
 	Parallel     int    `json:"parallel,omitempty"`
+	CacheReuse   int    `json:"cacheReuse,omitempty"` // reuse prompt chunks after edits (agents)
 	Jinja        *bool  `json:"jinja,omitempty"`
 	Extra        string `json:"extra,omitempty"` // free "key = value; key = value" preset lines
 }
@@ -40,13 +41,21 @@ type Config struct {
 	OllamaURL      string            `json:"ollamaUrl"`
 	IdleSeconds    int               `json:"idleSeconds"` // unload a model after this long without requests
 	MaxLoaded      int               `json:"maxLoaded"`
+	AutoTune       bool              `json:"autoTune"` // pick ctx and KV cache per model from its GGUF and the GPU
+	Profile        int               `json:"profile"`  // version of the defaults (migrations)
 	Defaults       Params            `json:"defaults"`
 	Models         map[string]Params `json:"models"`
+	VRAM           int64             `json:"-"` // set by the caller from nvidia-smi
 }
+
+// currentProfile is bumped when the tuned defaults change; older configs migrate.
+const currentProfile = 1
 
 func boolPtr(b bool) *bool { return &b }
 
-// DefaultConfig is tuned for this PC: RTX 3060 12 GB, Ryzen 5 9600X (6C/12T).
+// DefaultConfig is tuned for this PC: RTX 3060 12 GB, Ryzen 5 9600X (6C/12T);
+// see autotune.go for the measurements. Ctx and the KV cache are 0/"" = auto
+// per model, n-gpu-layers is left to llama.cpp's --fit.
 func DefaultConfig(home string) Config {
 	return Config{
 		DefaultBackend: "llama",
@@ -57,8 +66,10 @@ func DefaultConfig(home string) Config {
 		OllamaURL:      "http://127.0.0.1:11434",
 		IdleSeconds:    900,
 		MaxLoaded:      1,
-		Defaults: Params{Ctx: 32768, FlashAttn: "on", CacheK: "q8_0", CacheV: "q8_0",
-			Threads: 6, ThreadsBatch: 12, Batch: 2048, UBatch: 512, Parallel: 1, Jinja: boolPtr(true)},
+		AutoTune:       true,
+		Profile:        currentProfile,
+		Defaults: Params{FlashAttn: "on", Threads: 6, ThreadsBatch: 6, Batch: 2048, UBatch: 1024,
+			Parallel: 1, CacheReuse: 256, Jinja: boolPtr(true)},
 		Models: map[string]Params{},
 	}
 }
@@ -73,11 +84,22 @@ func LoadConfig(path, home string) (Config, error) {
 	if err != nil {
 		return c, err
 	}
+	c.Profile = 0 // a file without "profile" predates the auto-tuner
 	if err := json.Unmarshal(b, &c); err != nil {
 		return DefaultConfig(home), fmt.Errorf("%s: %w", path, err)
 	}
 	if c.Models == nil {
 		c.Models = map[string]Params{}
+	}
+	if c.Profile < currentProfile { // defaults written before the auto-tuner: adopt the measured ones
+		d := DefaultConfig(home)
+		c.Defaults.Ctx, c.Defaults.CacheK, c.Defaults.CacheV = 0, "", ""
+		c.Defaults.Threads, c.Defaults.ThreadsBatch, c.Defaults.UBatch = d.Defaults.Threads, d.Defaults.ThreadsBatch, d.Defaults.UBatch
+		if c.Defaults.GPULayers == 99 {
+			c.Defaults.GPULayers = 0
+		}
+		c.Defaults.CacheReuse = d.Defaults.CacheReuse
+		c.AutoTune, c.Profile = true, currentProfile
 	}
 	return c, c.Validate()
 }
@@ -135,7 +157,7 @@ func (p Params) validate(where string) error {
 		return fmt.Errorf("%s: flashAttn must be on, off or auto", where)
 	case !cacheTypes[p.CacheK] || !cacheTypes[p.CacheV]:
 		return fmt.Errorf("%s: unknown KV cache type", where)
-	case p.Threads < 0 || p.ThreadsBatch < 0 || p.Batch < 0 || p.UBatch < 0 || p.Parallel < 0:
+	case p.Threads < 0 || p.ThreadsBatch < 0 || p.Batch < 0 || p.UBatch < 0 || p.Parallel < 0 || p.CacheReuse < 0:
 		return fmt.Errorf("%s: negative value", where)
 	case strings.ContainsAny(p.Extra, "[]\n"):
 		return fmt.Errorf("%s: extra must be key = value pairs separated by ;", where)
@@ -144,8 +166,8 @@ func (p Params) validate(where string) error {
 }
 
 // Settable lists the keys `omarchy-llm set` accepts, for the panel's settings.
-var Settable = []string{"defaultBackend", "defaultModel", "idleSeconds", "maxLoaded", "port",
-	"ctx", "gpuLayers", "flashAttn", "cacheK", "cacheV", "threads", "threadsBatch", "batch", "ubatch", "parallel", "jinja", "extra"}
+var Settable = []string{"defaultBackend", "defaultModel", "idleSeconds", "maxLoaded", "port", "autoTune",
+	"ctx", "gpuLayers", "flashAttn", "cacheK", "cacheV", "threads", "threadsBatch", "batch", "ubatch", "parallel", "cacheReuse", "jinja", "extra"}
 
 // Set changes one key, globally (model == "") or for one model. On error the
 // config is left as it was.
@@ -182,6 +204,16 @@ func (c *Config) set(model, key, value string) error {
 		case "defaultModel":
 			c.DefaultModel = value
 			return nil
+		case "autoTune":
+			switch value {
+			case "on", "true", "1":
+				c.AutoTune = true
+			case "off", "false", "0":
+				c.AutoTune = false
+			default:
+				return fmt.Errorf("autoTune must be on or off")
+			}
+			return nil
 		case "idleSeconds", "maxLoaded", "port":
 			n, err := atoi()
 			if err != nil {
@@ -204,19 +236,19 @@ func (c *Config) set(model, key, value string) error {
 	}
 	var err error
 	switch key {
-	case "ctx", "gpuLayers", "threads", "threadsBatch", "batch", "ubatch", "parallel":
+	case "ctx", "gpuLayers", "threads", "threadsBatch", "batch", "ubatch", "parallel", "cacheReuse":
 		var n int
 		if n, err = atoi(); err != nil {
 			return err
 		}
 		*map[string]*int{"ctx": &p.Ctx, "gpuLayers": &p.GPULayers, "threads": &p.Threads, "threadsBatch": &p.ThreadsBatch,
-			"batch": &p.Batch, "ubatch": &p.UBatch, "parallel": &p.Parallel}[key] = n
+			"batch": &p.Batch, "ubatch": &p.UBatch, "parallel": &p.Parallel, "cacheReuse": &p.CacheReuse}[key] = n
 	case "flashAttn":
 		p.FlashAttn = value
 	case "cacheK":
-		p.CacheK = value
+		p.CacheK = autoWord(value)
 	case "cacheV":
-		p.CacheV = value
+		p.CacheV = autoWord(value)
 	case "jinja":
 		switch value {
 		case "", "default":
@@ -246,9 +278,38 @@ func (c *Config) set(model, key, value string) error {
 	return nil
 }
 
-// Merged is the effective Params for a model (model overrides over defaults).
+func autoWord(v string) string {
+	if v == "auto" {
+		return ""
+	}
+	return v
+}
+
+// Effective is what llama-server gets for a model: defaults, then the
+// auto-tuner's context/KV cache where the defaults say auto, then the user's
+// per-model settings.
+func (c Config) Effective(m Model) Params {
+	p := c.Defaults
+	if c.AutoTune && m.Tuned != nil {
+		if p.Ctx == 0 {
+			p.Ctx = m.Tuned.Ctx
+		}
+		if p.CacheK == "" {
+			p.CacheK = m.Tuned.Cache
+		}
+		if p.CacheV == "" {
+			p.CacheV = m.Tuned.Cache
+		}
+	}
+	return overlay(p, c.Models[m.ID])
+}
+
+// Merged is the Params for a model without the auto-tuner (overrides over defaults).
 func (c Config) Merged(model string) Params {
-	p, o := c.Defaults, c.Models[model]
+	return overlay(c.Defaults, c.Models[model])
+}
+
+func overlay(p, o Params) Params {
 	if o.Ctx != 0 {
 		p.Ctx = o.Ctx
 	}
@@ -261,7 +322,7 @@ func (c Config) Merged(model string) Params {
 		}
 	}
 	for _, f := range []struct{ dst, src *int }{{&p.Threads, &o.Threads}, {&p.ThreadsBatch, &o.ThreadsBatch},
-		{&p.Batch, &o.Batch}, {&p.UBatch, &o.UBatch}, {&p.Parallel, &o.Parallel}} {
+		{&p.Batch, &o.Batch}, {&p.UBatch, &o.UBatch}, {&p.Parallel, &o.Parallel}, {&p.CacheReuse, &o.CacheReuse}} {
 		if *f.src != 0 {
 			*f.dst = *f.src
 		}

@@ -9,10 +9,27 @@ import (
 	"os"
 )
 
-// GGUFInfo is what the panel shows from a model file's header.
+// GGUFInfo is what the panel and the auto-tuner read from a model's header.
 type GGUFInfo struct {
-	Arch  string
-	Quant string
+	Arch   string
+	Quant  string
+	Ints   map[string]int64   // numeric keys of the architecture ("block_count" without the "<arch>." prefix)
+	Arrays map[string][]int64 // per-layer numeric arrays (head_count_kv, sliding_window_pattern…)
+}
+
+// Int returns an architecture key, or the max of its per-layer array, or def.
+func (g GGUFInfo) Int(key string, def int64) int64 {
+	if v, ok := g.Ints[key]; ok {
+		return v
+	}
+	if a, ok := g.Arrays[key]; ok && len(a) > 0 {
+		m := a[0]
+		for _, x := range a {
+			m = max(m, x)
+		}
+		return m
+	}
+	return def
 }
 
 var fileTypes = map[uint32]string{0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 7: "Q8_0", 8: "Q5_0", 9: "Q5_1",
@@ -52,7 +69,7 @@ func ReadGGUFInfo(path string) (GGUFInfo, error) {
 }
 
 func parseGGUF(r *bufio.Reader) (GGUFInfo, error) {
-	var info GGUFInfo
+	info := GGUFInfo{Ints: map[string]int64{}, Arrays: map[string][]int64{}}
 	le := binary.LittleEndian
 	var hdr struct {
 		Magic   [4]byte
@@ -66,6 +83,9 @@ func parseGGUF(r *bufio.Reader) (GGUFInfo, error) {
 	if string(hdr.Magic[:]) != "GGUF" || hdr.Version < 2 {
 		return info, errors.New("not a GGUF v2+ file")
 	}
+	if hdr.KVs > 1<<16 {
+		return info, errors.New("implausible GGUF header")
+	}
 	readStr := func() (string, error) {
 		var n uint64
 		if err := binary.Read(r, le, &n); err != nil {
@@ -78,24 +98,52 @@ func parseGGUF(r *bufio.Reader) (GGUFInfo, error) {
 		_, err := io.ReadFull(r, b)
 		return string(b), err
 	}
-	skip := func(t uint32) error {
-		if sz, ok := gSize[t]; ok {
-			_, err := r.Discard(int(sz))
-			return err
-		}
-		if t == gString {
+	readNum := func(t uint32) (int64, bool, error) {
+		switch t {
+		case gU8, gBool:
+			b, err := r.ReadByte()
+			return int64(b), true, err
+		case gI8:
+			b, err := r.ReadByte()
+			return int64(int8(b)), true, err
+		case gU16, gI16:
+			var v uint16
+			err := binary.Read(r, le, &v)
+			if t == gI16 {
+				return int64(int16(v)), true, err
+			}
+			return int64(v), true, err
+		case gU32, gI32:
+			var v uint32
+			err := binary.Read(r, le, &v)
+			if t == gI32 {
+				return int64(int32(v)), true, err
+			}
+			return int64(v), true, err
+		case gU64, gI64:
+			var v uint64
+			err := binary.Read(r, le, &v)
+			return int64(v), true, err
+		case gF32:
+			_, err := r.Discard(4)
+			return 0, false, err
+		case gF64:
+			_, err := r.Discard(8)
+			return 0, false, err
+		case gString:
 			_, err := readStr()
-			return err
+			return 0, false, err
 		}
-		return fmt.Errorf("type %d", t)
+		return 0, false, fmt.Errorf("type %d", t)
 	}
-	if hdr.KVs > 1<<16 {
-		return info, errors.New("implausible GGUF header")
-	}
-	for i := uint64(0); i < hdr.KVs && (info.Arch == "" || info.Quant == ""); i++ {
+	prefix := ""
+	for i := uint64(0); i < hdr.KVs; i++ {
 		key, err := readStr()
 		if err != nil {
 			return info, err
+		}
+		if info.Arch != "" && len(key) > 10 && key[:10] == "tokenizer." {
+			break // everything the tuner needs comes before the (huge) tokenizer
 		}
 		var t uint32
 		if err := binary.Read(r, le, &t); err != nil {
@@ -106,12 +154,7 @@ func parseGGUF(r *bufio.Reader) (GGUFInfo, error) {
 			if info.Arch, err = readStr(); err != nil {
 				return info, err
 			}
-		case key == "general.file_type" && t == gU32:
-			var v uint32
-			if err := binary.Read(r, le, &v); err != nil {
-				return info, err
-			}
-			info.Quant = fileTypes[v]
+			prefix = info.Arch + "."
 		case t == gArray:
 			var et uint32
 			var n uint64
@@ -121,20 +164,29 @@ func parseGGUF(r *bufio.Reader) (GGUFInfo, error) {
 			if err := binary.Read(r, le, &n); err != nil {
 				return info, err
 			}
-			if sz, ok := gSize[et]; ok {
-				if _, err := r.Discard(int(sz * int64(n))); err != nil {
-					return info, err
-				}
-				continue
-			}
+			keep := prefix != "" && len(key) > len(prefix) && key[:len(prefix)] == prefix && n <= 4096 && et != gString
+			var vals []int64
 			for j := uint64(0); j < n; j++ {
-				if err := skip(et); err != nil {
+				v, num, err := readNum(et)
+				if err != nil {
 					return info, err
 				}
+				if keep && num {
+					vals = append(vals, v)
+				}
+			}
+			if keep && len(vals) > 0 {
+				info.Arrays[key[len(prefix):]] = vals
 			}
 		default:
-			if err := skip(t); err != nil {
+			v, num, err := readNum(t)
+			if err != nil {
 				return info, err
+			}
+			if key == "general.file_type" {
+				info.Quant = fileTypes[uint32(v)]
+			} else if num && prefix != "" && len(key) > len(prefix) && key[:len(prefix)] == prefix {
+				info.Ints[key[len(prefix):]] = v
 			}
 		}
 	}

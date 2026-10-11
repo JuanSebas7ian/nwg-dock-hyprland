@@ -58,6 +58,9 @@ func newApp() (*app, error) {
 		statePath:  filepath.Join(home, ".local", "state", "omarchy-llm"),
 	}
 	cfg, err := llm.LoadConfig(a.cfgPath, home)
+	if g, ok := llm.QueryGPU(); ok {
+		cfg.VRAM = g.Total
+	}
 	a.cfg = cfg
 	a.router = &llm.Router{URL: fmt.Sprintf("http://%s:%d", cfg.Host, cfg.Port)}
 	a.ollama = &llm.Ollama{URL: cfg.OllamaURL}
@@ -167,6 +170,8 @@ type modelRow struct {
 	llm.Model
 	Status string `json:"status"`
 	Fit    string `json:"fit"`
+	Ctx    int    `json:"ctx"`   // what the server uses (auto-tuned unless set by hand)
+	Cache  string `json:"cache"` // KV cache type
 }
 
 func (a *app) status(ctx context.Context) map[string]any {
@@ -190,7 +195,12 @@ func (a *app) status(ctx context.Context) map[string]any {
 				st = "not in server (Apply)"
 			}
 		}
-		rows = append(rows, modelRow{Model: m, Status: st, Fit: llm.Fit(m.Size, gpu.Total)})
+		eff := a.cfg.Effective(m)
+		fit := llm.Fit(m.Size, gpu.Total)
+		if m.Tuned != nil {
+			fit = m.Tuned.Fit
+		}
+		rows = append(rows, modelRow{Model: m, Status: st, Fit: fit, Ctx: eff.Ctx, Cache: eff.CacheK})
 	}
 	_, pendErr := os.Stat(a.pendingFile())
 	res := map[string]any{
