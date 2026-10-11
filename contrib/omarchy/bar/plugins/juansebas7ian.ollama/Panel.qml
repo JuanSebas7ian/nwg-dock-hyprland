@@ -42,6 +42,19 @@ Panel {
   property var hfFiles: []
   property bool hfLoading: false
   property bool withMMProj: true
+  property string hfPick: ""          // quantization chosen to download
+  // Recommended: the biggest file that still fits fully on the GPU (best quality at full speed).
+  readonly property string hfRecommended: {
+    var best = "", size = -1
+    for (var i = 0; i < hfFiles.length; i++) {
+      var f = hfFiles[i]
+      if (f.fit === "gpu" && f.size > size && !/^(F16|BF16|F32)$/.test(f.quant)) { best = f.quant; size = f.size }
+    }
+    return best !== "" ? best : (hfFiles.length > 0 ? hfFiles[0].quant : "")
+  }
+  readonly property var hfPicked: hfFiles.filter(function(f) { return f.quant === hfPick })[0] || null
+  property var pi: null
+  readonly property string piBin: Quickshell.env("HOME") + "/.local/bin/omarchy-agent-usage-pi"
 
   property string pullName: ""
   property string pullStatus: ""
@@ -89,8 +102,29 @@ Panel {
     searchProcess.command = [ctl, tab === "hf" ? "hf-search" : "ollama-search", String(q || "").trim()]
     searchProcess.running = true
   }
+  function quantHint(q) {
+    q = String(q || "")
+    if (/^(F16|BF16|F32)$/.test(q)) return "full precision, huge"
+    if (/Q8/.test(q)) return "near lossless"
+    if (/Q6/.test(q)) return "excellent"
+    if (/Q5/.test(q)) return "very good"
+    if (/Q4_K_M|Q4_K_L|IQ4/.test(q)) return "balanced (most used)"
+    if (/Q4/.test(q)) return "good"
+    if (/Q3|IQ3/.test(q)) return "smaller, some loss"
+    if (/Q2|IQ2|IQ1/.test(q)) return "tiny, noticeable loss"
+    return ""
+  }
+  function downloadPicked() {
+    var f = hfPicked
+    if (!f) return
+    startPull(["hf-pull", hfRepo, f.quant].concat(withMMProj && f.mmproj ? ["--mmproj"] : []), hfRepo.split("/")[1] + " " + f.quant)
+  }
+  function editFile(path) { if (bar) bar.run("omarchy-launch-editor " + bar.shellQuote(path)); root.close() }
+  function terminal(cmd) { if (bar) bar.run("uwsm-app -- xdg-terminal-exec bash -lc " + bar.shellQuote(cmd)); root.close() }
+  function loadPi() { if (!piProcess.running) piProcess.running = true }
   function openRepo(repo) {
     hfRepo = repo
+    hfPick = ""
     hfFiles = []
     hfLoading = true
     filesProcess.command = [ctl, "hf-files", repo]
@@ -128,6 +162,7 @@ Panel {
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
   onTabChanged: {
+    if (tab === "pi") loadPi()
     if (tab === "ollama" && olResults.length === 0) search("")
     if (tab === "hf" && hfResults.length === 0) search("")
   }
@@ -174,8 +209,25 @@ Panel {
         try {
           var r = JSON.parse(text)
           root.hfFiles = r.files || []
+          root.hfPick = root.hfRecommended
           if (!r.ok) root.say(r.error || "Could not list the files", true)
         } catch (e) { root.say("Could not list the files", true) }
+      }
+    }
+  }
+  Process {
+    id: piProcess
+    command: [root.piBin, "--details"]
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.pi = JSON.parse(text) } catch (e) {} } }
+  }
+  Process {
+    id: measureProcess
+    command: [root.piBin, "--measure"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try { var r = JSON.parse(text); root.say(r.ok ? "Pi's prompt: " + r.promptTokens + " tokens per request" : r.error, !r.ok) } catch (e) {}
+        root.loadPi()
       }
     }
   }
@@ -222,6 +274,7 @@ Panel {
     function toggle(): void { root.toggle() }
     function refresh(): string { root.refresh(); return "ok" }
     function tab(name: string): void { root.tab = name; root.open() }
+    function repo(name: string): void { root.tab = "hf"; root.openRepo(name); root.open() }
   }
 
   BarIconButton {
@@ -262,7 +315,8 @@ Panel {
         else if (t === "1") root.tab = "llama"
         else if (t === "2") root.tab = "ollama"
         else if (t === "3") root.tab = "hf"
-        else if (t === "4") root.tab = "settings"
+        else if (t === "4") root.tab = "pi"
+        else if (t === "5") root.tab = "settings"
       }
 
       Flickable {
@@ -309,6 +363,7 @@ Panel {
             Chip { label: "llama.cpp" + (root.cfg && root.cfg.defaultBackend === "llama" ? " ★" : ""); on: root.tab === "llama"; onClicked: root.tab = "llama" }
             Chip { label: "Ollama" + (root.cfg && root.cfg.defaultBackend === "ollama" ? " ★" : ""); on: root.tab === "ollama"; onClicked: root.tab = "ollama" }
             Chip { label: "Hugging Face"; on: root.tab === "hf"; onClicked: root.tab = "hf" }
+            Chip { label: "Pi"; on: root.tab === "pi"; onClicked: root.tab = "pi" }
             Chip { label: "Settings"; on: root.tab === "settings"; onClicked: root.tab = "settings" }
           }
 
@@ -541,17 +596,44 @@ Panel {
                 on: root.withMMProj
                 onClicked: root.withMMProj = !root.withMMProj
               }
+              Text {
+                visible: root.hfFiles.length > 0
+                width: parent.width
+                text: "Choose the quantization (fewer bits = smaller and faster, more bits = better answers):"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Rectangle {
+                visible: !!root.hfPicked
+                width: parent.width
+                height: dlText.implicitHeight + Style.space(14)
+                radius: Style.space(5)
+                color: dlMouse.containsMouse ? Qt.alpha(Color.accent, 0.35) : Qt.alpha(Color.accent, 0.2)
+                border.color: Color.accent
+                border.width: 1
+                Text {
+                  id: dlText
+                  anchors.centerIn: parent
+                  text: root.hfPicked ? "󰇚  Download " + root.hfPicked.quant + " · " + root.fmtBytes(root.hfPicked.size)
+                    + (root.withMMProj && root.hfPicked.mmproj ? " + vision" : "") : ""
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+                MouseArea { id: dlMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; enabled: !root.pulling; onClicked: root.downloadPicked() }
+              }
               Repeater {
                 model: root.hfFiles
-                ModelRow {
+                QuantRow {
                   required property var modelData
                   width: parent.width
-                  title: modelData.quant
-                  meta: root.fmtBytes(modelData.size) + " · " + root.fitLabel(modelData.fit) + (modelData.files.length > 1 ? " · " + modelData.files.length + " parts" : "")
-                  metaColor: root.fitColor(modelData.fit)
-                  actions: [{ icon: "󰇚", tip: "Download into " + (root.cfg ? root.cfg.modelsDir : "~/ai/models/gguf"),
-                              run: function() { root.startPull(["hf-pull", root.hfRepo, modelData.quant].concat(root.withMMProj && modelData.mmproj ? ["--mmproj"] : []),
-                                                               root.hfRepo.split("/")[1] + " " + modelData.quant) } }]
+                  file: modelData
+                  selected: root.hfPick === modelData.quant
+                  recommended: root.hfRecommended === modelData.quant
+                  onPicked: root.hfPick = modelData.quant
                 }
               }
               Text {
@@ -581,8 +663,121 @@ Panel {
                   required property var modelData
                   width: parent.width
                   entry: modelData
+                  actionHint: "Choose quantization ›"
                   onPicked: function(size) { root.openRepo(modelData.name) }
                 }
+              }
+            }
+          }
+
+          // ============================================== Pi
+          Column {
+            visible: root.tab === "pi"
+            width: parent.width
+            spacing: Style.space(6)
+            Text {
+              visible: !root.pi
+              text: "Reading Pi's configuration…"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+            Text {
+              visible: !!root.pi && !root.pi.installed
+              width: parent.width
+              text: "Pi is not installed (mise use -g pi)."
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+            }
+            Column {
+              visible: !!root.pi && root.pi.installed
+              width: parent.width
+              spacing: Style.space(6)
+              InfoPair { label: "Pi"; value: root.pi ? "v" + root.pi.version + " · " + root.pi.backend : "" }
+              InfoPair { label: "Default model"; value: root.pi ? (root.pi.defaultModel || "not set") : "" }
+              InfoPair { label: "Models it can pick"; value: root.pi ? String(root.pi.models) + " (llama-local, loaded on demand)" : "" }
+              InfoPair {
+                label: "Prompt per request"
+                value: root.pi && root.pi.promptTokens ? root.pi.promptTokens + " tokens of " + (root.pi.contextWindow || "?") : "not measured"
+              }
+              Text {
+                visible: !!root.pi && !!root.pi.promptCost && root.pi.promptCost.total > 0
+                width: parent.width
+                text: root.pi && root.pi.promptCost ? "core " + root.pi.promptCost.base + " · extensions " + root.pi.promptCost.extensions + " · MCP " + root.pi.promptCost.mcp
+                  + " · AGENTS.md " + root.pi.promptCost.contextFiles + " · skills " + root.pi.promptCost.skills : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+              Row {
+                spacing: Style.space(4)
+                Chip { label: "󰆍 Open Pi"; onClicked: root.terminal("cd ~/src && pi") }
+                Chip { label: "󰡨 Open pi-box (Docker)"; onClicked: root.terminal("cd ~/src && pi-box") }
+                Chip { label: measureProcess.running ? "Measuring…" : "Measure prompt"; onClicked: if (!measureProcess.running) measureProcess.running = true }
+              }
+
+              PanelSeparator { foreground: root.foreground }
+              PanelSectionHeader { text: "AGENTS.MD"; foreground: root.foreground; fontFamily: root.fontFamily }
+              ModelRow {
+                width: parent.width
+                title: root.pi && root.pi.agentsMd ? root.pi.agentsMd.replace(Quickshell.env("HOME"), "~") : "No AGENTS.md"
+                meta: root.pi ? root.pi.agentsMdWords + " words · " + (root.pi.agentsMdRules || []).join(" · ") : ""
+                actions: root.pi && root.pi.agentsMd ? [{ icon: "󰏫", tip: "Edit", run: function() { root.editFile(root.pi.agentsMd) } }] : []
+              }
+
+              PanelSectionHeader { text: "MCP SERVERS"; foreground: root.foreground; fontFamily: root.fontFamily }
+              Repeater {
+                model: root.pi ? root.pi.mcp : []
+                ModelRow {
+                  required property var modelData
+                  width: parent.width
+                  title: (modelData.status === "connected" ? "● " : modelData.status === "failed" ? "✕ " : "○ ") + modelData.name
+                  meta: [modelData.status, modelData.tools ? modelData.tools + " tools" : "", modelData.exposure, modelData.command].filter(function(s) { return s }).join(" · ")
+                  danger: modelData.status === "failed"
+                }
+              }
+              ModelRow {
+                width: parent.width
+                title: "~/.pi/agent/mcp.json"
+                meta: "deferred = tools load only when needed (keeps the prompt small)"
+                actions: [{ icon: "󰏫", tip: "Edit", run: function() { root.editFile(Quickshell.env("HOME") + "/.pi/agent/mcp.json") } }]
+              }
+
+              PanelSectionHeader { text: "EXTENSIONS"; foreground: root.foreground; fontFamily: root.fontFamily }
+              Repeater {
+                model: root.pi ? root.pi.extensions : []
+                ModelRow {
+                  required property var modelData
+                  width: parent.width
+                  title: modelData.name + (modelData.version ? " " + modelData.version : "") + (modelData.local ? "  (local file)" : "")
+                  meta: modelData.description || modelData.spec
+                }
+              }
+              Text {
+                width: parent.width
+                text: "pi-web-access (web search, PDFs, YouTube) is installed but loads only with `pi-web`: it adds ~3.2k tokens to every request."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              PanelSectionHeader { text: "SUB-AGENTS AND SKILLS"; foreground: root.foreground; fontFamily: root.fontFamily }
+              Repeater {
+                model: root.pi ? root.pi.subagents : []
+                ModelRow { required property var modelData; width: parent.width; title: modelData.split(" (")[0]; meta: (modelData.split(" (")[1] || "").replace(")", "") }
+              }
+              ModelRow {
+                width: parent.width
+                title: "Skills"
+                meta: root.pi && root.pi.skills.length > 0 ? root.pi.skills.join(", ") : "none"
+              }
+              ModelRow {
+                width: parent.width
+                title: "Sandbox"
+                meta: root.pi && root.pi.sandbox ? root.pi.sandbox : "pi-box image not built yet (pi-box --build)"
               }
             }
           }
@@ -715,6 +910,7 @@ Panel {
   component CatalogRow: CursorSurface {
     id: cat
     property var entry: ({})
+    property string actionHint: ""
     signal picked(string size)
     foreground: root.foreground
     hasCursor: catHover.containsMouse
@@ -728,7 +924,11 @@ Panel {
       anchors.leftMargin: Style.space(10)
       anchors.rightMargin: Style.space(10)
       spacing: Style.space(3)
-      Text { width: parent.width; text: cat.entry.name || ""; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; elide: Text.ElideMiddle }
+      RowLayout {
+        width: parent.width
+        Text { Layout.fillWidth: true; text: cat.entry.name || ""; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.body; elide: Text.ElideMiddle }
+        Text { visible: cat.actionHint !== ""; text: cat.actionHint; color: catHover.containsMouse ? Color.accent : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+      }
       Text {
         width: parent.width
         text: [cat.entry.pulls ? cat.entry.pulls + (cat.entry.source === "hf" ? " downloads" : " pulls") : "", cat.entry.updated || ""]
@@ -749,6 +949,49 @@ Panel {
           Chip { required property var modelData; label: modelData; onClicked: cat.picked(modelData) }
         }
       }
+    }
+  }
+
+  component QuantRow: CursorSurface {
+    id: qr
+    property var file: ({})
+    property bool selected: false
+    property bool recommended: false
+    signal picked()
+    foreground: root.foreground
+    hasCursor: qrMouse.containsMouse || selected
+    implicitHeight: qrLayout.implicitHeight + Style.spacing.rowPaddingX
+    MouseArea { id: qrMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: qr.picked() }
+    RowLayout {
+      id: qrLayout
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      anchors.leftMargin: Style.space(10)
+      anchors.rightMargin: Style.space(10)
+      spacing: Style.space(8)
+      Text { text: qr.selected ? "◉" : "○"; color: qr.selected ? Color.accent : root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.body }
+      ColumnLayout {
+        Layout.fillWidth: true
+        spacing: 0
+        Text {
+          Layout.fillWidth: true
+          text: (qr.file.quant || "") + (qr.recommended ? "   ★ recommended" : "")
+          color: qr.selected ? Color.accent : root.foreground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+          font.bold: qr.selected
+        }
+        Text {
+          Layout.fillWidth: true
+          text: [root.quantHint(qr.file.quant), (qr.file.files || []).length > 1 ? (qr.file.files || []).length + " parts" : ""].filter(function(s) { return s }).join(" · ")
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+      }
+      Text { text: root.fmtBytes(qr.file.size); color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+      Text { text: root.fitLabel(qr.file.fit); color: root.fitColor(qr.file.fit); font.family: root.fontFamily; font.pixelSize: Style.font.caption }
     }
   }
 
@@ -781,7 +1024,14 @@ Panel {
     width: parent.width
     spacing: Style.space(8)
     Text { text: label; color: root.foreground; opacity: 0.6; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
-    Item { width: Math.max(0, parent.width - parent.children[0].implicitWidth - parent.children[2].implicitWidth - parent.spacing * 2); height: 1 }
-    Text { text: value; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+    Item { width: Math.max(0, parent.width - parent.children[0].implicitWidth - parent.children[2].width - parent.spacing * 2); height: 1 }
+    Text {
+      width: Math.min(implicitWidth, parent.width - parent.children[0].implicitWidth - parent.spacing * 2)
+      text: value
+      color: root.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      elide: Text.ElideMiddle
+    }
   }
 }

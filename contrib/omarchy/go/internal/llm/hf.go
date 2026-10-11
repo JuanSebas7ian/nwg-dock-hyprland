@@ -145,14 +145,15 @@ type HFFile struct {
 	MMProj string   `json:"mmproj,omitempty"`
 }
 
-// Fit says where a model of `size` bytes runs with `vram` bytes of GPU memory,
-// leaving ~1.5 GB for the KV cache and the desktop.
+// Fit says where a model of `size` bytes runs with `vram` bytes of GPU memory.
+// Besides the weights it needs the KV cache (~25 % of the weights at 32k
+// context, q8_0) and ~2 GB for the desktop and the dictation model.
 func Fit(size, vram int64) string {
-	const headroom = 1536 << 20
+	const reserved = 2 << 30
 	switch {
 	case vram <= 0:
 		return "cpu"
-	case size+headroom <= vram:
+	case size+size/4+reserved <= vram:
 		return "gpu"
 	case size <= vram*2:
 		return "partial"

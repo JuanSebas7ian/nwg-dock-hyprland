@@ -595,7 +595,9 @@ func TestHFSearchAndFiles(t *testing.T) {
 
 func TestFit(t *testing.T) {
 	gb := int64(1 << 30)
-	if Fit(4*gb, 12*gb) != "gpu" || Fit(11*gb, 12*gb) != "partial" || Fit(30*gb, 12*gb) != "cpu" || Fit(gb, 0) != "cpu" {
+	// 14B IQ4_XS (7.5 GiB) fits a 12 GB card with 32k context; 14B Q4_K_M (8.4 GiB) does not.
+	if Fit(4*gb, 12*gb) != "gpu" || Fit(7500<<20, 12*gb) != "gpu" || Fit(8600<<20, 12*gb) != "partial" ||
+		Fit(11*gb, 12*gb) != "partial" || Fit(30*gb, 12*gb) != "cpu" || Fit(gb, 0) != "cpu" {
 		t.Fatal("fit thresholds")
 	}
 }
