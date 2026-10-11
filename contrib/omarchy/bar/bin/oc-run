@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# oc-run: open opencode on a local model.
+#   llama.cpp (default backend, omarchy-llm): the model loads on the router and
+#   unloads by itself when idle. Ollama: warm the model up, then open opencode.
+# Usage: oc-run [-l|--llama|-o|--ollama] [-w|--warmup] [-u|--unload] [-s|--status] [MODEL] [-- opencode args]
+set -euo pipefail
+
+OLLAMA_HOST=${OLLAMA_HOST:-http://127.0.0.1:11434}
+KEEPALIVE=${KEEPALIVE:-2h}
+backend=$(omarchy-llm config 2>/dev/null | jq -r '.config.defaultBackend // "llama"')
+default=$(omarchy-llm config 2>/dev/null | jq -r '.config.defaultModel // ""')
+action=run model="" extra=()
+
+while (($#)); do
+  case $1 in
+  -h | --help) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -l | --llama) backend=llama ;;
+  -o | --ollama) backend=ollama ;;
+  -w | --warmup) action=warmup ;;
+  -u | --unload) action=unload ;;
+  -s | --status) action=status ;;
+  -k | --keepalive) KEEPALIVE=$2; shift ;;
+  --) shift; extra=("$@"); break ;;
+  -*) echo "oc-run: unknown option $1" >&2; exit 2 ;;
+  *) model=$1 ;;
+  esac
+  shift
+done
+
+if [[ $backend == llama ]]; then
+  # llama.cpp ids have no ':' (qwen2.5-coder:7b -> qwen2.5-coder-7b)
+  id=$(printf '%s' "${model:-$default}" | tr '[:upper:]' '[:lower:]' | sed -E 's/:latest$//; s#[^a-z0-9._-]+#-#g')
+  case $action in
+  status) omarchy-llm status | jq -r '.llama | "llama.cpp \(if .running then "running" else "stopped" end) \(.endpoint)", (.models[] | "  \(.id)  \(.status)")' ;;
+  unload) omarchy-llm unload "$id" ;;
+  warmup) omarchy-llm up "$id" | jq -r 'if .ok then "✓ \(.model) ready on \(.endpoint)" else "✗ \(.error)" end' ;;
+  run)
+    echo "⚡ llama.cpp: loading $id…"
+    omarchy-llm up "$id" | jq -r 'if .ok then "✓ ready on \(.endpoint)" else "✗ \(.error) (opencode starts anyway)" end' || true
+    exec opencode -m "llama/$id" "${extra[@]}"
+    ;;
+  esac
+else
+  model=${model:-qwen2.5-coder:7b}
+  case $action in
+  status) ollama ps ;;
+  unload) curl -fsS "$OLLAMA_HOST/api/generate" -d "{\"model\":\"$model\",\"keep_alive\":0}" >/dev/null && echo "✓ $model unloaded" ;;
+  warmup | run)
+    echo "⚡ Ollama: loading $model (keep-alive $KEEPALIVE)…"
+    curl -fsS "$OLLAMA_HOST/api/generate" -d "{\"model\":\"$model\",\"keep_alive\":\"$KEEPALIVE\"}" >/dev/null || echo "✗ Ollama could not load $model" >&2
+    [[ $action == run ]] && exec opencode -m "ollama/$model" "${extra[@]}"
+    ;;
+  esac
+fi

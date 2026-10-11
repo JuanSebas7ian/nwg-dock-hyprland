@@ -1,0 +1,18 @@
+[Unit]
+Description=llama.cpp router: local models for agents, loaded on demand (omarchy-llm)
+Documentation=file://%h/src/nwg-dock-hyprland-dnd/contrib/omarchy/bar/README.md
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+# Written by `omarchy-llm sync` from ~/.config/omarchy-llm/config.json.
+EnvironmentFile=%h/.config/omarchy-llm/router.env
+ExecStartPre=-%h/.local/bin/omarchy-llm sync --no-restart
+ExecStart=/usr/bin/llama-server --models-preset ${OMARCHY_LLM_PRESET} --models-max ${OMARCHY_LLM_MAX} --host ${OMARCHY_LLM_HOST} --port ${OMARCHY_LLM_PORT}
+Restart=on-failure
+RestartSec=5
+# The router itself is tiny; loaded models are its child processes (CUDA).
+Nice=-2
+
+[Install]
+WantedBy=default.target

@@ -39,7 +39,7 @@ RETIRED=(
   juansebas7ian.gdrive juansebas7ian.icloud juansebas7ian.gphotos
   juansebas7ian.sysmon juansebas7ian.cooling juansebas7ian.storage juansebas7ian.nvidia juansebas7ian.drivers
 )
-COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session omarchy-freeze-guard omarchy-memguard bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn omarchy-gcal)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session omarchy-freeze-guard omarchy-memguard bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn omarchy-gcal oc-run)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }
@@ -97,12 +97,14 @@ remove_all() {
   systemctl --user disable --now omarchy-gcal.timer >/dev/null 2>&1 || true
   systemctl --user disable --now omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.path opencode-ollama-sync.timer >/dev/null 2>&1 || true
   systemctl --user stop gphotos-sync.service >/dev/null 2>&1 || true
-  for unit in omarchy-spotify-heal.service omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
+  for unit in omarchy-spotify-heal.service llama-router.service omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
-  systemctl --user disable --now omarchy-spotify-heal.service >/dev/null 2>&1 || true
-  [[ -e $UNITS/omarchy-spotify-heal.service ]] && backup "$UNITS/omarchy-spotify-heal.service" && rm -f "$UNITS/omarchy-spotify-heal.service"
-  for c in "${COLLECTORS[@]}" omarchy-spotify; do
+  systemctl --user disable --now omarchy-spotify-heal.service llama-router.service >/dev/null 2>&1 || true
+  for unit in omarchy-spotify-heal.service llama-router.service; do
+    [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
+  done
+  for c in "${COLLECTORS[@]}" omarchy-spotify omarchy-llm; do
     [[ -e $BIN/$c ]] && backup "$BIN/$c" && rm -f "$BIN/$c"
   done
   rm -f "${XDG_STATE_HOME:-$HOME/.local/state}"/omarchy/agents/usage/{antigravity,opencode}.json
@@ -160,7 +162,7 @@ done
 # --------------------------------------------------------------- backends en Go
 # contrib/omarchy/go: un módulo con un binario por widget. Se prueban antes de
 # instalar; si las pruebas fallan, se conserva el binario anterior.
-GO_TOOLS=(omarchy-spotify)
+GO_TOOLS=(omarchy-spotify omarchy-llm)
 GO_SRC=$(cd "$HERE/../go" && pwd)
 if command -v go >/dev/null; then
   say "Backends en Go (${GO_TOOLS[*]})"
@@ -297,6 +299,13 @@ if ! systemctl --user is-active -q omarchy-session.service; then
   state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-session
   mkdir -p "$state"
   [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && printf '%s' "$HYPRLAND_INSTANCE_SIGNATURE" >"$state/restored-instance"
+fi
+# llama.cpp router (default backend for agents): presets first, then the service.
+if [[ -x /usr/bin/llama-server && -x $BIN/omarchy-llm ]]; then
+  "$BIN/omarchy-llm" sync --no-restart >/dev/null || warn "omarchy-llm sync falló"
+  systemctl --user enable --now llama-router.service >/dev/null || warn "llama-router no arrancó: journalctl --user -u llama-router"
+else
+  warn "sin llama.cpp (omarchy pkg add llama-cpp ggml-cuda): los agentes usarán Ollama"
 fi
 systemctl --user enable --now omarchy-session.service >/dev/null
 systemctl --user enable omarchy-freeze-guard.service >/dev/null

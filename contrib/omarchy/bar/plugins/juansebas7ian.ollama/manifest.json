@@ -1,18 +1,20 @@
 {
   "schemaVersion": 1,
   "id": "juansebas7ian.ollama",
-  "name": "Ollama",
-  "version": "1.0.0",
+  "name": "Local AI",
+  "version": "3.0.0",
   "author": "juansebas7ian",
   "license": "MIT",
-  "description": "Local Ollama models: what is installed and loaded, disk use, and downloads from the ollama.com library.",
-  "kinds": ["bar-widget"],
+  "description": "Local models for agents: llama.cpp router by default (loads on demand, unloads when idle), Ollama, and GGUF downloads from Hugging Face; settings for both (Go backend omarchy-llm).",
+  "kinds": [
+    "bar-widget"
+  ],
   "entryPoints": {
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Ollama",
-    "description": "Left = panel · right = open ollama.com. Panel: downloaded and loaded models, disk use, search and download.",
+    "displayName": "Local AI",
+    "description": "Left = panel \u00b7 right = open llama.cpp chat in the browser.",
     "category": "AI",
     "allowMultiple": false,
     "defaultSection": "right"
