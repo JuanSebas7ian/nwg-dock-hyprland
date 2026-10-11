@@ -1,0 +1,16 @@
+[Unit]
+Description=Spotify on this PC: restart spotifyd and resume the song when it loses an audio key
+Documentation=file://%h/src/nwg-dock-hyprland-dnd/contrib/omarchy/bar/README.md
+After=spotifyd.service
+PartOf=spotifyd.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=%h/.local/bin/omarchy-spotify watch
+Restart=always
+RestartSec=10
+Nice=10
+MemoryMax=64M
+
+[Install]
+WantedBy=spotifyd.service

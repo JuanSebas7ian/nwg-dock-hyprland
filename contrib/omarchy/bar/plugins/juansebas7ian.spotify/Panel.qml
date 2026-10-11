@@ -8,17 +8,17 @@ import qs.Commons
 import qs.Ui
 
 // Spotify without the Spotify window. Playback is spotifyd (this PC's Spotify
-// Connect device "Omarchy") through MPRIS: play, pause, skip, seek, volume and
-// opening any playlist/album/track need no Web API. Lists (your playlists,
-// saved albums, top tracks) and other devices come from spotify-player's CLI,
-// which works best with your own Spotify app (Connect → spotify-bar-setup).
+// Connect device "Omarchy"): controls go through MPRIS, and starting a list or
+// a song, search, queue, likes and playlists go through the Go backend
+// (omarchy-spotify, Web API with your own Spotify app). When spotifyd loses a
+// song's key the backend restarts it and resumes where it was.
 Panel {
   id: root
   moduleName: "juansebas7ian.spotify"
   ipcTarget: "juansebas7ian.spotify"
   manageIpc: false
 
-  readonly property string backend: String(Qt.resolvedUrl("spotify.py")).replace("file://", "")
+  readonly property string backend: Quickshell.env("HOME") + "/.local/bin/omarchy-spotify"
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -29,7 +29,17 @@ Panel {
   property var setup: null
   property string tab: "recent"
   property string message: ""
+  property bool messageOk: false
   property bool busy: false
+  // drill-down into a playlist/album, and search
+  property var openList: null      // entry whose songs are shown
+  property var listTracks: []
+  property string listError: ""
+  property bool listLoading: false
+  property var found: null         // search results
+  property bool searching: false
+  property string pickFor: ""      // song being added to a playlist
+  readonly property var myPlaylists: lib ? (lib.playlists || []).filter(function(p) { return p.mine }) : []
 
   // spotifyd first (it is ours), else the Spotify app if it is open.
   readonly property var player: {
@@ -48,21 +58,23 @@ Panel {
   readonly property string artist: player ? (player.trackArtist || "") : ""
   readonly property string trackKey: player && player.metadata
     ? String(player.metadata["mpris:trackid"] || player.metadata["xesam:url"] || "") : ""
-  onTrackKeyChanged: if (trackKey !== "") Quickshell.execDetached(["python3", backend, "remember", trackKey])
+  onTrackKeyChanged: if (trackKey !== "") Quickshell.execDetached([backend, "remember", trackKey])
 
-  readonly property var listModel: !lib ? [] : tab === "recent" ? (lib.recent || []) : tab === "albums" ? (lib.albums || [])
-    : tab === "top" ? (lib.top || []).map(function(t) { return { uri: t.uri, name: t.name, sub: t.artist, image: t.image } })
-    : (lib.playlists || [])
+  readonly property var listModel: openList ? listTracks
+    : tab === "search" ? (found ? [].concat(found.tracks || [], found.playlists || [], found.albums || [], found.artists || []) : [])
+    : !lib ? [] : tab === "recent" ? (lib.recent || []) : tab === "albums" ? (lib.albums || [])
+    : tab === "top" ? (lib.top || []) : tab === "liked" ? (lib.liked || []) : (lib.playlists || [])
 
   function fmt(sec) {
     var s = Math.max(0, Math.floor(Number(sec || 0)))
     return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2)
   }
-  function run(args) {
+  function run(args, okText) {
     if (actionProc.running) return
     busy = true
     message = ""
-    actionProc.command = ["python3", backend].concat(args)
+    actionProc.okText = okText || ""
+    actionProc.command = [backend].concat(args)
     actionProc.running = true
   }
   // A player with a loaded track is controlled directly; otherwise start this PC.
@@ -73,13 +85,43 @@ Panel {
   function next() { if (player && player.canGoNext && trackKey !== "") player.next(); else run(["local-play"]) }
   function previous() { if (player && player.canGoPrevious && trackKey !== "") player.previous(); else run(["local-play"]) }
   function playUri(uri) { run(["play-uri", uri]) }
+  // A song plays inside the list it was shown in, so next/previous keep going.
+  function playEntry(e) {
+    if (!e || !e.uri) return
+    if (e.kind === "track") run(["play", e.context || "-", e.uri])
+    else run(["play-uri", e.uri])
+  }
+  function openEntry(e) {
+    if (!e || (e.kind !== "playlist" && e.kind !== "album")) { playEntry(e); return }
+    openList = e
+    listTracks = []
+    listError = ""
+    listLoading = true
+    tracksProc.command = [backend, "tracks", e.uri]
+    tracksProc.running = true
+  }
+  function closeList() { openList = null; listTracks = []; listError = ""; pickFor = "" }
+  function runSearch(q) {
+    q = String(q || "").trim()
+    if (q === "" || searchProc.running) return
+    tab = "search"
+    closeList()
+    searching = true
+    searchProc.command = [backend, "search", q]
+    searchProc.running = true
+  }
+  function addTo(playlistUri, name) {
+    var song = pickFor
+    pickFor = ""
+    if (song !== "") run(["playlist-add", playlistUri, song], "Added to " + name)
+  }
   function connectAccount() {
     root.bar.run("omarchy-launch-floating-terminal-with-presentation spotify-bar-setup")
     root.close()
   }
   function loadLists(force) {
     if (libProc.running) return
-    libProc.command = ["python3", backend, "library"].concat(force ? ["--force"] : [])
+    libProc.command = [backend, "library"].concat(force ? ["--force"] : [])
     libProc.running = true
   }
 
@@ -95,13 +137,44 @@ Panel {
 
   Process {
     id: actionProc
+    property string okText: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         root.busy = false
         try {
           var r = JSON.parse(text)
+          root.messageOk = !!r.ok
           if (!r.ok) root.message = r.error || "Spotify did not accept that"
+          else if (actionProc.okText !== "") { root.message = actionProc.okText; if (actionProc.okText.indexOf("playlist") >= 0 || actionProc.okText.indexOf("Added") >= 0 || actionProc.okText.indexOf("Liked") >= 0) root.loadLists(true) }
+        } catch (e) { root.messageOk = false; root.message = "Spotify backend did not answer" }
+      }
+    }
+  }
+  Process {
+    id: tracksProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.listLoading = false
+        try {
+          var r = JSON.parse(text)
+          root.listTracks = r.tracks || []
+          root.listError = r.ok ? "" : (r.error || "")
+        } catch (e) { root.listError = "Could not load the songs" }
+      }
+    }
+  }
+  Process {
+    id: searchProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.searching = false
+        try {
+          var r = JSON.parse(text)
+          if (r.ok) root.found = r.results
+          else { root.messageOk = false; root.message = r.error || "Search failed" }
         } catch (e) {}
       }
     }
@@ -112,12 +185,12 @@ Panel {
   }
   Process {
     id: devProc
-    command: ["python3", root.backend, "devices"]
+    command: [root.backend, "devices"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.devs = JSON.parse(text).devices || [] } catch (e) {} } }
   }
   Process {
     id: setupProc
-    command: ["python3", root.backend, "setup-state"]
+    command: [root.backend, "setup-state"]
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: { try { root.setup = JSON.parse(text) } catch (e) {} } }
   }
   // MPRIS position does not tick by itself.
@@ -326,7 +399,7 @@ Panel {
             visible: root.message !== ""
             width: parent.width
             text: root.message
-            color: root.urgent
+            color: root.messageOk ? Color.accent : root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
@@ -343,14 +416,14 @@ Panel {
                 required property var modelData
                 label: (modelData.type === "Smartphone" ? "󰄜 " : modelData.type === "Computer" ? "󰍹 " : "󰓃 ") + modelData.name
                 on: !!modelData.active
-                onClicked: modelData.name === "Omarchy" ? root.run(["local-play"]) : root.run(["device", modelData.name])
+                onClicked: modelData.name === "Omarchy" ? root.run(["local-play"]) : root.run(["device", modelData.id || modelData.name])
               }
             }
           }
 
           // ------------------------------------------------ connect account
           CursorSurface {
-            visible: !!root.setup && (!root.setup.ownClientId || (!!root.lib && !!root.lib.error && (root.lib.playlists || []).length === 0))
+            visible: !!root.setup && (!root.setup.ownClientId || !root.setup.authenticated || (!!root.lib && !!root.lib.error && (root.lib.playlists || []).length === 0))
             width: parent.width
             foreground: root.foreground
             hasCursor: connectMouse.containsMouse
@@ -384,18 +457,84 @@ Panel {
           }
 
           // ------------------------------------------------ lists
-          Row {
+          Flow {
+            visible: !root.openList
+            width: parent.width
             spacing: Style.space(4)
             Chip { label: "Recent"; on: root.tab === "recent"; onClicked: root.tab = "recent" }
             Chip { label: "Playlists"; on: root.tab === "playlists"; onClicked: root.tab = "playlists" }
             Chip { label: "Albums"; on: root.tab === "albums"; onClicked: root.tab = "albums" }
-            Chip { label: "Top this month"; on: root.tab === "top"; onClicked: root.tab = "top" }
+            Chip { label: "Liked"; on: root.tab === "liked"; onClicked: root.tab = "liked" }
+            Chip { label: "Top"; on: root.tab === "top"; onClicked: root.tab = "top" }
+            Chip { label: "Search"; on: root.tab === "search"; onClicked: { root.tab = "search"; Qt.callLater(function() { searchField.forceActiveFocus() }) } }
             Chip { label: "󰑐"; onClicked: root.loadLists(true) }
+          }
+          RowLayout {
+            visible: root.tab === "search" && !root.openList
+            width: parent.width
+            spacing: Style.space(6)
+            TextField {
+              id: searchField
+              Layout.fillWidth: true
+              foreground: root.foreground
+              placeholderText: "Songs, artists, albums, playlists"
+              onAccepted: root.runSearch(text)
+              Keys.onEscapePressed: keyCatcher.forceActiveFocus()
+            }
+            PanelActionButton {
+              iconText: root.searching ? "󰑐" : "\uf002"
+              tooltipText: "Search Spotify"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: root.runSearch(searchField.text)
+            }
+          }
+          // header of an opened playlist/album
+          RowLayout {
+            visible: !!root.openList
+            width: parent.width
+            spacing: Style.space(6)
+            PanelActionButton { iconText: "󰁍"; tooltipText: "Back"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.closeList() }
+            Text {
+              Layout.fillWidth: true
+              text: root.openList ? root.openList.name : ""
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+              elide: Text.ElideRight
+            }
+            PanelActionButton { iconText: "󰐊"; tooltipText: "Play all"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.playUri(root.openList.uri) }
+            PanelActionButton { iconText: "󰋑"; tooltipText: "Save to your library"; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.run(["like", root.openList.uri], "Liked " + root.openList.name) }
+          }
+          // "add to playlist" picker
+          Column {
+            visible: root.pickFor !== ""
+            width: parent.width
+            spacing: Style.space(2)
+            Text { text: "Add to which playlist?"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+            Flow {
+              width: parent.width
+              spacing: Style.space(4)
+              Repeater {
+                model: root.myPlaylists
+                Chip { required property var modelData; label: modelData.name; onClicked: root.addTo(modelData.uri, modelData.name) }
+              }
+              Chip { label: "Cancel"; onClicked: root.pickFor = "" }
+            }
+            RowLayout {
+              width: parent.width
+              spacing: Style.space(6)
+              TextField { id: newListField; Layout.fillWidth: true; foreground: root.foreground; placeholderText: "…or a new playlist name"
+                onAccepted: if (text.trim() !== "") { root.run(["playlist-create", text.trim()], "New playlist " + text.trim()); text = "" } }
+            }
           }
           Text {
             visible: root.listModel.length === 0
             width: parent.width
-            text: !root.lib ? "Loading your library…" : root.lib.error ? "Lists unavailable right now." : "Nothing here yet."
+            text: root.openList ? (root.listLoading ? "Loading songs…" : root.listError !== "" ? root.listError : "No songs.")
+              : root.tab === "search" ? (root.searching ? "Searching…" : "Type and press Enter.")
+              : !root.lib ? "Loading your library…" : root.lib.error ? "Lists unavailable right now." : "Nothing here yet."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -409,7 +548,7 @@ Panel {
               ListRow {
                 required property var modelData
                 entry: modelData
-                onPicked: root.playUri(modelData.uri)
+                onPicked: root.openEntry(modelData)
               }
             }
           }
@@ -480,7 +619,29 @@ Panel {
         Text { Layout.fillWidth: true; text: row.entry.name || ""; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
         Text { Layout.fillWidth: true; text: row.entry.sub || ""; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
       }
-      Text { text: "󰐊"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.icon; visible: rowMouse.containsMouse }
+      Row {
+        visible: rowMouse.containsMouse || rowHover.hovered
+        spacing: Style.space(2)
+        HoverHandler { id: rowHover }
+        RowAction { icon: "󰐊"; tip: row.entry.kind === "track" ? "Play" : "Play all"; onClicked: root.playEntry(row.entry) }
+        RowAction { visible: row.entry.kind === "track"; icon: "󰐕"; tip: "Add to queue"; onClicked: root.run(["queue", row.entry.uri], "Queued " + row.entry.name) }
+        RowAction { visible: row.entry.kind === "track"; icon: "󰋑"; tip: "Like"; onClicked: root.run(["like", row.entry.uri], "Liked " + row.entry.name) }
+        RowAction { visible: row.entry.kind === "track"; icon: "󰲸"; tip: "Add to playlist"; onClicked: root.pickFor = row.entry.uri }
+        RowAction { visible: row.entry.kind === "track" && !!root.openList && !!root.openList.mine; icon: "󰆴"; tip: "Remove from this playlist"
+          onClicked: root.run(["playlist-remove", root.openList.uri, row.entry.uri], "Removed " + row.entry.name) }
+      }
     }
+  }
+
+  component RowAction: Text {
+    id: ra
+    property string icon: ""
+    property string tip: ""
+    signal clicked()
+    text: icon
+    color: raMouse.containsMouse ? Color.accent : root.dim
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.icon
+    MouseArea { id: raMouse; anchors.fill: parent; anchors.margins: -Style.space(3); hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: ra.clicked() }
   }
 }

@@ -97,10 +97,12 @@ remove_all() {
   systemctl --user disable --now omarchy-gcal.timer >/dev/null 2>&1 || true
   systemctl --user disable --now omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.path opencode-ollama-sync.timer >/dev/null 2>&1 || true
   systemctl --user stop gphotos-sync.service >/dev/null 2>&1 || true
-  for unit in omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
+  for unit in omarchy-spotify-heal.service omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
-  for c in "${COLLECTORS[@]}"; do
+  systemctl --user disable --now omarchy-spotify-heal.service >/dev/null 2>&1 || true
+  [[ -e $UNITS/omarchy-spotify-heal.service ]] && backup "$UNITS/omarchy-spotify-heal.service" && rm -f "$UNITS/omarchy-spotify-heal.service"
+  for c in "${COLLECTORS[@]}" omarchy-spotify; do
     [[ -e $BIN/$c ]] && backup "$BIN/$c" && rm -f "$BIN/$c"
   done
   rm -f "${XDG_STATE_HOME:-$HOME/.local/state}"/omarchy/agents/usage/{antigravity,opencode}.json
@@ -154,6 +156,27 @@ for entry in "${WIDGETS[@]}" "${CLONES[@]/%/:}"; do
   omarchy plugin validate "$HERE/plugins/$id" >/dev/null || fail "manifiesto inválido: $id"
   install_dir "$HERE/plugins/$id" "$PLUGINS/$id"
 done
+
+# --------------------------------------------------------------- backends en Go
+# contrib/omarchy/go: un módulo con un binario por widget. Se prueban antes de
+# instalar; si las pruebas fallan, se conserva el binario anterior.
+GO_TOOLS=(omarchy-spotify)
+GO_SRC=$(cd "$HERE/../go" && pwd)
+if command -v go >/dev/null; then
+  say "Backends en Go (${GO_TOOLS[*]})"
+  if (cd "$GO_SRC" && go test ./... >/dev/null); then
+    gobuild=$(mktemp -d)
+    for t in "${GO_TOOLS[@]}"; do
+      (cd "$GO_SRC" && go build -trimpath -ldflags "-s -w" -o "$gobuild/$t" "./cmd/$t") || fail "no compila $t"
+      install_file "$gobuild/$t" "$BIN/$t" 755 || say "  sin cambios: $BIN/$t"
+    done
+    rm -rf "$gobuild"
+  else
+    warn "las pruebas de Go fallan (cd $GO_SRC && go test ./...): se dejan los binarios instalados"
+  fi
+else
+  warn "sin Go no se compilan los backends: omarchy pkg add go"
+fi
 
 # --------------------------------------------------------------- colectores
 say "Colectores de uso (Antigravity, opencode)"
@@ -291,6 +314,7 @@ if [[ -e $UNITS/gphotos-sync.timer ]] && RCLONE_REMOTE=gphotos: remote_exists; t
 fi
 if command -v spotifyd >/dev/null && compgen -G "$HOME/.cache/spotifyd/oauth/*" >/dev/null; then
   systemctl --user enable --now spotifyd.service >/dev/null || true
+  systemctl --user enable --now omarchy-spotify-heal.service >/dev/null || warn "omarchy-spotify-heal no arrancó"
 fi
 if [[ -e $UNITS/spotify-player.service ]] && compgen -G "$HOME/.cache/spotify-player/*token.json" >/dev/null; then
   systemctl --user enable --now spotify-player.service >/dev/null || true

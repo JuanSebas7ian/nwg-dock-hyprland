@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "juansebas7ian.spotify",
   "name": "Spotify",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "author": "juansebas7ian",
   "license": "MIT",
-  "description": "Spotify without the Spotify window: now playing, controls, devices (spotifyd), queue, recent, top tracks and playlists.",
+  "description": "Spotify without the Spotify window: controls, search, songs of each list, queue, likes, add to playlists, devices; spotifyd self-heals (Go backend).",
   "kinds": [
     "bar-widget"
   ],
