@@ -8,6 +8,8 @@
 #   sudo contrib/omarchy/boot/install.sh splash          # UKI sin firmware de amdgpu + logo de Plymouth desde el inicio
 #   sudo contrib/omarchy/boot/install.sh remove-splash
 #   sudo contrib/omarchy/boot/install.sh splash-nodebug  # quita plymouth.debug tras revisar un arranque
+#   sudo contrib/omarchy/boot/install.sh splash-smooth   # sin texto de terminal: quita plymouth.debug y deja el
+#                                                        # logo en pantalla hasta que dibuja el escritorio
 #        contrib/omarchy/boot/install.sh check           # estado, sin root
 #
 # Nunca toca archivos de Omarchy: el tema y la configuración de rEFInd van en /boot/EFI/refind, los
@@ -230,8 +232,30 @@ install_splash() {
   say "  UKI: $((before / 1048576)) MB → $(($(stat -c %s "$uki") / 1048576)) MB; línea del kernel y TPM2 correctos"
 }
 
+RETAIN=/etc/systemd/system/plymouth-quit.service.d/claude-retain-splash.conf
+
+# 2026-10-11: plymouth.debug escribía su registro en tty1 ("redirecting debug output to
+# /dev/tty1"): esos eran los pantallazos de terminal entre rEFInd y el escritorio. Además
+# Plymouth se cerraba antes de SDDM y quedaba la consola a la vista; con --retain-splash el
+# último cuadro del logo se queda hasta que SDDM/Hyprland toman la pantalla.
+install_smooth() {
+  need_root
+  snapshot "claude $STAMP: antes de splash-smooth (sin plymouth.debug, logo hasta el escritorio)"
+  install -d "$(dirname "$RETAIN")"
+  cat >"$RETAIN" <<'X'
+# Claude 2026-10-11: keep the last splash frame until SDDM/Hyprland draw (no console in between).
+[Service]
+ExecStart=
+ExecStart=-/usr/bin/plymouth quit --retain-splash
+X
+  systemctl daemon-reload
+  "$KERNEL_PARAM" remove plymouth-debug || limine-update
+  say "listo: en el próximo arranque, logo de Omarchy de rEFInd al escritorio sin texto"
+}
+
 remove_splash() {
   need_root
+  rm -f "$RETAIN"
   snapshot "claude $STAMP: antes de devolver kms y quitar el logo con simpledrm"
   rm -f "$NOKMS"
   "$KERNEL_PARAM" remove plymouth-debug >/dev/null 2>&1 || true
@@ -247,6 +271,10 @@ check() {
   [[ -f $DROPIN ]] && echo "hooks systemd: $DROPIN" || echo "hooks: los de Omarchy (busybox, encrypt)"
   [[ -f /etc/limine-entry-tool.d/claude-tpm2.conf ]] && cat /etc/limine-entry-tool.d/claude-tpm2.conf | grep -v '^#' || echo "sin rd.luks.name en la línea del kernel"
   tr ' ' '\n' </proc/cmdline | grep -E '^rd.luks|^cryptdevice' || true
+  echo "== Splash"
+  tr ' ' '\n' </proc/cmdline | grep -E '^plymouth|^splash|^quiet' || true
+  grep -qw plymouth.debug /proc/cmdline && echo "AVISO: plymouth.debug activo (texto en pantalla al arrancar): sudo $0 splash-smooth"
+  [[ -f $RETAIN ]] && echo "logo retenido hasta el escritorio: sí" || echo "logo retenido hasta el escritorio: no"
 }
 
 case ${1:-} in
@@ -257,6 +285,7 @@ remove-tpm2) remove_tpm2 ;;
 splash) install_splash ;;
 remove-splash) remove_splash ;;
 splash-nodebug) need_root; "$KERNEL_PARAM" remove plymouth-debug ;;
+splash-smooth) install_smooth ;;
 check) check ;;
-*) sed -n '2,16p' "$0"; exit 3 ;;
+*) sed -n "2,18p" "$0"; exit 3 ;;
 esac
