@@ -74,7 +74,6 @@
         "lm_sensors",
         "nvme-cli",
         "openrgb",
-        "python-evdev",
         "smartmontools",
         "solaar",
         "xpadneo-dkms"

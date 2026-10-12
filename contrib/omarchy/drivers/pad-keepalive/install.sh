@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install pad-keepalive for the current user (no root): ~/.local/bin + a user service.
 # Usage: install.sh [--remove]
-# Needs python-evdev (repo package; listed in ../manifest.json, group peripherals) and the user in the
+# The binary is Go (go/cmd/pad-keepalive, raw evdev/uinput ioctls); needs go to build it and the user in the
 # `input` group (Omarchy keeps it when xpadneo-dkms is installed).
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -17,7 +17,9 @@ if [ "${1:-}" = --remove ]; then
     exit 0
 fi
 
-/usr/bin/python3 -c 'import evdev' 2>/dev/null || { echo "python-evdev missing: sudo pacman -S --needed python-evdev" >&2; exit 1; }
+command -v go >/dev/null || { echo "go missing: omarchy pkg add go" >&2; exit 1; }
+(cd "$HERE/../../go" && go test ./internal/padkeep >/dev/null) || { echo "pad-keepalive tests fail: not installing" >&2; exit 1; }
+built=$("$HERE/../../go/tool.sh" --build pad-keepalive)
 groups=" $(id -nG) "   # no grep -q in a pipe: SIGPIPE + pipefail fails at random
 [[ $groups == *" input "* ]] || echo "warning: $USER is not in the input group; the pad cannot be grabbed" >&2
 
@@ -25,7 +27,7 @@ put() { # src dest mode
     if [ -e "$2" ] && ! cmp -s "$1" "$2"; then mkdir -p "$BACKUP"; cp -a "$2" "$BACKUP/"; echo "backup: $BACKUP/$(basename "$2")"; fi
     install -Dm "$3" "$1" "$2"
 }
-put "$HERE/pad-keepalive" "$BIN" 755
+put "$built" "$BIN" 755
 put "$HERE/pad-keepalive.service" "$UNIT" 644
 systemctl --user daemon-reload
 systemctl --user enable --quiet pad-keepalive.service

@@ -58,13 +58,13 @@ luego `contrib/omarchy/drivers/install.sh --wait` y reiniciar.
   `disabled by hub (EMI?), re-enabling...` y desconexiones limpias, cada ~2 min y solo con el juego abierto. Se descartaron el driver,
   el autosuspend (`power/control = on`), la vibración (20 s al máximo y 3.000 órdenes en 30 s) y el cable (30 s doblándolo).
   En un puerto trasero del controlador de la CPU (`3-2.2`, `0b:00.4`) no se ha repetido.
-- `pad-keepalive/` (usuario, sin root; `python-evdev`, grupo `input`): crea un **mando virtual permanente** (uinput, mismos IDs,
+- `pad-keepalive/` (usuario, sin root; Go con ioctls de evdev/uinput, grupo `input`): crea un **mando virtual permanente** (uinput, mismos IDs,
   `phys=pad-keepalive/input0`), acapara el físico (`EVIOCGRAB`) y le reenvía botones, ejes y vibración. Si el físico se cae, el
   virtual sigue (se sueltan los botones) y el físico se retoma al volver (~1 s): el juego no ve la desconexión. Probado
   desconectando el cable con el juego abierto: Steam y `winedevice.exe` abrieron el virtual sin reiniciar el juego.
   Instalar: `pad-keepalive/install.sh` (idempotente; respaldos en `~/.local/state/omarchy-drivers/backups/`). Quitar: `--remove`.
   Registro: `journalctl --user -u pad-keepalive`.
-  Pruebas (sin hardware: sysfs y dispositivos falsos): `cd pad-keepalive && PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -m unittest test_pad_keepalive` (9).
+  Pruebas (sin hardware: sysfs y dispositivos falsos): `cd ../go && go test ./internal/padkeep` (8; los números de ioctl se comparan con los del kernel).
   Detalles: mientras el control falta lo busca en sysfs cada 0,25 s sin abrir ningún dispositivo; si otro proceso lo tiene acaparado,
   lo registra una vez y reintenta cada 5 s; al reconectar copia los botones y palancas que estén pulsados; el servicio no tiene
   límite de reinicios. Un único control por proxy: un segundo Xbox 360 con cable no pasa por él.
