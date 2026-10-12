@@ -373,37 +373,99 @@ func SetAirPlay(run Runner, p Paths, on bool) error {
 	return nil
 }
 
-// KDEConnect lists the devices kdeconnectd knows.
+// KDEDevice is one device kdeconnectd knows (read over D-Bus: the text of `kdeconnect-cli -l` changes with
+// the device state, e.g. "on 192.168.1.4 via LAN" for unpaired ones).
 type KDEDevice struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Paired    bool   `json:"paired"`
-	Reachable bool   `json:"reachable"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Type            string `json:"type"` // phone | tablet | desktop | laptop | tv
+	Paired          bool   `json:"paired"`
+	Reachable       bool   `json:"reachable"`
+	RequestedByPeer bool   `json:"requestedByPeer"` // the device asks to pair: accept or reject here
+	Requested       bool   `json:"requested"`       // this PC asked: accept on the device
 }
 
-var kdeLine = regexp.MustCompile(`^- (.+): (\S+) \((.+)\)$`)
+const kdeBus, kdeIface = "org.kde.kdeconnect", "org.kde.kdeconnect.device"
 
-func ParseKDEConnect(out string) []KDEDevice {
-	var ds []KDEDevice
-	for _, l := range strings.Split(out, "\n") {
-		m := kdeLine.FindStringSubmatch(strings.TrimSpace(l))
-		if m == nil {
+func kdePath(id string) string { return "/modules/kdeconnect/devices/" + id }
+
+// busctl --json=short answers {"type":"s","data":...}; for method calls "data" is the list of return values.
+func busData(b []byte) any {
+	var r struct {
+		Data any `json:"data"`
+	}
+	if json.Unmarshal(b, &r) != nil {
+		return nil
+	}
+	return r.Data
+}
+
+func busFirst(b []byte) any {
+	if l, ok := busData(b).([]any); ok && len(l) > 0 {
+		return l[0]
+	}
+	return nil
+}
+
+// KDEDevices lists kdeconnectd's devices with their state.
+func KDEDevices(run Runner) ([]KDEDevice, error) {
+	b, err := run("busctl", "--user", "--json=short", "call", kdeBus, "/modules/kdeconnect", "org.kde.kdeconnect.daemon", "devices", "bb", "false", "false")
+	if err != nil {
+		return nil, errors.New("kdeconnectd is not running")
+	}
+	ids, _ := busFirst(b).([]any)
+	out := []KDEDevice{}
+	for _, v := range ids {
+		id, _ := v.(string)
+		if !kdeID.MatchString(id) {
 			continue
 		}
-		st := m[3]
-		ds = append(ds, KDEDevice{ID: m[2], Name: m[1], Paired: strings.Contains(st, "paired") && !strings.Contains(st, "unpaired") && !strings.Contains(st, "not paired"),
-			Reachable: strings.Contains(st, "reachable") && !strings.Contains(st, "unreachable") && !strings.Contains(st, "not reachable")})
+		d := KDEDevice{ID: id}
+		prop := func(name string) any {
+			b, err := run("busctl", "--user", "--json=short", "get-property", kdeBus, kdePath(id), kdeIface, name)
+			if err != nil {
+				return nil
+			}
+			return busData(b)
+		}
+		call := func(method string) bool {
+			b, err := run("busctl", "--user", "--json=short", "call", kdeBus, kdePath(id), kdeIface, method)
+			if err != nil {
+				return false
+			}
+			v, _ := busFirst(b).(bool)
+			return v
+		}
+		d.Name, _ = prop("name").(string)
+		d.Type, _ = prop("type").(string)
+		d.Reachable, _ = prop("isReachable").(bool)
+		d.Paired = call("isPaired")
+		d.RequestedByPeer = call("isPairRequestedByPeer")
+		d.Requested = call("isPairRequested")
+		out = append(out, d)
 	}
-	sort.Slice(ds, func(i, j int) bool { return ds[i].Reachable && !ds[j].Reachable })
-	return ds
+	sort.SliceStable(out, func(i, j int) bool {
+		rank := func(d KDEDevice) int {
+			switch {
+			case d.RequestedByPeer:
+				return 0
+			case d.Reachable && d.Paired:
+				return 1
+			case d.Reachable:
+				return 2
+			}
+			return 3
+		}
+		return rank(out[i]) < rank(out[j])
+	})
+	return out, nil
 }
 
 func KDEConnect(run Runner) M {
 	if _, err := exec.LookPath("kdeconnect-cli"); err != nil {
 		return M{"installed": false, "devices": []KDEDevice{}}
 	}
-	b, err := run("kdeconnect-cli", "-l")
-	devs := ParseKDEConnect(string(b))
+	devs, err := KDEDevices(run)
 	if devs == nil {
 		devs = []KDEDevice{}
 	}
@@ -412,31 +474,41 @@ func KDEConnect(run Runner) M {
 
 var kdeID = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
 
-// KDEAction runs one KDE Connect action on a device: pair, unpair, ring, ping, clipboard (send this PC's clipboard).
+// KDEAction runs one KDE Connect action: pair (request; accept on the device), accept / reject (a request the
+// device made), unpair, ring, ping, clipboard (send this PC's clipboard), refresh (look for devices; no id).
 func KDEAction(run Runner, action, id string) error {
+	if action == "refresh" {
+		_, _ = run("kdeconnect-cli", "--refresh")
+		return nil
+	}
 	if !kdeID.MatchString(id) {
 		return errors.New("bad device id")
 	}
+	var name string
 	var args []string
 	switch action {
 	case "pair":
-		args = []string{"--pair", "-d", id}
+		name, args = "kdeconnect-cli", []string{"--pair", "-d", id}
+	case "accept":
+		name, args = "busctl", []string{"--user", "call", kdeBus, kdePath(id), kdeIface, "acceptPairing"}
+	case "reject":
+		name, args = "busctl", []string{"--user", "call", kdeBus, kdePath(id), kdeIface, "cancelPairing"}
 	case "unpair":
-		args = []string{"--unpair", "-d", id}
+		name, args = "kdeconnect-cli", []string{"--unpair", "-d", id}
 	case "ring":
-		args = []string{"--ring", "-d", id}
+		name, args = "kdeconnect-cli", []string{"--ring", "-d", id}
 	case "ping":
-		args = []string{"--ping-msg", "Hola desde Omarchy", "-d", id}
+		name, args = "kdeconnect-cli", []string{"--ping-msg", "Hola desde Omarchy", "-d", id}
 	case "clipboard":
 		clip, err := run("wl-paste", "--no-newline")
 		if err != nil || len(clip) == 0 {
 			return errors.New("the clipboard is empty")
 		}
-		args = []string{"--share-text", string(clip), "-d", id}
+		name, args = "kdeconnect-cli", []string{"--share-text", string(clip), "-d", id}
 	default:
 		return errors.New("unknown action " + action)
 	}
-	if b, err := run("kdeconnect-cli", args...); err != nil {
+	if b, err := run(name, args...); err != nil {
 		return errors.New(strings.TrimSpace(string(b)))
 	}
 	return nil

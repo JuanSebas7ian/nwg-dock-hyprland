@@ -135,15 +135,69 @@ func TestModelNameFallsBack(t *testing.T) {
 	}
 }
 
-func TestParseKDEConnect(t *testing.T) {
-	ds := ParseKDEConnect("- MacBook: 1234abcd5678 (paired)\n- iPhone de Juan: a1b2c3d4e5f6a7b8 (paired and reachable)\n- Pixel: ffffeeee1111 (reachable)\n2 devices found\n")
-	if len(ds) != 3 || ds[0].Name != "iPhone de Juan" || !ds[0].Paired || !ds[0].Reachable {
-		t.Fatalf("%+v", ds)
-	}
-	for _, d := range ds {
-		if d.Name == "Pixel" && (d.Paired || !d.Reachable) || d.Name == "MacBook" && (!d.Paired || d.Reachable) {
-			t.Fatalf("%+v", d)
+func kdeFake(tabletAsks bool) *fake {
+	tab, ph := "0a79468d_782f_4bb8_9ade_24d1db995540", "2d4360c9_455b_44c6_bc6f_397a6d63809e"
+	call := "busctl --user --json=short call org.kde.kdeconnect "
+	get := "busctl --user --json=short get-property org.kde.kdeconnect "
+	dev := func(id string) string { return "/modules/kdeconnect/devices/" + id + " org.kde.kdeconnect.device " }
+	b := func(v bool) string {
+		if v {
+			return `{"type":"b","data":[true]}`
 		}
+		return `{"type":"b","data":[false]}`
+	}
+	return &fake{fail: map[string]bool{}, out: map[string]string{
+		call + "/modules/kdeconnect org.kde.kdeconnect.daemon devices bb false false": `{"type":"as","data":[["` + ph + `","` + tab + `"]]}`,
+		get + dev(tab) + "name":                   `{"type":"s","data":"JuanSebas7ian 2"}`,
+		get + dev(tab) + "type":                   `{"type":"s","data":"tablet"}`,
+		get + dev(tab) + "isReachable":            `{"type":"b","data":true}`,
+		call + dev(tab) + "isPaired":              b(false),
+		call + dev(tab) + "isPairRequestedByPeer": b(tabletAsks),
+		call + dev(tab) + "isPairRequested":       b(false),
+		get + dev(ph) + "name":                    `{"type":"s","data":"JuanSebas7ian"}`,
+		get + dev(ph) + "type":                    `{"type":"s","data":"phone"}`,
+		get + dev(ph) + "isReachable":             `{"type":"b","data":false}`,
+		call + dev(ph) + "isPaired":               b(true),
+		call + dev(ph) + "isPairRequestedByPeer":  b(false),
+		call + dev(ph) + "isPairRequested":        b(false),
+	}}
+}
+
+func TestKDEDevicesOverDBus(t *testing.T) {
+	ds, err := KDEDevices(kdeFake(true).run)
+	if err != nil || len(ds) != 2 {
+		t.Fatal(ds, err)
+	}
+	// the request comes first: it expires in seconds
+	if ds[0].Name != "JuanSebas7ian 2" || ds[0].Type != "tablet" || ds[0].Paired || !ds[0].Reachable || !ds[0].RequestedByPeer {
+		t.Fatalf("%+v", ds[0])
+	}
+	if ds[1].Type != "phone" || !ds[1].Paired || ds[1].Reachable {
+		t.Fatalf("%+v", ds[1])
+	}
+	if _, err := KDEDevices((&fake{}).run); err == nil {
+		t.Fatal("no daemon should be an error")
+	}
+}
+
+func TestWatchAnnouncesPairRequestsOnce(t *testing.T) {
+	var notes []string
+	Notify = func(title, body string) { notes = append(notes, title) }
+	defer func() { Notify = func(string, string) {} }()
+	f := kdeFake(true)
+	f.out["idevice_id -l"], f.out["idevice_id -n"] = "", ""
+	stop := make(chan struct{})
+	ticks := 0
+	f.hook = func(name string, args []string) {
+		if name == "idevice_id" && args[0] == "-l" {
+			if ticks++; ticks == 4 {
+				close(stop)
+			}
+		}
+	}
+	Watch(f.run, testPaths(t), time.Millisecond, stop)
+	if len(notes) != 1 || !strings.Contains(notes[0], "JuanSebas7ian 2 quiere emparejarse") {
+		t.Fatal(notes)
 	}
 }
 
@@ -154,6 +208,13 @@ func TestKDEActionValidates(t *testing.T) {
 	}
 	if err := KDEAction(f.run, "clipboard", "a1b2c3d4e5f6a7b8"); err != nil || !strings.Contains(f.calls[len(f.calls)-1], "--share-text hola") {
 		t.Fatal(err, f.calls)
+	}
+	f.out["busctl"] = ""
+	if err := KDEAction(f.run, "accept", "0a79468d_782f_4bb8_9ade_24d1db995540"); err != nil || !strings.Contains(f.calls[len(f.calls)-1], "acceptPairing") {
+		t.Fatal(err, f.calls)
+	}
+	if err := KDEAction(f.run, "refresh", ""); err != nil {
+		t.Fatal(err)
 	}
 	if KDEAction(f.run, "ring", "x; rm -rf /") == nil || KDEAction(f.run, "explode", "a1b2c3d4e5f6a7b8") == nil {
 		t.Fatal("bad input accepted")

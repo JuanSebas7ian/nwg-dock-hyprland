@@ -329,7 +329,9 @@ Panel {
                 : "off"
             }
             InfoPair { label: "Screen mirroring"; value: root.info && root.info.airplay.running ? "on (\"" + root.info.airplay.name + "\")" : "off" }
-            InfoPair { label: "KDE Connect"; value: root.kdeDevices.filter(function(d) { return d.reachable && d.paired }).length > 0 ? "connected" : root.kde && root.kde.installed ? "not connected" : "not installed" }
+            InfoPair { label: "KDE Connect"; value: !root.kde || !root.kde.installed ? "not installed"
+              : root.kdeDevices.filter(function(d) { return d.requestedByPeer }).length > 0 ? "a device wants to pair (Connect tab)"
+              : root.kdeDevices.filter(function(d) { return d.reachable && d.paired }).length + " connected · " + root.kdeDevices.length + " known" }
             RowLayout {
               visible: root.info && root.info.mounts && root.info.mounts.length > 0
               width: parent.width
@@ -583,16 +585,38 @@ Panel {
               ModelRow {
                 required property var modelData
                 width: parent.width
-                title: modelData.name
-                meta: (modelData.paired ? "paired" : "not paired") + " · " + (modelData.reachable ? "reachable" : "not reachable")
-                actions: modelData.paired
+                readonly property string icon: modelData.type === "tablet" ? "󰓶 " : modelData.type === "phone" ? "󰄜 " : "󰌢 "
+                title: icon + (modelData.name || modelData.id)
+                meta: modelData.requestedByPeer ? "wants to pair: accept it now (the request expires in ~30 s)"
+                  : modelData.requested ? "pairing requested: accept it on the device"
+                  : (modelData.paired ? "paired" : "not paired") + " · " + (modelData.reachable ? "reachable" : "not reachable")
+                actions: modelData.requestedByPeer ? [
+                    { icon: "󰄬", tip: "Accept pairing", run: function() { root.act(["kde", "accept", modelData.id], "Paired with " + modelData.name) } },
+                    { icon: "󰅖", tip: "Reject", run: function() { root.act(["kde", "reject", modelData.id], "Rejected") } }]
+                  : modelData.paired
                   ? (modelData.reachable ? [
                       { icon: "󰅍", tip: "Send this PC's clipboard", run: function() { root.act(["kde", "clipboard", modelData.id], "Clipboard sent") } },
                       { icon: "󰂞", tip: "Ring the device (find it)", run: function() { root.act(["kde", "ring", modelData.id], "Ringing") } },
                       { icon: "󰍡", tip: "Ping", run: function() { root.act(["kde", "ping", modelData.id], "Ping sent") } }] : [])
                     .concat([{ icon: "󰌸", tip: "Unpair", run: function() { root.act(["kde", "unpair", modelData.id], "Unpaired") } }])
-                  : [{ icon: "󰌹", tip: "Pair (accept on the device)", run: function() { root.act(["kde", "pair", modelData.id], "Pairing requested: accept it on the device") } }]
+                  : modelData.reachable ? [{ icon: "󰌹", tip: "Pair (then accept on the device)", run: function() { root.act(["kde", "pair", modelData.id], "Pairing requested: accept it on " + modelData.name) } }]
+                  : []
               }
+            }
+            Flow {
+              visible: !!root.kde && root.kde.installed
+              width: parent.width
+              spacing: Style.space(6)
+              Chip { label: "Look for devices"; onClicked: root.act(["kde", "refresh"], "Looking for devices on the Wi-Fi…") }
+            }
+            Text {
+              visible: !!root.kde && root.kde.installed
+              width: parent.width
+              text: "Several phones and tablets can be paired at once. To pair: open KDE Connect on the device (same Wi-Fi), then press Pair here and accept on the device, or start it on the device and press Accept here."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
           }
         }

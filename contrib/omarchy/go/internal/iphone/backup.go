@@ -147,8 +147,9 @@ var Notify = func(title, body string) {
 // Watch follows connections: on a trusted device it imports new photos (autoImport) and runs the automatic
 // backup when due; on disconnect it releases the device's mounts. It never returns unless stop is closed.
 func Watch(run Runner, p Paths, every time.Duration, stop <-chan struct{}) {
-	known := map[string]bool{}  // handled (trusted) devices
-	warned := map[string]bool{} // untrusted devices already told to tap Trust
+	known := map[string]bool{}    // handled (trusted) devices
+	warned := map[string]bool{}   // untrusted devices already told to tap Trust
+	kdeAsked := map[string]bool{} // KDE Connect pair requests already announced
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for {
@@ -179,6 +180,25 @@ func Watch(run Runner, p Paths, every time.Duration, stop <-chan struct{}) {
 		for u := range warned {
 			if !now[u] {
 				delete(warned, u)
+			}
+		}
+		// a phone or tablet asking to pair over KDE Connect: say so (the request expires in ~30 s)
+		kdeNow := map[string]bool{}
+		if devs, err := KDEDevices(run); err == nil {
+			for _, d := range devs {
+				if !d.RequestedByPeer {
+					continue
+				}
+				kdeNow[d.ID] = true
+				if !kdeAsked[d.ID] {
+					kdeAsked[d.ID] = true
+					Notify(d.Name+" quiere emparejarse", "Acéptalo en el widget del iPhone › Connect (o en una terminal: omarchy-iphone kde accept "+d.ID+")")
+				}
+			}
+		}
+		for id := range kdeAsked {
+			if !kdeNow[id] {
+				delete(kdeAsked, id)
 			}
 		}
 		select {
