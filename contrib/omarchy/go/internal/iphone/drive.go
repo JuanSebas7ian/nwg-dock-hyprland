@@ -98,7 +98,7 @@ func DriveUpload(p Paths, udid string, progress func(frac float64, line string))
 	defer release()
 	host, _ := os.Hostname()
 	cmd := exec.Command("restic", "backup", src, "--tag", "iphone", "--tag", udid, "--host", host, "--json", "--compression", "auto")
-	cmd.Env = env
+	cmd.Env = append(env, "RESTIC_PROGRESS_FPS=0.5") // a status line every 2 s (default is many per second)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

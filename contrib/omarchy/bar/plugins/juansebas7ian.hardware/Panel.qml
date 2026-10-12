@@ -103,7 +103,7 @@ Panel {
     send({ cmd: "bt", action: action, mac: mac, on: on })
   }
   function inTerminal(cmd) {
-    root.bar.run("omarchy-launch-floating-terminal-with-presentation " + root.bar.shellQuote(cmd))
+    root.bar.run("omarchy-launch-floating-terminal-with-presentation " + Util.shellQuote(cmd))
     root.close()
   }
   function runAndClose(cmd) { root.bar.run(cmd); root.close() }

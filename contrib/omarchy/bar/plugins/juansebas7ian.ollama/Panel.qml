@@ -130,8 +130,8 @@ Panel {
     if (!f) return
     startPull(["hf-pull", hfRepo, f.quant].concat(withMMProj && f.mmproj ? ["--mmproj"] : []), hfRepo.split("/")[1] + " " + f.quant)
   }
-  function editFile(path) { if (bar) bar.run("omarchy-launch-editor " + bar.shellQuote(path)); root.close() }
-  function terminal(cmd) { if (bar) bar.run("uwsm-app -- xdg-terminal-exec bash -lc " + bar.shellQuote(cmd)); root.close() }
+  function editFile(path) { if (bar) bar.run("omarchy-launch-editor " + Util.shellQuote(path)); root.close() }
+  function terminal(cmd) { if (bar) bar.run("uwsm-app -- xdg-terminal-exec bash -lc " + Util.shellQuote(cmd)); root.close() }
   function loadPi() { if (!piProcess.running) piProcess.running = true }
   function openRepo(repo) {
     hfRepo = repo
@@ -157,10 +157,10 @@ Panel {
     if (text.indexOf(":") >= 0 || text.indexOf("hf.co/") === 0) startPull(["ollama-pull", text], text)
     else search(text)
   }
-  function openUrl(url) { if (bar) bar.run("xdg-open " + bar.shellQuote(url)); root.close() }
+  function openUrl(url) { if (bar) bar.run("xdg-open " + Util.shellQuote(url)); root.close() }
   function chat(m) {
     if (!bar) return
-    if (m.source === "ollama-tag") bar.run("uwsm-app -- xdg-terminal-exec ollama run " + bar.shellQuote(m.name))
+    if (m.source === "ollama-tag") bar.run("uwsm-app -- xdg-terminal-exec ollama run " + Util.shellQuote(m.name))
     else root.openUrl(root.llama ? root.llama.endpoint.replace("/v1", "") : "http://127.0.0.1:8080")
     root.close()
   }
@@ -252,7 +252,7 @@ Panel {
           root.say("Download failed: " + (d.error || "unknown error"), true)
         } else if (d.done) {
           root.say(d.model + " downloaded" + (root.cfg && root.cfg.defaultBackend === "llama" ? " · ready in llama.cpp" : ""), false)
-          if (root.bar) root.bar.run("notify-send -a 'Local AI' 'Model downloaded' " + root.bar.shellQuote(d.model))
+          if (root.bar) root.bar.run("notify-send -a 'Local AI' 'Model downloaded' " + Util.shellQuote(d.model))
         } else if (d.status || d.total) {
           root.pullStatus = (d.file ? d.file + " · " : "") + (d.status || "")
           root.pullFraction = d.total > 0 ? d.completed / d.total : -1

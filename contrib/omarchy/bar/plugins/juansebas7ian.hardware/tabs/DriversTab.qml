@@ -204,7 +204,7 @@ Column {
     icon: "󰖟"
     label: "Open the ASUS BIOS page"
     hint: "flash it from the BIOS with EZ Flash after a snapshot; never from Linux"
-    onActivated: tab.hw.runAndClose("xdg-open " + tab.hw.bar.shellQuote(tab.d.bios.page))
+    onActivated: tab.hw.runAndClose("xdg-open " + tab.hw.Util.shellQuote(tab.d.bios.page))
   }
 
   // ------------------------------------------------------------ other updates

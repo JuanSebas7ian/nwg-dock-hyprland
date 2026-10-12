@@ -124,7 +124,7 @@ Panel {
     root.bar.run("uwsm-app -- xdg-terminal-exec --title=" + title + " " + args)
     root.close()
   }
-  function openPath(p) { root.bar.run("xdg-open " + root.bar.shellQuote(p)); root.close() }
+  function openPath(p) { root.bar.run("xdg-open " + Util.shellQuote(p)); root.close() }
   function openUrl(u) { root.bar.run("xdg-open " + u); root.close() }
   function setTab(id) { if (tabFiles[id]) tab = id }
   function stepTab(d) {

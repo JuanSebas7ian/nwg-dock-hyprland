@@ -79,7 +79,7 @@ Panel {
   function forget(list, name) { change("remove", list, name, name) }
   function selfCheck() { if (!check.running) { smoke = []; check.running = true } }
   function startService() { if (bar) bar.run("systemctl --user restart omarchy-memguard.service"); message = "Starting…"; messageBad = false }
-  function openLog() { if (bar) bar.run("xdg-open " + bar.shellQuote(Quickshell.env("HOME") + "/.local/state/omarchy-memguard/events.log")); close() }
+  function openLog() { if (bar) bar.run("xdg-open " + Util.shellQuote(Quickshell.env("HOME") + "/.local/state/omarchy-memguard/events.log")); close() }
   function bytes(n) { return Theme.bytes(n || 0) }
   function kindLabel(k) {
     return k === "desktop" ? "Desktop" : k === "ai" ? "AI" : k === "dev" ? "Work" : k === "user" ? "Yours" : ""

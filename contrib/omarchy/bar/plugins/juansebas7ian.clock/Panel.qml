@@ -152,7 +152,7 @@ Panel {
     if (root.bar) root.bar.run("uwsm-app -- xdg-terminal-exec --title=GoogleCalendar " + gcal + " setup")
     root.close()
   }
-  function openUrl(u) { if (root.bar) root.bar.run("xdg-open " + root.bar.shellQuote(u)); root.close() }
+  function openUrl(u) { if (root.bar) root.bar.run("xdg-open " + Util.shellQuote(u)); root.close() }
 
   Process {
     id: gcProc

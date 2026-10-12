@@ -93,8 +93,8 @@ Panel {
   }
   function isRunning(j) { return !!(jobs[j] && jobs[j].running) }
   function startJob(job) { act(["start", job, phone ? phone.udid : ""], "") }
-  function terminal(cmd) { if (bar) bar.run("uwsm-app -- xdg-terminal-exec bash -c " + bar.shellQuote(cmd + "; read -p 'Enter to close'")); root.close() }
-  function openPath(p) { if (bar) bar.run("xdg-open " + bar.shellQuote(p)); root.close() }
+  function terminal(cmd) { if (bar) bar.run("uwsm-app -- xdg-terminal-exec bash -c " + Util.shellQuote(cmd + "; read -p 'Enter to close'")); root.close() }
+  function openPath(p) { if (bar) bar.run("xdg-open " + Util.shellQuote(p)); root.close() }
   function loadApps() { if (trusted && !appsProcess.running) { appsLoading = true; appsProcess.command = [ctl, "apps", phone.udid]; appsProcess.running = true } }
 
   implicitWidth: button.implicitWidth

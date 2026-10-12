@@ -48,7 +48,7 @@ Column {
         tooltipText: "Open in the file manager"
         foreground: Theme.foreground
         fontFamily: Theme.fontFamily
-        onClicked: tab.hw.runAndClose("xdg-open " + tab.hw.bar.shellQuote(tab.dir.path))
+        onClicked: tab.hw.runAndClose("xdg-open " + tab.hw.Util.shellQuote(tab.dir.path))
       }
     }
     Repeater {
@@ -222,7 +222,7 @@ Column {
             foreground: Theme.foreground
             fontFamily: Theme.fontFamily
             onClicked: drv.modelData.download.indexOf("http") === 0
-              ? tab.hw.runAndClose("xdg-open " + tab.hw.bar.shellQuote(drv.modelData.download))
+              ? tab.hw.runAndClose("xdg-open " + tab.hw.Util.shellQuote(drv.modelData.download))
               : tab.hw.inTerminal(drv.modelData.download)
           }
         }

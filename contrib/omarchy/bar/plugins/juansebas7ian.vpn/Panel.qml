@@ -94,7 +94,7 @@ Panel {
     leakProc.command = [ctl, "leaktest"]
     leakProc.running = true
   }
-  function copy(text) { root.bar.run("wl-copy " + root.bar.shellQuote(text)); message = "Copied to the clipboard."; messageIsError = false }
+  function copy(text) { root.bar.run("wl-copy " + Util.shellQuote(text)); message = "Copied to the clipboard."; messageIsError = false }
   // A location to try a fresh key with: the last one, else Bogotá, else the least loaded.
   function testLocation() {
     if (target && target.provider === "surfshark") return target
