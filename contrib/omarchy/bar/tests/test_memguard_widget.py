@@ -1,7 +1,7 @@
 """Static checks for the juansebas7ian.memguard bar widget: the manifest, the
 tabs it loads, and that every command, setting and list the QML uses exists
-in bin/omarchy-memguard (the QML has no other way to be tested here; the live
-check is `omarchy-memguard ui` in the smoke test and opening each tab).
+in the Rust backend contrib/omarchy/rust/memguard (the QML has no other way to
+be tested here; the live check is `omarchy-memguard ui` in the smoke test).
 
 Run: cd contrib/omarchy/bar && python3 -m unittest tests.test_memguard_widget
 """
@@ -11,12 +11,15 @@ import re
 import shutil
 import subprocess
 import unittest
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 BAR = Path(__file__).resolve().parent.parent
 PLUGIN = BAR / "plugins" / "juansebas7ian.memguard"
-BIN = BAR / "bin" / "omarchy-memguard"
+RUST = BAR.parent / "rust" / "memguard" / "src"
+MAIN = (RUST / "main.rs").read_text()
+CONFIG = (RUST / "config.rs").read_text()
+DEFAULTS = set(re.findall(r'^\s*\("(\w+)", [\d.]+\),', CONFIG, re.M))
+LISTS = set(re.findall(r'"(\w+)"', re.search(r"pub const LISTS[^;]+;", CONFIG).group(0)))
 
 
 def qml():
@@ -26,7 +29,6 @@ def qml():
 class Widget(unittest.TestCase):
   @classmethod
   def setUpClass(cls):
-    cls.m = SourceFileLoader("omarchy_memguard_w", str(BIN)).load_module()
     cls.files = qml()
     cls.all = "\n".join(cls.files.values())
 
@@ -48,25 +50,24 @@ class Widget(unittest.TestCase):
     self.assertEqual(re.findall(r'"(\w+)"', order), re.findall(r'(\w+): "\w+Tab"', tabs))
 
   def test_cli_verbs_exist(self):
-    src = BIN.read_text()
+    src = MAIN
     verbs = set(re.findall(r'\[(?:root\.)?bin, "(\w+)"', self.all)) | set(re.findall(r'change\("(\w+)"', self.all))
     self.assertTrue({"ui", "smoke", "add", "remove", "reset"} <= verbs | {"add", "remove"}, verbs)
     for v in verbs | {"set"}:
-      self.assertRegex(src, rf'cmd (==|in) .*"{v}"', v)
+      self.assertRegex(src, rf'"{v}"( \|.*)? =>|\| "{v}"', v)
 
   def test_settings_and_lists_used_exist(self):
     for key in re.findall(r'setValue\("(\w+)"', self.all):
-      self.assertIn(key, self.m.DEFAULTS)
+      self.assertIn(key, DEFAULTS)
     for lst in re.findall(r'(?:forget|change\("(?:add|remove)",)\s*"(\w+)"', self.all):
-      self.assertIn(lst, self.m.LISTS)
+      self.assertIn(lst, LISTS)
     for lst in re.findall(r'id: "(\w+)", title:', self.files["tabs/AppsTab.qml"]):
-      self.assertIn(lst, self.m.LISTS)
+      self.assertIn(lst, LISTS)
     for lst in re.findall(r'tab\.add\("(\w+)"\)', self.files["tabs/AppsTab.qml"]):
-      self.assertIn(lst, self.m.LISTS)
+      self.assertIn(lst, LISTS)
 
   def test_fields_read_from_the_ui_json_exist(self):
-    st = self.m.ui_state.__code__.co_consts
-    text = BIN.read_text()
+    text = MAIN
     for field in ("apps", "events", "config", "service", "status"):
       self.assertIn(f'"{field}"', text)
     local = {"id", "title", "hint"}  # AppsTab's own list of exception kinds, not backend JSON
@@ -74,7 +75,6 @@ class Widget(unittest.TestCase):
       self.assertTrue(f'"{field}"' in text, f"AppsTab reads {field}, which ui_state does not send")
     for field in re.findall(r"modelData\.(\w+)", self.files["tabs/SettingsTab.qml"]):
       self.assertIn(field, ("key", "group", "label", "unit", "min", "max", "step", "value", "default"), field)
-    self.assertTrue(st)
 
   def test_no_scroll_width_loop(self):
     # 2026-10-08: a width that depends on flick.interactive spun the shell at 100 %

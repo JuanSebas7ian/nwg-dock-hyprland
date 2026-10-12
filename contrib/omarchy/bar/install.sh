@@ -39,7 +39,7 @@ RETIRED=(
   juansebas7ian.gdrive juansebas7ian.icloud juansebas7ian.gphotos
   juansebas7ian.sysmon juansebas7ian.cooling juansebas7ian.storage juansebas7ian.nvidia juansebas7ian.drivers
 )
-COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session omarchy-memguard bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn omarchy-gcal oc-run pi-web)
+COLLECTORS=(omarchy-agent-usage-antigravity omarchy-agent-usage-opencode omarchy-agent-usage-extra omarchy-session bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup opencode-ollama-sync omarchy-vpn omarchy-gcal oc-run pi-web)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }
@@ -104,7 +104,7 @@ remove_all() {
   for unit in omarchy-spotify-heal.service llama-router.service; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
-  for c in "${COLLECTORS[@]}" omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers omarchy-freeze-guard pi-box; do
+  for c in "${COLLECTORS[@]}" omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers omarchy-freeze-guard omarchy-memguard pi-box; do
     [[ -e $BIN/$c ]] && backup "$BIN/$c" && rm -f "$BIN/$c"
   done
   rm -f "${XDG_STATE_HOME:-$HOME/.local/state}"/omarchy/agents/usage/{antigravity,opencode}.json
@@ -182,7 +182,7 @@ fi
 
 # --------------------------------------------------------------- demonios en Rust
 # contrib/omarchy/rust: los guardianes del escritorio. Se prueban antes de instalar.
-RUST_TOOLS=(omarchy-freeze-guard)
+RUST_TOOLS=(omarchy-freeze-guard omarchy-memguard)
 RUST_SRC=$(cd "$HERE/../rust" && pwd)
 if command -v cargo >/dev/null; then
   say "Demonios en Rust (${RUST_TOOLS[*]})"

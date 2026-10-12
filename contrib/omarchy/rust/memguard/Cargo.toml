@@ -1,0 +1,9 @@
+[package]
+name = "omarchy-memguard"
+version = "2.0.0"
+edition = "2021"
+description = "Keeps RAM and VRAM usable through sudden or runaway spikes without killing anything"
+
+[dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+libc = "0.2"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["freeze-guard"]
+members = ["freeze-guard", "memguard"]
 
 [profile.release]
 opt-level = 3
