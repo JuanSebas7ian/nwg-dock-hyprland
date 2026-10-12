@@ -147,7 +147,8 @@ var Notify = func(title, body string) {
 // Watch follows connections: on a trusted device it imports new photos (autoImport) and runs the automatic
 // backup when due; on disconnect it releases the device's mounts. It never returns unless stop is closed.
 func Watch(run Runner, p Paths, every time.Duration, stop <-chan struct{}) {
-	known := map[string]bool{}
+	known := map[string]bool{}  // handled (trusted) devices
+	warned := map[string]bool{} // untrusted devices already told to tap Trust
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for {
@@ -157,13 +158,27 @@ func Watch(run Runner, p Paths, every time.Duration, stop <-chan struct{}) {
 			if known[d.UDID] || d.Conn != "usb" {
 				continue
 			}
+			d = Describe(run, d)
+			if !d.Trusted {
+				// keep asking every tick: the user taps Trust a moment after plugging in
+				if !warned[d.UDID] {
+					warned[d.UDID] = true
+					Notify(deviceLabel(d)+" conectado", d.Error)
+				}
+				continue
+			}
 			known[d.UDID] = true
-			OnConnect(run, p, Describe(run, d))
+			OnConnect(run, p, d)
 		}
 		for u := range known {
 			if !now[u] {
 				delete(known, u)
 				Unmount(run, p, u)
+			}
+		}
+		for u := range warned {
+			if !now[u] {
+				delete(warned, u)
 			}
 		}
 		select {
@@ -181,12 +196,9 @@ func OnConnect(run Runner, p Paths, d Device) {
 		return
 	}
 	cfg := p.LoadConfig()
-	name := d.Name
-	if name == "" {
-		name = "iPhone"
-	}
-	if cfg.AutoImport {
-		if res, err := Import(run, p, d.UDID, nil); err != nil {
+	name := deviceLabel(d)
+	if cfg.AutoImport && !p.locked("import") {
+		if res, err := Import(run, p, d.UDID, d.Class, nil); err != nil {
 			Notify(name+": no se pudieron importar las fotos", err.Error())
 		} else if res.Imported > 0 || res.Failed > 0 {
 			msg := fmt.Sprintf("%d fotos y videos nuevos en %s", res.Imported, res.Dir)
@@ -206,21 +218,43 @@ func OnConnect(run Runner, p Paths, d Device) {
 			Notify(name+": el respaldo falló", err.Error())
 		} else {
 			Notify(name+": respaldo listo", "Copia local en "+cfg.BackupDir)
+			if cfg.DriveBackup {
+				if err := DriveUpload(p, d.UDID, nil); err != nil {
+					Notify(name+": no se pudo subir a Google Drive", err.Error())
+				} else {
+					Notify(name+": respaldo en Google Drive", "Subido y cifrado (restic)")
+				}
+			}
 		}
 	}
 }
 
-var errNoDevice = errors.New("no trusted iPhone connected")
-
-// FirstTrusted picks the device to act on when none is named.
-func FirstTrusted(run Runner, udid string) (string, error) {
-	if udid != "" {
-		return udid, nil
+func deviceLabel(d Device) string {
+	if d.Name != "" {
+		return d.Name
 	}
+	if d.Class != "" {
+		return d.Class
+	}
+	return "iPhone"
+}
+
+var errNoDevice = errors.New("no trusted iPhone or iPad connected")
+
+// TrustedDevice picks the device to act on: the named one, or the first trusted one. While a backup holds the
+// phone (slow to answer) the last known details are used.
+func TrustedDevice(run Runner, p Paths, udid string) (Device, error) {
 	for _, d := range ListUDIDs(run) {
+		if udid != "" && d.UDID != udid {
+			continue
+		}
+		var c Device
+		if p.locked("backup") && readJSON(filepath.Join(p.State, d.UDID, "device.json"), &c) && c.Trusted {
+			return c, nil
+		}
 		if d := Describe(run, d); d.Trusted {
-			return d.UDID, nil
+			return d, nil
 		}
 	}
-	return "", errNoDevice
+	return Device{}, errNoDevice
 }

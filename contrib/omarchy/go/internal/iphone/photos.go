@@ -80,7 +80,19 @@ func Mount(run Runner, p Paths, udid, what string) (string, error) {
 	return dir, nil
 }
 
-// Unmount releases every mount of one device (or of all devices when udid is "").
+// ErrInUse: a manual eject while an import or a safety check reads the device.
+var ErrInUse = errors.New("the device folder is in use by an import or a check: wait for it to finish")
+
+// Eject is the widget's eject: it refuses while a job reads the camera roll.
+func Eject(run Runner, p Paths, udid string) ([]string, error) {
+	if p.locked("import") || p.locked("safe") {
+		return nil, ErrInUse
+	}
+	return Unmount(run, p, udid), nil
+}
+
+// Unmount releases every mount of one device (or of all devices when udid is ""), in use or not
+// (the device was unplugged).
 func Unmount(run Runner, p Paths, udid string) []string {
 	var done []string
 	for _, m := range Mounts(p) {
@@ -245,9 +257,10 @@ type ImportResult struct {
 
 // Import copies the new photos and videos of one device; progress(i, n, name) reports each file.
 // The ledger is saved every 25 files, so an interrupted import resumes where it stopped.
-func Import(run Runner, p Paths, udid string, progress func(done, total int, name string)) (ImportResult, error) {
+func Import(run Runner, p Paths, udid, class string, progress func(done, total int, name string)) (ImportResult, error) {
 	cfg := p.LoadConfig()
-	res := ImportResult{Dir: cfg.PhotosDir}
+	dir := Folder(cfg, class)
+	res := ImportResult{Dir: dir}
 	release, err := p.lock("import")
 	if err != nil {
 		return res, err
@@ -268,12 +281,21 @@ func Import(run Runner, p Paths, udid string, progress func(done, total int, nam
 		if progress != nil {
 			progress(i, len(todo), filepath.Base(f.Rel))
 		}
-		dst, already := Destination(cfg.PhotosDir, f)
+		dst, already := Destination(dir, f)
 		if already {
 			res.Already++
 		} else if err := copyFile(filepath.Join(root, "DCIM", f.Rel), dst, f.Mod); err != nil {
 			res.Failed++
 			res.Error = err.Error()
+			if _, serr := os.Stat(filepath.Join(root, "DCIM")); serr != nil {
+				// the camera roll went away (unplugged, locked, released): stop, the rest is retried next time
+				res.Failed = len(todo) - res.Imported - res.Already
+				res.Error = "the device was disconnected or its folder released; the rest is imported next time"
+				save()
+				_ = writeJSON(filepath.Join(p.State, "last-import.json"), M{"time": time.Now().Format(time.RFC3339), "udid": udid,
+					"imported": res.Imported, "already": res.Already, "failed": res.Failed, "bytes": res.Bytes, "error": res.Error})
+				return res, errors.New(res.Error)
+			}
 			continue
 		} else {
 			res.Imported++
@@ -288,6 +310,14 @@ func Import(run Runner, p Paths, udid string, progress func(done, total int, nam
 	if progress != nil {
 		progress(len(todo), len(todo), "")
 	}
+	var pendingBytes int64
+	for _, f := range todo {
+		if size, ok := l[f.Rel]; !ok || size != f.Size {
+			pendingBytes += f.Size
+		}
+	}
+	_ = writeJSON(filepath.Join(p.State, udid, "scan.json"), M{"udid": udid, "total": len(files), "pending": res.Failed,
+		"pendingBytes": pendingBytes, "time": time.Now().Format(time.RFC3339)})
 	last := M{"time": time.Now().Format(time.RFC3339), "udid": udid, "imported": res.Imported, "already": res.Already,
 		"failed": res.Failed, "bytes": res.Bytes, "pending": res.Failed}
 	_ = writeJSON(filepath.Join(p.State, "last-import.json"), last)

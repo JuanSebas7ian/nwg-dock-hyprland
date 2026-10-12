@@ -1,5 +1,6 @@
 // omarchy-iphone: the iPhone bar widget backend (libimobiledevice, ifuse, UxPlay, KDE Connect).
 //
+//	omarchy-iphone start import|backup|drive|safe [udid]   run a job detached (systemd-run), as the widget does
 //	omarchy-iphone status                       devices, photos, backup, tethering, AirPlay, KDE Connect (JSON)
 //	omarchy-iphone pair [udid]                  ask the iPhone to trust this PC
 //	omarchy-iphone scan|import [udid]           count / copy new photos and videos (import prints progress lines)
@@ -7,6 +8,9 @@
 //	omarchy-iphone apps [udid]                  apps that share files
 //	omarchy-iphone eject [udid]                 release the mounts
 //	omarchy-iphone backup [udid]                local backup (incremental; progress lines)
+//	omarchy-iphone drive [udid]                 upload the local backup to Google Drive (restic, encrypted)
+//	omarchy-iphone safe [udid]                  which photos are safe to delete on the device (copied + in Google Photos)
+//	omarchy-iphone gphotos-add                  add the iPhone/iPad photo folders to gphotos-sync (Google Photos)
 //	omarchy-iphone encryption on|off [udid]     encrypted backups (asks for the password: run it in a terminal)
 //	omarchy-iphone airplay on|off               screen mirroring receiver (UxPlay)
 //	omarchy-iphone kde pair|unpair|ring|ping|clipboard <device id>
@@ -19,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
@@ -27,7 +32,7 @@ import (
 )
 
 const usage = `omarchy-iphone status | pair [udid] | scan|import [udid] | open photos|app <id> [udid] | apps [udid] | eject [udid] |
-               backup [udid] | encryption on|off [udid] | airplay on|off | kde <action> <id> | set <key> <value> | watch`
+               backup [udid] | drive [udid] | safe [udid] | encryption on|off [udid] | airplay on|off | kde <action> <id> | set <key> <value> | watch`
 
 func main() {
 	args := os.Args[1:]
@@ -44,14 +49,15 @@ func main() {
 		}
 		return ""
 	}
-	device := func(i int) string {
-		u, err := iphone.FirstTrusted(run, arg(i))
+	dev := func(i int) iphone.Device {
+		d, err := iphone.TrustedDevice(run, p, arg(i))
 		if err != nil {
 			jsonout.Err(err.Error())
 			os.Exit(1)
 		}
-		return u
+		return d
 	}
+	device := func(i int) string { return dev(i).UDID }
 	fail := func(err error) {
 		if err != nil {
 			jsonout.Err(err.Error())
@@ -60,6 +66,21 @@ func main() {
 	}
 
 	switch cmd {
+	case "start":
+		// the widget's way to run a long job: a transient user unit, independent of the bar
+		job := arg(0)
+		if !slices.Contains(iphone.Jobs, job) {
+			fail(fmt.Errorf("start import|backup|drive|safe [udid]"))
+		}
+		exe, _ := os.Executable()
+		a := []string{"--user", "--collect", "--quiet", "--unit=omarchy-iphone-" + job + "-" + time.Now().Format("150405"), exe, job}
+		if arg(1) != "" {
+			a = append(a, arg(1))
+		}
+		if b, err := exec.Command("systemd-run", a...).CombinedOutput(); err != nil {
+			fail(fmt.Errorf("could not start %s: %s", job, b))
+		}
+		jsonout.OK(nil)
 	case "status":
 		jsonout.Print(iphone.Status(run, p, "/sys/class/net"))
 	case "pair":
@@ -81,8 +102,16 @@ func main() {
 		r["ok"] = true
 		jsonout.Print(r)
 	case "import":
-		res, err := iphone.Import(iphone.ExecRunner(10*time.Minute), p, device(0), func(done, total int, name string) {
+		d := dev(0)
+		res, err := iphone.Import(iphone.ExecRunner(10*time.Minute), p, d.UDID, d.Class, func(done, total int, name string) {
 			jsonout.Print(map[string]any{"progress": true, "done": done, "total": total, "file": name})
+			frac, line := -1.0, "checking the camera roll…"
+			if total > 0 {
+				frac, line = float64(done)/float64(total), fmt.Sprintf("%d of %d · %s", done, total, name)
+			} else if done == 0 && name == "" {
+				line = "nothing new"
+			}
+			p.SaveProgress("import", frac, line)
 		})
 		fail(err)
 		jsonout.OK(map[string]any{"result": res})
@@ -108,13 +137,44 @@ func main() {
 		fail(err)
 		jsonout.OK(map[string]any{"apps": apps})
 	case "eject":
-		jsonout.OK(map[string]any{"released": iphone.Unmount(run, p, arg(0))})
+		released, err := iphone.Eject(run, p, arg(0))
+		fail(err)
+		jsonout.OK(map[string]any{"released": released})
 	case "backup":
 		err := iphone.Backup(p, device(0), func(pct int, line string) {
 			jsonout.Print(map[string]any{"progress": true, "pct": pct, "line": line})
+			frac := -1.0
+			if pct >= 0 {
+				frac = float64(pct) / 100
+			}
+			p.SaveProgress("backup", frac, line)
+		})
+		fail(err)
+		if p.LoadConfig().DriveBackup {
+			p.SaveProgress("drive", -1, "starting the upload to Google Drive…")
+			if err := iphone.DriveUpload(p, device(0), func(frac float64, line string) { p.SaveProgress("drive", frac, line) }); err != nil {
+				iphone.Notify("Respaldo local listo; la subida a Google Drive falló", err.Error())
+				fail(err)
+			}
+		}
+		jsonout.OK(nil)
+	case "drive":
+		err := iphone.DriveUpload(p, device(0), func(frac float64, line string) {
+			jsonout.Print(map[string]any{"progress": true, "pct": int(frac * 100), "line": line})
+			p.SaveProgress("drive", frac, line)
 		})
 		fail(err)
 		jsonout.OK(nil)
+	case "safe":
+		d := dev(0)
+		p.SaveProgress("safe", -1, "comparing the camera roll with this PC and Google Photos…")
+		r, err := iphone.Safe(iphone.ExecRunner(10*time.Minute), p, d.UDID, d.Class)
+		fail(err)
+		jsonout.OK(map[string]any{"report": r})
+	case "gphotos-add":
+		added, err := iphone.AddGooglePhotosSources(p)
+		fail(err)
+		jsonout.OK(map[string]any{"added": added})
 	case "encryption":
 		if arg(0) != "on" && arg(0) != "off" {
 			fail(fmt.Errorf("encryption on|off"))

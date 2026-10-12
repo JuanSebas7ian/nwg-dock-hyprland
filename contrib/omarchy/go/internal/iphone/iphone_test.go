@@ -2,6 +2,7 @@ package iphone
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -216,11 +217,11 @@ func TestImportIsIncrementalAndResumes(t *testing.T) {
 		"101APPLE/IMG_2026.JPG": "new"}
 	f := &fake{out: map[string]string{"ifuse": "", "fusermount3": ""}, fail: map[string]bool{}, hook: cameraRoll(roll)}
 	var last [2]int
-	res, err := Import(f.run, p, udid, func(done, total int, _ string) { last = [2]int{done, total} })
+	res, err := Import(f.run, p, udid, "iPhone", func(done, total int, _ string) { last = [2]int{done, total} })
 	if err != nil || res.Imported != 3 || res.Failed != 0 || last != [2]int{3, 3} {
 		t.Fatalf("%+v %v %v", res, err, last)
 	}
-	dir := p.LoadConfig().PhotosDir
+	dir := Folder(p.LoadConfig(), "iPhone")
 	for _, want := range []string{"2024/IMG_0001.HEIC", "2024/IMG_0002.MOV", "2026/IMG_2026.JPG"} {
 		info, err := os.Stat(filepath.Join(dir, want))
 		if err != nil {
@@ -233,18 +234,18 @@ func TestImportIsIncrementalAndResumes(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "2024", "IMG_0002.AAE")); err == nil {
 		t.Fatal("edit sidecars are not media")
 	}
-	res, _ = Import(f.run, p, udid, nil)
+	res, _ = Import(f.run, p, udid, "iPhone", nil)
 	if res.Imported != 0 || res.Already != 0 {
 		t.Fatalf("second import copied again: %+v", res)
 	}
 	roll["100APPLE/IMG_0003.HEIC"] = "three"
 	f.hook = cameraRoll(roll)
-	if res, _ = Import(f.run, p, udid, nil); res.Imported != 1 {
+	if res, _ = Import(f.run, p, udid, "iPhone", nil); res.Imported != 1 {
 		t.Fatalf("%+v", res)
 	}
 	// the ledger is lost (new PC, same photos folder): files already there are recognised, not duplicated
 	_ = os.Remove(p.ledgerPath(udid))
-	if res, _ = Import(f.run, p, udid, nil); res.Imported != 0 || res.Already != 4 {
+	if res, _ = Import(f.run, p, udid, "iPhone", nil); res.Imported != 0 || res.Already != 4 {
 		t.Fatalf("%+v", res)
 	}
 	if !strings.Contains(strings.Join(f.calls, "\n"), "ifuse "+p.mountPoint(udid, "media")+" -u "+udid) {
@@ -259,7 +260,7 @@ func TestImportRefusesToRunTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	if _, err := Import((&fake{}).run, p, udid, nil); err == nil || !strings.Contains(err.Error(), "already running") {
+	if _, err := Import((&fake{}).run, p, udid, "iPhone", nil); err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatal(err)
 	}
 	if !PhotoStatus(p, p.LoadConfig())["running"].(bool) {
@@ -318,16 +319,16 @@ func TestBackupDue(t *testing.T) {
 
 func TestSettings(t *testing.T) {
 	p := testPaths(t)
-	if c := p.LoadConfig(); !c.AutoImport || c.PhotosDir != filepath.Join(p.Home, "Pictures", "iPhone") {
+	if c := p.LoadConfig(); !c.AutoImport || !c.DriveBackup || c.PhotosDir != filepath.Join(p.Home, "Pictures") {
 		t.Fatalf("%+v", c)
 	}
-	for _, kv := range [][2]string{{"autoImport", "false"}, {"autoBackupDays", "7"}, {"photosDir", "~/Fotos/iPhone"}, {"airplayName", "Mi PC"}} {
+	for _, kv := range [][2]string{{"autoImport", "false"}, {"autoBackupDays", "7"}, {"photosDir", "~/Fotos"}, {"airplayName", "Mi PC"}, {"driveBackup", "false"}} {
 		if err := p.Set(kv[0], kv[1]); err != nil {
 			t.Fatal(err)
 		}
 	}
 	c := p.LoadConfig()
-	if c.AutoImport || c.AutoBackupDays != 7 || c.PhotosDir != filepath.Join(p.Home, "Fotos", "iPhone") || c.AirPlayName != "Mi PC" {
+	if c.AutoImport || c.AutoBackupDays != 7 || c.PhotosDir != filepath.Join(p.Home, "Fotos") || c.AirPlayName != "Mi PC" || c.DriveBackup {
 		t.Fatalf("%+v", c)
 	}
 	if p.Set("autoBackupDays", "-1") == nil || p.Set("airplayName", " ") == nil || p.Set("nope", "1") == nil {
@@ -372,5 +373,255 @@ func TestOnConnect(t *testing.T) {
 	OnConnect(f.run, p, Device{UDID: udid, Trusted: true, Name: "iPhone de Juan"})
 	if len(notes) != 3 || !strings.Contains(notes[2], "1 fotos y videos nuevos para importar") {
 		t.Fatal(notes)
+	}
+}
+
+func TestOldConfigAndIPadFolders(t *testing.T) {
+	p := testPaths(t)
+	_ = writeJSON(p.Config, M{"photosDir": filepath.Join(p.Home, "Pictures", "iPhone")})
+	c := p.LoadConfig()
+	if Folder(c, "iPhone") != filepath.Join(p.Home, "Pictures", "iPhone") || Folder(c, "iPad") != filepath.Join(p.Home, "Pictures", "iPad") || Folder(c, "") != filepath.Join(p.Home, "Pictures", "iPhone") {
+		t.Fatal(Folder(c, "iPhone"), Folder(c, "iPad"))
+	}
+	if ModelName("iPad14,1") != "iPad mini (6th gen)" || ModelName("iPad99,1") != "iPad (iPad99,1)" {
+		t.Fatal("iPad names")
+	}
+}
+
+func TestDescribeIPad(t *testing.T) {
+	f := trustedFake()
+	f.out["ideviceinfo -u "+udid+" -x"] = string(plistXML(`<key>DeviceName</key><string>iPad de Juan</string><key>DeviceClass</key><string>iPad</string>
+		<key>ProductType</key><string>iPad13,18</string><key>ProductVersion</key><string>26.1</string>`))
+	if d := Describe(f.run, Device{UDID: udid, Conn: "usb"}); d.Class != "iPad" || d.Model != "iPad (10th gen)" {
+		t.Fatalf("%+v", d)
+	}
+}
+
+func TestResticProgress(t *testing.T) {
+	out := `{"message_type":"status","percent_done":0.25,"total_bytes":4000000000,"bytes_done":1000000000}
+{"message_type":"status","percent_done":1,"total_bytes":4000000000,"bytes_done":4000000000}
+{"message_type":"summary","snapshot_id":"abc123","data_added":52428800,"total_bytes_processed":4000000000}
+`
+	var fr []float64
+	sum, errLine := ResticProgress(strings.NewReader(out), func(f float64, line string) { fr = append(fr, f) })
+	if len(fr) != 2 || fr[0] != 0.25 || sum["snapshot_id"] != "abc123" || errLine != "" {
+		t.Fatal(fr, sum, errLine)
+	}
+	_, errLine = ResticProgress(strings.NewReader("Fatal: unable to open repository\n"), nil)
+	if !strings.Contains(errLine, "unable to open") {
+		t.Fatal(errLine)
+	}
+}
+
+func TestResticEnvReadsOmarchyBackup(t *testing.T) {
+	p := testPaths(t)
+	conf := filepath.Join(filepath.Dir(filepath.Dir(p.Config)), "omarchy-backup")
+	if _, err := ResticEnv(p); err == nil {
+		t.Fatal("no config should fail")
+	}
+	_ = os.MkdirAll(conf, 0o700)
+	_ = os.WriteFile(filepath.Join(conf, "config"), []byte("# x\nRESTIC_REPOSITORY=rclone:rclone:Backups/omarchy-restic\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(conf, "restic-password"), []byte("secret"), 0o600)
+	env, err := ResticEnv(p)
+	if err != nil || !strings.Contains(strings.Join(env, "\n"), "RESTIC_REPOSITORY=rclone:rclone:Backups/omarchy-restic") {
+		t.Fatal(err)
+	}
+}
+
+func TestDriveUploadNeedsALocalBackup(t *testing.T) {
+	p := testPaths(t)
+	if err := DriveUpload(p, udid, nil); err == nil || !strings.Contains(err.Error(), "local backup") {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckSafe(t *testing.T) {
+	root, dir := t.TempDir(), t.TempDir()
+	put := func(base, rel, body string, mod time.Time) string {
+		p := filepath.Join(base, rel)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		_ = os.WriteFile(p, []byte(body), 0o644)
+		_ = os.Chtimes(p, mod, mod)
+		return p
+	}
+	d := func(y, m, day int) time.Time { return time.Date(y, time.Month(m), day, 12, 0, 0, 0, time.Local) }
+	put(root, "DCIM/100APPLE/IMG_1.HEIC", "aaaa", d(2024, 1, 5))
+	put(root, "DCIM/100APPLE/IMG_2.HEIC", "bbbb", d(2024, 3, 9))
+	put(root, "DCIM/100APPLE/IMG_3.HEIC", "cccc", d(2025, 6, 1)) // copied, not uploaded yet
+	put(root, "DCIM/100APPLE/IMG_4.HEIC", "dddd", d(2026, 2, 1)) // not copied
+	up := map[string]bool{}
+	up[put(dir, "2024/IMG_1.HEIC", "aaaa", d(2024, 1, 5))] = true
+	up[put(dir, "2024/IMG_2.HEIC", "bbbb", d(2024, 3, 9))] = true
+	put(dir, "2025/IMG_3.HEIC", "cccc", d(2025, 6, 1))
+	r, err := CheckSafe(root, dir, up, 10)
+	if err != nil || r.Total != 4 || r.Safe != 2 || r.NotUploaded != 1 || r.NotCopied != 1 || r.SafeUntil != "2025-05-31" ||
+		r.OldestMissing != "2025-06-01" || r.Verified != 2 || r.Mismatched != 0 {
+		t.Fatalf("%+v %v", r, err)
+	}
+	// a local copy with the right size but other content: nothing is declared safe
+	put(dir, "2024/IMG_1.HEIC", "zzzz", d(2024, 1, 5))
+	if r, _ := CheckSafe(root, dir, up, 10); r.Mismatched != 1 || r.SafeUntil != "" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+func TestUploadedPaths(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "uploaded.jsonl")
+	_ = os.WriteFile(f, []byte(`{"k":"iphone:2024/a.heic","path":"/home/u/Pictures/iPhone/2024/a.heic"}
+not json
+{"k":"x","path":"/home/u/b.png"}
+`), 0o644)
+	if u := UploadedPaths(f); len(u) != 2 || !u["/home/u/Pictures/iPhone/2024/a.heic"] {
+		t.Fatal(u)
+	}
+}
+
+func TestICloudPhotosFromTheDatabase(t *testing.T) {
+	if _, err := os.Stat("/usr/bin/sqlite3"); err != nil {
+		t.Skip("no sqlite3")
+	}
+	run := ExecRunner(10 * time.Second)
+	for want, guid := range map[string]string{"on": "'A1B2'", "off": "NULL"} {
+		root := t.TempDir()
+		db := filepath.Join(root, "PhotoData", "Photos.sqlite")
+		_ = os.MkdirAll(filepath.Dir(db), 0o755)
+		if b, err := run("sqlite3", db, "CREATE TABLE ZASSET (Z_PK INTEGER, ZCLOUDASSETGUID TEXT); INSERT INTO ZASSET VALUES (1, "+guid+");"); err != nil {
+			t.Fatal(string(b))
+		}
+		if got := ICloudPhotos(run, root, filepath.Join(t.TempDir(), "tmp")); got != want {
+			t.Fatal(want, got)
+		}
+	}
+	if ICloudPhotos(run, t.TempDir(), t.TempDir()) != "unknown" {
+		t.Fatal("no database")
+	}
+}
+
+func TestWatchRetriesUntilTrusted(t *testing.T) {
+	var notes []string
+	Notify = func(title, body string) { notes = append(notes, title+": "+body) }
+	defer func() { Notify = func(string, string) {} }()
+	p := testPaths(t)
+	_ = p.Set("autoImport", "false")
+	f := trustedFake()
+	f.out["idevice_id -n"] = ""
+	f.out["idevicepair -u "+udid+" validate"] = "ERROR: Please accept the trust dialog"
+	f.fail["idevicepair -u "+udid+" validate"] = true
+	f.out["ifuse"], f.out["fusermount3"] = "", ""
+	f.hook = cameraRoll(map[string]string{"100APPLE/IMG_0001.HEIC": "one"})
+	stop := make(chan struct{})
+	ticks := 0
+	orig := f.hook
+	f.hook = func(name string, args []string) {
+		if name == "idevice_id" && len(args) > 0 && args[0] == "-l" {
+			ticks++
+			if ticks == 3 { // the user taps Trust
+				f.out["idevicepair -u "+udid+" validate"] = "SUCCESS: Validated pairing"
+				delete(f.fail, "idevicepair -u "+udid+" validate")
+			}
+			if ticks == 6 {
+				close(stop)
+			}
+		}
+		orig(name, args)
+	}
+	Watch(f.run, p, time.Millisecond, stop)
+	trust, newPhotos := 0, 0
+	for _, n := range notes {
+		if strings.Contains(n, "Trust") {
+			trust++
+		}
+		if strings.Contains(n, "1 fotos y videos nuevos") {
+			newPhotos++
+		}
+	}
+	if trust != 1 || newPhotos != 1 {
+		t.Fatal(notes)
+	}
+}
+
+func TestGooglePhotosSources(t *testing.T) {
+	p := testPaths(t)
+	gp := p.gphotosConfig()
+	_ = os.MkdirAll(filepath.Dir(gp), 0o755)
+	_ = os.WriteFile(gp, []byte(`{"remote":"gphotos:","sources":[{"id":"camera","path":"~/Dropbox/Cargas"}]}`), 0o644)
+	added, err := AddGooglePhotosSources(p)
+	if err != nil || len(added) != 2 {
+		t.Fatal(added, err)
+	}
+	if again, _ := AddGooglePhotosSources(p); len(again) != 0 {
+		t.Fatal("added twice")
+	}
+	b, _ := os.ReadFile(gp)
+	if !strings.Contains(string(b), `"path": "~/Pictures/iPhone"`) || !strings.Contains(string(b), `"album": "iPad {top}"`) || !strings.Contains(string(b), `"camera"`) {
+		t.Fatal(string(b))
+	}
+	_ = os.MkdirAll(p.gphotosState(), 0o755)
+	_ = os.WriteFile(filepath.Join(p.gphotosState(), "uploaded.jsonl"), []byte("{\"src\":\"iphone\"}\n{\"src\":\"iphone\"}\n{\"src\":\"camera\"}\n"), 0o644)
+	st := GooglePhotosStatus(p, p.LoadConfig())
+	if st["iphone"].(M)["uploaded"] != 2 || st["ipad"].(M)["source"] != true {
+		t.Fatal(st)
+	}
+}
+
+func TestJobsStatus(t *testing.T) {
+	p := testPaths(t)
+	release, _ := p.lock("backup")
+	p.SaveProgress("backup", 0.5, "50% Finished")
+	js := JobsStatus(p)
+	if js["backup"].(M)["running"] != true || js["backup"].(M)["progress"].(M)["fraction"] != 0.5 || js["import"].(M)["running"] != false {
+		t.Fatal(js)
+	}
+	release()
+	if JobsStatus(p)["backup"].(M)["progress"] != nil {
+		t.Fatal("a finished job shows no progress")
+	}
+}
+
+func TestEjectRefusesDuringImport(t *testing.T) {
+	p := testPaths(t)
+	release, _ := p.lock("import")
+	if _, err := Eject((&fake{}).run, p, ""); err != ErrInUse {
+		t.Fatal(err)
+	}
+	release()
+	if _, err := Eject((&fake{}).run, p, ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImportStopsWhenTheDeviceGoesAway(t *testing.T) {
+	p := testPaths(t)
+	roll := map[string]string{}
+	for i := 0; i < 50; i++ {
+		roll[fmt.Sprintf("100APPLE/IMG_%04d.HEIC", i)] = "x"
+	}
+	f := &fake{out: map[string]string{"ifuse": "", "fusermount3": ""}, fail: map[string]bool{}, hook: cameraRoll(roll)}
+	n := 0
+	res, err := Import(f.run, p, udid, "iPhone", func(done, total int, _ string) {
+		n++
+		if done == 10 { // the cable is pulled mid-import
+			_ = os.RemoveAll(filepath.Join(p.mountPoint(udid, "media"), "DCIM"))
+		}
+	})
+	if err == nil || res.Imported != 10 || res.Failed != 40 || n > 12 {
+		t.Fatalf("%+v %v calls=%d", res, err, n)
+	}
+	if l := p.LoadLedger(udid); len(l) != 10 {
+		t.Fatal("only the copied files are recorded", len(l))
+	}
+}
+
+func TestStatusKeepsLastKnownValuesWhenBusy(t *testing.T) {
+	p := testPaths(t)
+	f := trustedFake()
+	f.out["idevice_id -n"] = ""
+	sys := t.TempDir()
+	if d := Status(f.run, p, sys)["devices"].([]Device)[0]; d.Storage == nil || d.Storage.Total != 128e9 {
+		t.Fatalf("%+v", d)
+	}
+	f.fail["ideviceinfo -u "+udid+" -q com.apple.disk_usage -x"] = true // busy: the query fails
+	if d := Status(f.run, p, sys)["devices"].([]Device)[0]; d.Storage == nil || d.Storage.Free != 32e9 {
+		t.Fatalf("storage forgotten: %+v", d)
 	}
 }

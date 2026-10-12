@@ -60,15 +60,21 @@ type Config struct {
 	AutoImport     bool   `json:"autoImport"`
 	AutoBackupDays int    `json:"autoBackupDays"`
 	AirPlayName    string `json:"airplayName"`
+	DriveBackup    bool   `json:"driveBackup"` // upload each local backup to Google Drive (restic, encrypted)
 }
 
 func (p Paths) LoadConfig() Config {
-	c := Config{PhotosDir: filepath.Join(p.Home, "Pictures", "iPhone"), BackupDir: filepath.Join(p.Home, "iPhoneBackup"),
-		AutoImport: true, AutoBackupDays: 0, AirPlayName: "Omarchy"}
+	c := Config{PhotosDir: filepath.Join(p.Home, "Pictures"), BackupDir: filepath.Join(p.Home, "iPhoneBackup"),
+		AutoImport: true, AutoBackupDays: 0, AirPlayName: "Omarchy", DriveBackup: true}
 	if b, err := os.ReadFile(p.Config); err == nil {
 		_ = json.Unmarshal(b, &c)
 	}
 	c.PhotosDir = expand(c.PhotosDir, p.Home)
+	// photosDir is the root: each device class gets its folder (Pictures/iPhone, Pictures/iPad); the first
+	// version stored Pictures/iPhone itself
+	if c.PhotosDir == filepath.Join(p.Home, "Pictures", "iPhone") {
+		c.PhotosDir = filepath.Join(p.Home, "Pictures")
+	}
 	c.BackupDir = expand(c.BackupDir, p.Home)
 	return c
 }
@@ -94,6 +100,8 @@ func (p Paths) Set(key, value string) error {
 			n = n*10 + int(r-'0')
 		}
 		c.AutoBackupDays = n
+	case "driveBackup":
+		c.DriveBackup = value == "true" || value == "on" || value == "1"
 	case "airplayName":
 		if strings.TrimSpace(value) == "" {
 			return errors.New("airplayName cannot be empty")
@@ -132,10 +140,39 @@ func readJSON(path string, v any) bool {
 	return err == nil && json.Unmarshal(b, v) == nil
 }
 
+// Long jobs (import, backup, drive, safe) run detached from the bar (systemd-run), so a bar restart does not kill
+// them; they leave their progress in a file the status reads.
+var Jobs = []string{"import", "backup", "drive", "safe"}
+
+func (p Paths) progressPath(job string) string {
+	return filepath.Join(p.State, "progress-"+job+".json")
+}
+
+// SaveProgress records a job's progress (fraction -1 = unknown).
+func (p Paths) SaveProgress(job string, frac float64, line string) {
+	_ = writeJSON(p.progressPath(job), M{"fraction": frac, "line": line, "time": time.Now().Format(time.RFC3339)})
+}
+
+// JobsStatus: which jobs run now and how far they are.
+func JobsStatus(p Paths) M {
+	out := M{}
+	for _, j := range Jobs {
+		running := p.locked(j)
+		var progress any // nil (JSON null) unless the job runs
+		var prog M
+		if running && readJSON(p.progressPath(j), &prog) {
+			progress = prog
+		}
+		out[j] = M{"running": running, "progress": progress}
+	}
+	return out
+}
+
 // Device is one connected iPhone.
 type Device struct {
 	UDID        string `json:"udid"`
-	Conn        string `json:"conn"` // usb | network
+	Conn        string `json:"conn"`  // usb | network
+	Class       string `json:"class"` // iPhone | iPad
 	Trusted     bool   `json:"trusted"`
 	Name        string `json:"name,omitempty"`
 	Model       string `json:"model,omitempty"`
@@ -202,7 +239,7 @@ func Describe(run Runner, d Device) Device {
 	}
 	if b, err := run("ideviceinfo", args("-x")...); err == nil {
 		if m, err := PlistDict(b); err == nil {
-			d.Name, d.ProductType = str(m, "DeviceName"), str(m, "ProductType")
+			d.Name, d.ProductType, d.Class = str(m, "DeviceName"), str(m, "ProductType"), str(m, "DeviceClass")
 			d.IOS, d.Build = str(m, "ProductVersion"), str(m, "BuildVersion")
 			d.Model = ModelName(d.ProductType)
 		}
@@ -268,13 +305,28 @@ var models = map[string]string{
 	"iPhone15,3": "iPhone 14 Pro Max", "iPhone15,4": "iPhone 15", "iPhone15,5": "iPhone 15 Plus", "iPhone16,1": "iPhone 15 Pro",
 	"iPhone16,2": "iPhone 15 Pro Max", "iPhone17,3": "iPhone 16", "iPhone17,4": "iPhone 16 Plus", "iPhone17,1": "iPhone 16 Pro",
 	"iPhone17,2": "iPhone 16 Pro Max", "iPhone17,5": "iPhone 16e",
+	"iPad13,18": "iPad (10th gen)", "iPad13,19": "iPad (10th gen)", "iPad14,1": "iPad mini (6th gen)", "iPad14,2": "iPad mini (6th gen)",
+	"iPad13,16": "iPad Air (5th gen)", "iPad13,17": "iPad Air (5th gen)", "iPad14,8": "iPad Air 11\" (M2)", "iPad14,9": "iPad Air 11\" (M2)",
+	"iPad14,10": "iPad Air 13\" (M2)", "iPad14,11": "iPad Air 13\" (M2)", "iPad16,3": "iPad Pro 11\" (M4)", "iPad16,4": "iPad Pro 11\" (M4)",
+	"iPad16,5": "iPad Pro 13\" (M4)", "iPad16,6": "iPad Pro 13\" (M4)", "iPad15,7": "iPad (A16)", "iPad15,8": "iPad (A16)",
 }
 
 func ModelName(productType string) string {
 	if m, ok := models[productType]; ok {
 		return m
 	}
+	if strings.HasPrefix(productType, "iPad") {
+		return "iPad (" + productType + ")"
+	}
 	return productType
+}
+
+// Folder is where a device class's photos go: <photos>/iPhone, <photos>/iPad.
+func Folder(cfg Config, class string) string {
+	if class != "iPad" {
+		class = "iPhone"
+	}
+	return filepath.Join(cfg.PhotosDir, class)
 }
 
 // Tether reports the USB tethering interface (ipheth driver) and its NetworkManager state.
@@ -394,8 +446,33 @@ func KDEAction(run Runner, action, id string) error {
 func Status(run Runner, p Paths, sysClassNet string) M {
 	cfg := p.LoadConfig()
 	devs := ListUDIDs(run)
+	busy := p.locked("backup")
 	for i := range devs {
+		cache := filepath.Join(p.State, devs[i].UDID, "device.json")
+		var c Device
+		if busy && readJSON(cache, &c) {
+			c.Conn = devs[i].Conn
+			devs[i] = c // during a backup the iPhone answers other queries slowly: show the last known details
+			continue
+		}
 		devs[i] = Describe(run, devs[i])
+		if devs[i].Trusted {
+			// a busy device (import running) may not answer every query: keep the last known values
+			if readJSON(cache, &c) {
+				if devs[i].Battery == nil {
+					devs[i].Battery = c.Battery
+				}
+				if devs[i].Storage == nil {
+					devs[i].Storage = c.Storage
+				}
+				if devs[i].Name == "" {
+					devs[i].Name, devs[i].Model, devs[i].ProductType, devs[i].IOS, devs[i].Class = c.Name, c.Model, c.ProductType, c.IOS, c.Class
+				}
+			}
+			if devs[i].Name != "" {
+				_ = writeJSON(cache, devs[i])
+			}
+		}
 	}
 	if devs == nil {
 		devs = []Device{}
@@ -404,10 +481,14 @@ func Status(run Runner, p Paths, sysClassNet string) M {
 		"devices":    devs,
 		"photos":     PhotoStatus(p, cfg),
 		"backup":     BackupStatus(p, cfg),
+		"drive":      DriveStatus(p, cfg),
+		"safe":       SafeStatus(p),
 		"tether":     Tether(run, sysClassNet),
 		"airplay":    AirPlay(run, cfg),
 		"kdeconnect": KDEConnect(run),
 		"mounts":     Mounts(p),
+		"jobs":       JobsStatus(p),
+		"gphotos":    GooglePhotosStatus(p, cfg),
 		"config":     cfg,
 	}
 }

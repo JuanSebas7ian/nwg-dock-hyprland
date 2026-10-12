@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "juansebas7ian.iphone",
   "name": "iPhone",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "juansebas7ian",
   "license": "MIT",
   "description": "iPhone status (battery, storage), photo import, app files and local backups over USB; screen mirroring (UxPlay/AirPlay) and KDE Connect over Wi-Fi (Go backend omarchy-iphone).",
