@@ -625,3 +625,24 @@ func TestStatusKeepsLastKnownValuesWhenBusy(t *testing.T) {
 		t.Fatalf("storage forgotten: %+v", d)
 	}
 }
+
+func TestShortCopiesAreNotRecorded(t *testing.T) {
+	p := testPaths(t)
+	roll := map[string]string{"100APPLE/IMG_0001.HEIC": "complete", "100APPLE/IMG_0002.MOV": "0123456789"}
+	f := &fake{out: map[string]string{"ifuse": "", "fusermount3": ""}, fail: map[string]bool{}, hook: cameraRoll(roll)}
+	dir := Folder(p.LoadConfig(), "iPhone")
+	res, err := Import(f.run, p, udid, "iPhone", func(done, total int, name string) {
+		if name == "IMG_0002.MOV" { // shrink the source after it was listed: reads come back short
+			_ = os.WriteFile(filepath.Join(p.mountPoint(udid, "media"), "DCIM", "100APPLE", "IMG_0002.MOV"), []byte("0123"), 0o644)
+		}
+	})
+	if err != nil || res.Imported != 1 || res.Failed != 1 || !strings.Contains(res.Error, "changed on the device") {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if _, ok := p.LoadLedger(udid)["100APPLE/IMG_0002.MOV"]; ok {
+		t.Fatal("a short copy was recorded as imported")
+	}
+	if ents, _ := os.ReadDir(filepath.Join(dir, "2024")); len(ents) != 1 {
+		t.Fatal("the partial file was left behind", ents)
+	}
+}

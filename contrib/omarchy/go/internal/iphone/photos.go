@@ -216,6 +216,31 @@ func Destination(dir string, f MediaFile) (path string, already bool) {
 	}
 }
 
+// copyVerified copies a camera-roll file and checks the copy has the size the device reported; a short copy
+// (a read cut off, or iCloud Photos still downloading the original) is retried once, then reported.
+func copyVerified(src, dst string, want int64, mod time.Time) error {
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		if err = copyFile(src, dst, mod); err != nil {
+			continue
+		}
+		st, serr := os.Stat(dst)
+		if serr == nil && st.Size() == want {
+			return nil
+		}
+		got := int64(-1)
+		if serr == nil {
+			got = st.Size()
+		}
+		os.Remove(dst)
+		err = fmt.Errorf("incomplete copy of %s (%d of %d bytes)", filepath.Base(src), got, want)
+		if now, e := os.Stat(src); e == nil && now.Size() != want {
+			return fmt.Errorf("%s changed on the device while copying (iCloud Photos downloading it?): retried next time", filepath.Base(src))
+		}
+	}
+	return err
+}
+
 func copyFile(src, dst string, mod time.Time) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err
@@ -284,7 +309,7 @@ func Import(run Runner, p Paths, udid, class string, progress func(done, total i
 		dst, already := Destination(dir, f)
 		if already {
 			res.Already++
-		} else if err := copyFile(filepath.Join(root, "DCIM", f.Rel), dst, f.Mod); err != nil {
+		} else if err := copyVerified(filepath.Join(root, "DCIM", f.Rel), dst, f.Size, f.Mod); err != nil {
 			res.Failed++
 			res.Error = err.Error()
 			if _, serr := os.Stat(filepath.Join(root, "DCIM")); serr != nil {
