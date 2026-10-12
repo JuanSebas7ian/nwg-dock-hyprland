@@ -46,7 +46,7 @@ func Profile(g GGUFInfo) KVProfile {
 	pattern := g.Arrays["attention.sliding_window_pattern"]
 	kvArr := g.Arrays["attention.head_count_kv"]
 	kvScalar := g.Int("attention.head_count_kv", heads)
-	interval := g.Int("full_attention_interval", 0) // hybrid models (Qwen3.5/3.6): other layers are recurrent
+	interval := g.Int("full_attention_interval", 0)           // hybrid models (Qwen3.5/3.6): other layers are recurrent
 	if lora := g.Int("attention.kv_lora_rank", 0); lora > 0 { // MLA (DeepSeek): compressed latent cache
 		rope := g.Int("rope.dimension_count", 64)
 		p.PerToken = int64(layers) * (lora + rope) * 2

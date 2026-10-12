@@ -749,3 +749,61 @@ func TestOldConfigMigratesToMeasuredDefaults(t *testing.T) {
 		t.Fatal("migrated twice")
 	}
 }
+
+// ---------------------------------------------------------------- opencode-ollama-sync
+
+func shown(name string, caps []string, info map[string]any) ShownModel {
+	s := ShownModel{Name: name}
+	s.Show.Capabilities = caps
+	s.Show.ModelInfo = info
+	return s
+}
+
+func TestDescribeOllamaSkipsEmbeddingsAndCapsContext(t *testing.T) {
+	found := DescribeOllama([]ShownModel{
+		shown("qwen2.5-coder:7b", []string{"completion", "tools"}, map[string]any{"qwen2.context_length": 131072.0}),
+		shown("gemma4:12b", []string{"completion", "vision", "thinking"}, map[string]any{"gemma4.context_length": 8192.0}),
+		shown("nomic-embed-text", []string{"embedding"}, nil),
+	}, 32768)
+	if len(found) != 2 || found["nomic-embed-text"] != nil {
+		t.Fatalf("%v", found)
+	}
+	q := found["qwen2.5-coder:7b"]
+	if q["tool_call"] != true || q["limit"].(map[string]any)["context"] != 32768 || q["limit"].(map[string]any)["output"] != 8192 {
+		t.Fatalf("%v", q)
+	}
+	g := found["gemma4:12b"]
+	if g["attachment"] != true || g["reasoning"] != true || g["limit"].(map[string]any)["context"] != 8192 || g["limit"].(map[string]any)["output"] != 2048 {
+		t.Fatalf("%v", g)
+	}
+}
+
+func TestMergeOllamaKeepsUserNamesExtraKeysAndTheFile(t *testing.T) {
+	cfg := map[string]any{"autoupdate": false, "provider": map[string]any{
+		"llama": map[string]any{"models": map[string]any{"x": map[string]any{}}},
+		"ollama": map[string]any{"npm": "custom", "models": map[string]any{
+			"qwen:7b": map[string]any{"name": "My Qwen", "temperature": 0.2},
+			"gone:1b": map[string]any{"name": "old"},
+		}}}}
+	found := DescribeOllama([]ShownModel{shown("qwen:7b", []string{"completion", "tools"}, nil), shown("new:3b", []string{"completion"}, nil)}, 4096)
+	out := MergeOllama(cfg, found, "http://127.0.0.1:11434")
+	prov := out["provider"].(map[string]any)["ollama"].(map[string]any)
+	models := prov["models"].(map[string]any)
+	q := models["qwen:7b"].(map[string]any)
+	if q["name"] != "My Qwen" || q["temperature"] != 0.2 || q["tool_call"] != true || models["gone:1b"] != nil || models["new:3b"] == nil {
+		t.Fatalf("%v", models)
+	}
+	if prov["npm"] != "custom" || prov["options"] == nil || out["autoupdate"] != false || out["provider"].(map[string]any)["llama"] == nil {
+		t.Fatalf("%v", out)
+	}
+	if cfg["provider"].(map[string]any)["ollama"].(map[string]any)["models"].(map[string]any)["gone:1b"] == nil {
+		t.Fatal("input mutated")
+	}
+	if !SameJSON(MergeOllama(out, found, "http://127.0.0.1:11434"), out) {
+		t.Fatal("second merge must be a no-op")
+	}
+	fresh := MergeOllama(map[string]any{}, found, "http://h:1")
+	if fresh["provider"].(map[string]any)["ollama"].(map[string]any)["options"].(map[string]any)["baseURL"] != "http://h:1/v1" {
+		t.Fatal("provider not created")
+	}
+}
