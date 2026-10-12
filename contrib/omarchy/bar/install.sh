@@ -104,7 +104,7 @@ remove_all() {
   for unit in omarchy-spotify-heal.service llama-router.service; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
-  for c in "${COLLECTORS[@]}" omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers omarchy-freeze-guard omarchy-memguard pi-box opencode-ollama-sync omarchy-agent-usage-opencode omarchy-agent-usage-antigravity omarchy-session bt-pair-keyboard omarchy-gcal gphotos-sync omarchy-vpn; do
+  for c in "${COLLECTORS[@]}" omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers omarchy-freeze-guard omarchy-memguard pi-box opencode-ollama-sync omarchy-agent-usage-opencode omarchy-agent-usage-antigravity omarchy-session bt-pair-keyboard omarchy-gcal gphotos-sync omarchy-vpn omarchy-cloud; do
     [[ -e $BIN/$c ]] && backup "$BIN/$c" && rm -f "$BIN/$c"
   done
   rm -f "${XDG_STATE_HOME:-$HOME/.local/state}"/omarchy/agents/usage/{antigravity,opencode}.json
@@ -162,7 +162,7 @@ done
 # --------------------------------------------------------------- backends en Go
 # contrib/omarchy/go: un módulo con un binario por widget. Se prueban antes de
 # instalar; si las pruebas fallan, se conserva el binario anterior.
-GO_TOOLS=(omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers opencode-ollama-sync omarchy-agent-usage-opencode omarchy-agent-usage-antigravity omarchy-session bt-pair-keyboard omarchy-gcal gphotos-sync omarchy-vpn)
+GO_TOOLS=(omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers opencode-ollama-sync omarchy-agent-usage-opencode omarchy-agent-usage-antigravity omarchy-session bt-pair-keyboard omarchy-gcal gphotos-sync omarchy-vpn omarchy-cloud)
 GO_SRC=$(cd "$HERE/../go" && pwd)
 if command -v go >/dev/null; then
   say "Backends en Go (${GO_TOOLS[*]})"

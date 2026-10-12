@@ -7,7 +7,7 @@ import qs.Ui
 import "ui"
 
 // Cloud: one bar icon and one tabbed panel for Google Drive, iCloud Drive,
-// Google Photos and Dropbox. backend/cloud.py reads all four in one process;
+// Google Photos and Dropbox. The Go backend omarchy-cloud reads all four in one process;
 // actions go to each service's own CLI. Each tab is tabs/<Name>Tab.qml and
 // gets this object as `cloud`.
 Panel {
@@ -16,8 +16,7 @@ Panel {
   ipcTarget: "juansebas7ian.cloud"
   manageIpc: false
 
-  readonly property string python: "/usr/bin/python3"
-  readonly property string dir: String(Qt.resolvedUrl("backend/")).replace("file://", "")
+  readonly property string ctl: Quickshell.env("HOME") + "/.local/bin/omarchy-cloud"
   readonly property string gphotosSync: Quickshell.env("HOME") + "/.local/bin/gphotos-sync"
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -103,8 +102,8 @@ Panel {
     if (actionProc.running) return
     busy = service
     message = ""
-    var cmd = service === "gdrive" ? [python, "-B", dir + "gdrive.py"].concat(args)
-      : service === "icloud" ? [python, "-B", dir + "icloud.py"].concat(args)
+    var cmd = service === "gdrive" ? [ctl, "gdrive"].concat(args)
+      : service === "icloud" ? [ctl, "icloud"].concat(args)
       : service === "gphotos" ? [gphotosSync].concat(args)
       : ["dropbox-cli"].concat(args)
     actionProc.command = cmd
@@ -113,7 +112,7 @@ Panel {
   function icList(d) {
     if (d !== undefined) icDir = d
     if (lsProc.running) return
-    lsProc.command = [python, "-B", dir + "icloud.py", "ls", icDir]
+    lsProc.command = [ctl, "icloud", "ls", icDir]
     lsProc.running = true
   }
   function icUp() { icList(icDir.indexOf("/") < 0 ? "" : icDir.substring(0, icDir.lastIndexOf("/"))) }
@@ -176,7 +175,7 @@ Panel {
 
   Process {
     id: statusProc
-    command: [root.python, "-B", root.dir + "cloud.py", "status"]
+    command: [root.ctl, "status"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: { try { root.st = JSON.parse(text) } catch (e) {} }
