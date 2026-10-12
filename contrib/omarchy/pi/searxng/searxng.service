@@ -1,0 +1,17 @@
+[Unit]
+Description=SearXNG private metasearch for local agents (127.0.0.1:8888)
+
+[Service]
+EnvironmentFile=%h/.config/searxng/env
+ExecStartPre=-/usr/bin/docker rm -f searxng
+ExecStart=/usr/bin/docker run --rm --name searxng -p 127.0.0.1:8888:8080 \
+  --memory 512m --pids-limit 256 --security-opt no-new-privileges \
+  -e SEARXNG_SECRET -e SEARXNG_BASE_URL=http://127.0.0.1:8888/ \
+  -v %h/.config/searxng/settings.yml:/etc/searxng/settings.yml:ro \
+  searxng/searxng@sha256:ddd642cae6eac75412938fd846ddbf440a2df029cfeae8a562b8b205f4e35e25
+ExecStop=/usr/bin/docker stop -t 5 searxng
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

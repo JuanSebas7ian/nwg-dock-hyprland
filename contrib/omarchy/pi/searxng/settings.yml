@@ -1,0 +1,54 @@
+# SearXNG for the local agents (Pi's web_search tool). Only reachable on 127.0.0.1:8888.
+use_default_settings: true
+general:
+  instance_name: "omarchy-search"
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats: [html, json]
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  method: "GET"
+ui:
+  default_locale: "es"
+outgoing:
+  request_timeout: 4.0
+# Engines that answered from this IP on 2026-10-12; brave/duckduckgo (CAPTCHA, rate limits), wikidata (timeouts)
+# and bing (no results) are off. github/stackoverflow/arxiv are used when the agent asks for those categories.
+engines:
+  - name: google cse
+    disabled: false
+  - name: yahoo
+    disabled: false
+  - name: duckduckgo web
+    disabled: false
+  - name: yep
+    disabled: false
+  - name: mwmbl
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: github
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: arxiv
+    disabled: false
+  - name: brave
+    disabled: true
+  - name: duckduckgo
+    disabled: true
+  - name: wikidata
+    disabled: true
+  - name: bing
+    disabled: true
+  - name: currency
+    disabled: true
+  - name: lingva
+    disabled: true
+  - name: dictzone
+    disabled: true
+  - name: mymemory translated
+    disabled: true

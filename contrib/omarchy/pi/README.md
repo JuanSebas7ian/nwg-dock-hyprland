@@ -56,3 +56,18 @@ pi-web                                                # Pi + búsqueda web para 
 Probado el 2026-10-11: `pi-box` creó `hello.txt` con el dueño correcto y `ls /home` dentro solo veía el
 contenedor. Con qwen2.5-coder-7b las llamadas a herramientas salen como texto (el modelo no las
 respeta); con qwen2.5-7b funcionan.
+
+## Entorno: web, seguridad y estabilidad (2026-10-12, `install.sh`)
+
+`contrib/omarchy/pi/install.sh` (idempotente; `--remove` lo quita) instala:
+
+| Pieza | Qué hace | Coste |
+|---|---|---|
+| `extensions/omarchy-web.ts` | `web_search` (SearXNG privado en `127.0.0.1:8888`, sin claves ni cuentas) y `web_fetch` (página o PDF a texto, recortado; el texto completo queda en `/tmp/pi-web/`) | +209 tokens (5.431 → 5.640); `pi-web-access` sumaba ~3.200 y busca en Exa y resume con modelos en la nube |
+| `searxng/` | `searxng.service` (usuario, Docker, imagen fijada por digest, 512 MB, solo 127.0.0.1); motores que responden desde esta IP: google cse, yahoo, duckduckgo web, yep, mwmbl (+ wikipedia, github, stackoverflow, arxiv). ~0,8-1,5 s por búsqueda, ~135 MB | — |
+| `extensions/omarchy-guard.ts` | A partir de los ejemplos oficiales `permission-gate`, `protected-paths` y `notify`: confirma comandos peligrosos (sudo, `rm -r`, force push, `reset --hard`, dd/mkfs, `curl \| sh`, `pacman -R`, apagar…); nunca lee ni escribe `Privado/`, `~/.ssh`, `~/.gnupg`, la contraseña de restic ni `auth.json`; no escribe `.env`; confirma escrituras **fuera del proyecto** (herramientas y bash: `>`, `tee`, `mkdir`, `cp`, `mv`, `sed -i`…), salvo `~/.agents/kb` y `/tmp/pi-*`; corta la misma llamada repetida 3 veces; notificación al terminar una tarea larga. Sin interfaz (`pi -p`) bloquea en vez de preguntar | 0 tokens |
+| `settings.json` | compactación para el modelo de 32k (`keepRecentTokens` 10.000) y reintentos | — |
+| `mcp.json` | MCP `fetch` apagado (lo reemplaza `web_fetch`) | −1 herramienta |
+
+Probado con Pi real: busca y cita la fuente (21 s); bloquea `rm -rf build`, escribir en `/tmp/rev2` (también cuando el
+modelo intentó rodearlo con `bash`) y leer `Privado/`. Pruebas: `node --test tests/guard.test.ts` (5).
