@@ -502,7 +502,7 @@ Panel {
               Chip { label: "Back up now"; visible: root.trusted && !root.isRunning("backup") && !root.isRunning("drive"); onClicked: root.startJob("backup") }
               Chip { label: "Upload to Google Drive"; visible: root.trusted && !root.isRunning("backup") && !root.isRunning("drive") && !!root.backup && !!root.backup.last && root.backup.last.ok
                 onClicked: root.startJob("drive") }
-              Chip { label: root.trusted && root.phone.backupEncrypted ? "Turn encryption off" : "Turn encryption on"; visible: root.trusted && !root.jobRunning
+              Chip { label: root.trusted && root.phone.backupEncrypted ? "Turn encryption off" : "Turn encryption on"; visible: root.trusted && !root.isRunning("backup") && !root.isRunning("import")
                 onClicked: root.terminal(root.ctl + " encryption " + (root.phone.backupEncrypted ? "off" : "on") + " " + root.phone.udid) }
               Chip { label: "Open folder"; onClicked: root.openPath(root.backup ? root.backup.dir : "") }
             }
