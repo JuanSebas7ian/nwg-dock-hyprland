@@ -29,7 +29,14 @@ Panel {
   readonly property var gpu: info && info.gpu ? info.gpu : null
   readonly property var loadedModels: llama ? (llama.models || []).filter(function(m) { return m.status === "loaded" || m.status === "loading" }) : []
 
-  property string tab: "llama"
+  property string tab: "installed"
+  // what is on disk, grouped by role (Installed tab)
+  readonly property var embedModels: ollama ? (ollama.models || []).filter(function(m) { return root.isEmbed(m) }) : []
+  readonly property var ollamaOnly: ollama ? (ollama.models || []).filter(function(m) {
+    return !root.isEmbed(m) && !(llama && (llama.models || []).some(function(l) { return l.source === "ollama" && l.name === m.name.replace(/:latest$/, "") || l.name === m.name }))
+  }) : []
+  readonly property real installedBytes: (llama ? (llama.models || []).reduce(function(a, m) { return a + (m.size || 0) }, 0) : 0)
+    + embedModels.reduce(function(a, m) { return a + (m.size || 0) }, 0) + ollamaOnly.reduce(function(a, m) { return a + (m.size || 0) }, 0)
   property string message: ""
   property bool messageIsError: false
   property string confirmDelete: ""
@@ -69,11 +76,15 @@ Panel {
     if (n >= 1e6) return (n / 1e6).toFixed(0) + " MB"
     return (n / 1e3).toFixed(0) + " KB"
   }
+  function isEmbed(m) { return /embed|bert/i.test(m.name + " " + (m.family || "")) }
   function fitLabel(f) { return f === "gpu" ? "fits GPU" : f === "partial" ? "GPU + RAM" : "CPU only" }
   function fitColor(f) { return f === "gpu" ? Color.accent : f === "partial" ? root.foreground : root.urgent }
 
   function refresh() { if (!statusProcess.running) statusProcess.running = true }
   function say(text, isError) { message = text; messageIsError = !!isError }
+  // a notice disappears by itself, so an old one never looks current
+  onMessageChanged: if (message !== "") messageTimer.restart()
+  Timer { id: messageTimer; interval: root.messageIsError ? 20000 : 8000; onTriggered: root.message = "" }
 
   function act(args, okText) {
     if (actionProcess.running) return
@@ -312,11 +323,12 @@ Panel {
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         if (t === "r" || t === "R") root.refresh()
-        else if (t === "1") root.tab = "llama"
-        else if (t === "2") root.tab = "ollama"
-        else if (t === "3") root.tab = "hf"
-        else if (t === "4") root.tab = "pi"
-        else if (t === "5") root.tab = "settings"
+        else if (t === "1") root.tab = "installed"
+        else if (t === "2") root.tab = "llama"
+        else if (t === "3") root.tab = "ollama"
+        else if (t === "4") root.tab = "hf"
+        else if (t === "5") root.tab = "pi"
+        else if (t === "6") root.tab = "settings"
       }
 
       Flickable {
@@ -360,6 +372,7 @@ Panel {
           Flow {
             width: parent.width
             spacing: Style.space(4)
+            Chip { label: "Installed"; on: root.tab === "installed"; onClicked: root.tab = "installed" }
             Chip { label: "llama.cpp" + (root.cfg && root.cfg.defaultBackend === "llama" ? " ★" : ""); on: root.tab === "llama"; onClicked: root.tab = "llama" }
             Chip { label: "Ollama" + (root.cfg && root.cfg.defaultBackend === "ollama" ? " ★" : ""); on: root.tab === "ollama"; onClicked: root.tab = "ollama" }
             Chip { label: "Hugging Face"; on: root.tab === "hf"; onClicked: root.tab = "hf" }
@@ -391,6 +404,85 @@ Panel {
               elide: Text.ElideRight
             }
             Meter { width: parent.width; fraction: Math.max(0, root.pullFraction) }
+          }
+
+          // ============================================== Installed (everything on disk, by role)
+          Column {
+            visible: root.tab === "installed"
+            width: parent.width
+            spacing: Style.space(6)
+            Text {
+              width: parent.width
+              text: !root.info ? "" : ((root.llama ? (root.llama.models || []).length : 0) + root.embedModels.length + root.ollamaOnly.length) + " models · "
+                + root.fmtBytes(root.installedBytes) + " on disk" + (root.info.diskFree ? " · " + root.fmtBytes(root.info.diskFree) + " free" : "")
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            PanelSectionHeader { text: "CHAT AND AGENTS · LLAMA.CPP"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Text {
+              visible: !!root.llama && (root.llama.models || []).length === 0
+              width: parent.width
+              text: "None: get one in the Hugging Face or Ollama tab."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+            Repeater {
+              model: root.llama ? root.llama.models : []
+              ModelRow {
+                required property var modelData
+                width: parent.width
+                readonly property bool isDefault: !!root.cfg && root.cfg.defaultModel === modelData.id
+                title: (isDefault ? "★ " : "") + modelData.id + (modelData.status === "loaded" ? "  ●" : "")
+                meta: [isDefault ? "default for agents" : "", modelData.mmproj ? "vision" : "", root.fitLabel(modelData.fit),
+                       modelData.ctx ? Math.round(modelData.ctx / 1024) + "k context" : "", modelData.quant, root.fmtBytes(modelData.size),
+                       modelData.source === "hf" ? "Hugging Face" : "Ollama"]
+                  .filter(function(s) { return s }).join(" · ")
+                actions: isDefault ? [] : [{ icon: "󰓒", tip: "Make it the default for agents (opencode, pi)", run: function() { root.setDefault(modelData.id) } }]
+              }
+            }
+            PanelSectionHeader { text: "EMBEDDINGS · OLLAMA"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Text {
+              visible: root.embedModels.length === 0
+              width: parent.width
+              text: "None (semantic search / RAG needs one, e.g. embeddinggemma)."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Repeater {
+              model: root.embedModels
+              ModelRow {
+                required property var modelData
+                width: parent.width
+                title: modelData.name + (modelData.loaded ? "  ●" : "")
+                meta: ["search / RAG", modelData.params, modelData.quant, root.fmtBytes(modelData.size), "http://127.0.0.1:11434/api/embed"]
+                  .filter(function(s) { return s }).join(" · ")
+                actions: []
+              }
+            }
+            PanelSectionHeader { visible: root.ollamaOnly.length > 0; text: "OTHER OLLAMA MODELS"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Repeater {
+              model: root.ollamaOnly
+              ModelRow {
+                required property var modelData
+                width: parent.width
+                title: modelData.name + (modelData.loaded ? "  ●" : "")
+                meta: [modelData.params, modelData.quant, root.fmtBytes(modelData.size)].filter(function(s) { return s }).join(" · ")
+                actions: []
+              }
+            }
+            Text {
+              width: parent.width
+              text: "Manage them in the llama.cpp, Ollama and Hugging Face tabs."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
           }
 
           // ============================================== llama.cpp
