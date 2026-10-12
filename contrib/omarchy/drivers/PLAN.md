@@ -66,7 +66,7 @@ Cada una con id, nivel (FAIL = rompería, WARN = riesgo), y texto en español.
 
 - `../maintenance/stable-snapshot.sh`: llama `capture.sh --state "$MAN"` (`drivers-state.json`) y exige `compat.py post` sin FAIL
   antes de crear el snapshot (además del reward).
-- `../maintenance/smoke-test.sh` + `reward.py`: nuevo grupo `DRIVERS` (peso 15, bloqueante) con `install.sh --check` limpio y
+- `../maintenance/smoke-test.sh` + `omarchy-reward`: nuevo grupo `DRIVERS` (peso 15, bloqueante) con `install.sh --check` limpio y
   `compat.py post` sin FAIL; los pesos se reescalan a 100.
 - `../restore/bin/omarchy-restore full`: tras restaurar `~`, ejecutar `drivers/install.sh` (real) antes de los demás instaladores.
 - Barra: el plugin `juansebas7ian.drivers` puede leer `compat.py preflight --json` (cacheado 1 h) — **opcional, solo si sobra**.

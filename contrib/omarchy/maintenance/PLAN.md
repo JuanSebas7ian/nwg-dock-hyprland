@@ -29,10 +29,10 @@ Flujo: **implementa Sonnet → evalúa Opus → corrige → snapshot "estable"**
 | `apply.sh` | Ejecuta S0, pasos 1-6 y S1 como root (`sudo`), idempotente: cada paso comprueba antes y dice `skip` si ya está hecho. `--dry-run` imprime lo que haría sin cambiar nada (sin root). `--only 2,3` para pasos sueltos. Log en `~/.local/state/omarchy-maintenance/apply-<fecha>.log` y `exit=N` al final. Nunca toca `/usr/share/omarchy/` |
 | `smart-notify` | El script `-M exec` de smartd (se instala en `/usr/local/lib/omarchy/smartd-notify`) |
 | `smoke-test.sh` | Sin root, solo lectura, determinista. Una línea por comprobación `PASS|FAIL|WARN|SKIP <id> <texto>` y `--json` para el reward. Variables `SYSFS_ROOT`, `PROC_ROOT` para probar con un árbol falso |
-| `reward.py` | Lee el JSON del smoke test y da una nota de 0 a 100 por pesos (TRIM 25, smartd 20, paccache 10, scrub 10, huérfanos 5, paquetes 10, `/boot` 5, sin servicios fallidos 10, `hyprctl configerrors` vacío 5). FAIL = 0 de su peso, WARN = la mitad. Umbral estable: 90 y ningún FAIL en TRIM ni smartd. Salida JSON + resumen; código 0 si es estable |
-| `stable-snapshot.sh` | S2 (root): se niega si `reward.py` no da estable |
+| `omarchy-reward` (Go, `go/cmd/omarchy-reward`; antes `reward.py`) | Lee el JSON del smoke test y da una nota de 0 a 100 por pesos (suman 100; los actuales en `go/internal/reward/reward.go`). FAIL = 0 de su peso, WARN = la mitad. Umbral estable: 90 y ningún FAIL en TRIM ni smartd. Salida JSON + resumen; código 0 si es estable |
+| `stable-snapshot.sh` | S2 (root): se niega si `omarchy-reward` no da estable |
 | `suspend-test.sh` | Paso 7, manual |
-| `tests/` | `unittest` de `reward.py` (pesos, umbral, WARN, FAIL bloqueante, JSON roto) y del smoke test contra árboles falsos (discard 0 vs > 0, `/boot` lleno) |
+| `tests/` | `unittest` del smoke test (el reward se prueba en Go: `go test ./internal/reward ./cmd/omarchy-reward`) contra árboles falsos (discard 0 vs > 0, `/boot` lleno) |
 | `README.md` | Qué hace cada paso, cómo deshacerlo, cómo correrlo |
 
 ## Deshacer

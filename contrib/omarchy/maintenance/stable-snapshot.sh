@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# S2: create the "stable" snapshots and the version manifest. Refuses unless reward.py says stable
+# S2: create the "stable" snapshots and the version manifest. Refuses unless omarchy-reward says stable
 # and the fork working tree is clean (nothing is created when it refuses).
 # Run from a visible terminal (sudo). Log: ~/.local/state/omarchy-maintenance/stable-<date>.log, ends with exit=N.
 set -uo pipefail
@@ -18,9 +18,9 @@ main() {
     dirty=$(git -C "$FORK_DIR" status --porcelain) || { echo "git status fallo"; return 1; }
     if [ -n "$dirty" ]; then echo "el arbol de $FORK_DIR no esta limpio: me niego."; echo "$dirty"; return 1; fi
     "$HERE/smoke-test.sh" --json >"$tmp/smoke.json"
-    python3 "$HERE/reward.py" "$tmp/smoke.json" >"$tmp/reward.json"
+    "$FORK_DIR/contrib/omarchy/go/tool.sh" omarchy-reward "$tmp/smoke.json" >"$tmp/reward.json"
     if [ $? -ne 0 ]; then echo "reward no es estable: me niego a crear el snapshot."; cat "$tmp/reward.json"; return 1; fi
-    # compat.py post already ran inside smoke-test.sh (DRIVERS02); a FAIL there is a DRIVERS blocker for reward.py
+    # compat.py post already ran inside smoke-test.sh (DRIVERS02); a FAIL there is a DRIVERS blocker for omarchy-reward
     echo ">>> Escribe tu contrasena de sudo. <<<"
     sudo -v || return 1
 

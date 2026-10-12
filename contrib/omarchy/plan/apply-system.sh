@@ -101,7 +101,7 @@ omarchy-hwcheck >>"$LOG" 2>&1; hw=$?
 ((hw <= 1)) && ok "omarchy-hwcheck = $hw" || fail "omarchy-hwcheck = $hw"
 smoke=$(mktemp)
 "$OMARCHY_DIR/maintenance/smoke-test.sh" --json >"$smoke" 2>/dev/null
-verdict=$(python3 "$OMARCHY_DIR/maintenance/reward.py" "$smoke" 2>&1)
+verdict=$("$OMARCHY_DIR/go/tool.sh" omarchy-reward "$smoke" 2>&1)
 printf '%s\n' "$verdict" >>"$LOG"
 [[ $verdict == *'"stable": true'* ]] && ok "smoke test estable ($(printf '%s\n' "$verdict" | grep -m1 '^reward:'))" || fail "smoke test no estable"
 rm -f "$smoke"

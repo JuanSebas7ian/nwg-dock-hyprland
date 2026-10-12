@@ -14,7 +14,7 @@ Plan completo en `PLAN.md`. Flujo: implementa Sonnet, evalúa Opus, snapshot "es
 | 5 | Quita `drive-bin-debug` y `gdrive-debug` si siguen huérfanos |
 | 6 | Códecs GStreamer, `libva-utils`, `nvme-cli` |
 
-El paso 7 (suspensión) es manual: `suspend-test.sh`. S2 (snapshot estable): `stable-snapshot.sh`, solo si `reward.py` da estable.
+El paso 7 (suspensión) es manual: `suspend-test.sh`. S2 (snapshot estable): `stable-snapshot.sh`, solo si `omarchy-reward` da estable.
 
 ## Uso
 
@@ -22,7 +22,7 @@ El paso 7 (suspensión) es manual: `suspend-test.sh`. S2 (snapshot estable): `st
 ./apply.sh --dry-run          # sin root, sin cambios
 ./apply.sh --only 2,3 --wait  # pasos sueltos, desde una terminal visible
 ./smoke-test.sh [--json] [--only ID,ID]
-./smoke-test.sh --json > smoke.json && ./reward.py smoke.json
+./smoke-test.sh --json > smoke.json && ../go/tool.sh omarchy-reward smoke.json
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
 ```
 

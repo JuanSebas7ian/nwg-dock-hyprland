@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Read-only, root-less smoke test of the maintenance plan.
-# One line per check: PASS|FAIL|WARN|SKIP <id> <text>; --json for reward.py.
+# One line per check: PASS|FAIL|WARN|SKIP <id> <text>; --json for omarchy-reward (go/cmd/omarchy-reward).
 # Env: SYSFS_ROOT, PROC_ROOT (fake trees for tests), SMARTD_CONF, BOOT_USED_PCT, DRIVERS_DIR (override),
 #      BAR_DIR, USER_BIN, USER_UNITS (the desktop guards: repo copy, installed binaries and units),
 #      PLUGINS_DIR, SHELL_JSON (the memguard bar widget).
