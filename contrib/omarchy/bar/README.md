@@ -31,10 +31,11 @@ widget, `go test ./...`); `install.sh` los prueba y compila.
 plugins/juansebas7ian.hardware/
   Panel.qml            ícono, estado, pestañas, teclado; habla con el backend por stdin/stdout
   tabs/*Tab.qml        una pestaña por archivo, cargada solo al abrirla (recibe el panel como `hw`)
-  backend/hardwared.py un único proceso para todo: sensores cada 1 s (los emite cada 1 s solo con una
-                       pestaña en vivo abierta, si no cada 5 s); du, checkupdates y solaar en hilos y
-                       solo para la pestaña abierta; CUDA en un proceso corto; alertas en un solo sitio
-  backend/hw/          sensors, gpu, drivers, storage, peripherals, alerts, util (pruebas: tests/test_hardware.py)
+  backend (Go)         `omarchy-hardwared` (`go/cmd/omarchy-hardwared`, `go/internal/hw`): un único proceso
+                       para todo: sensores cada 1 s (los emite cada 1 s solo con una pestaña en vivo abierta,
+                       si no cada 5 s), NVML por dlopen; du, checkupdates y solaar en segundo plano y solo para
+                       la pestaña abierta; CUDA en un proceso corto (`omarchy-hardwared cuda-probe`); alertas
+                       en un solo sitio. `omarchy-hardwared --once live|drivers|storage|peripherals`
 plugins/juansebas7ian.cloud/
   Panel.qml, tabs/*Tab.qml (recibe el panel como `cloud`), backend en Go: `omarchy-cloud`
 shared/ui/             componentes comunes (Theme, Section, Pair, Gauge, Graph, Tile, TabBar, FileRow…)
@@ -48,7 +49,7 @@ Umbrales de las alertas de Hardware (opcional) en `~/.config/omarchy-hardware/co
 baterías bajas una sola vez hasta que se resuelven; las actualizaciones de NVIDIA/CUDA/kernel, una vez por versión.
 Nombres y papeles de los ventiladores: `~/.config/omarchy-sysmon/fans.json` (ruta de antes, por compatibilidad).
 
-Pruebas: `cd contrib/omarchy/bar && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_hardware tests.test_icloud tests.test_gphotos tests.test_session`.
+Pruebas: `cd contrib/omarchy/go && go test ./...` (backends en Go) y `cd contrib/omarchy/bar && python3 -m unittest tests.test_shared_ui tests.test_memguard_widget` (copias de `shared/ui`, widget de memguard).
 Capturas sin ratón: `omarchy-shell juansebas7ian.hardware tab cpu` (o `juansebas7ian.cloud tab icloud`) y `grim`.
 
 Reemplazan (2026-10-07) a `gdrive`, `icloud`, `gphotos`, `sysmon`, `cooling`, `storage`, `nvidia`, `drivers` y

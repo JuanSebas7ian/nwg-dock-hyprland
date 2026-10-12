@@ -7,8 +7,8 @@ import "../ui"
 // Drivers: one clear verdict at the top, then every driver component of this
 // PC (installed → available, reboot pending), DKMS, firmware (fwupd) and BIOS,
 // with the actions that update them. Status comes from the Go backend
-// omarchy-drivers (shares checkupdates/BIOS caches with hardwared); health and
-// loaded modules still come from hardwared.
+// omarchy-drivers (shares checkupdates/BIOS caches with omarchy-hardwared); health and
+// loaded modules still come from omarchy-hardwared.
 Column {
   id: tab
   property var hw: null

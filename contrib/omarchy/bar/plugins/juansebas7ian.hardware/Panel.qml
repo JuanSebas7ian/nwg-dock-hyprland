@@ -7,7 +7,7 @@ import qs.Ui
 import "ui"
 
 // Hardware: one bar icon and one panel with tabs for the whole machine.
-// All data comes from backend/hardwared.py, a single long-running process
+// All data comes from omarchy-hardwared (Go), a single long-running process
 // that streams JSON lines; the panel tells it which tab is visible so it
 // samples fast only what is on screen. Each tab lives in tabs/<Name>Tab.qml
 // and gets this object as `hw`.
@@ -17,7 +17,7 @@ Panel {
   ipcTarget: "juansebas7ian.hardware"
   manageIpc: false
 
-  readonly property string backend: String(Qt.resolvedUrl("backend/hardwared.py")).replace("file://", "")
+  readonly property string backend: Quickshell.env("HOME") + "/.local/bin/omarchy-hardwared"
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
@@ -162,7 +162,7 @@ Panel {
     id: proc
     running: true
     stdinEnabled: true
-    command: ["/usr/bin/python3", "-B", root.backend]
+    command: [root.backend]
     stdout: SplitParser {
       onRead: function(line) { try { root.ingest(JSON.parse(line)) } catch (e) {} }
     }
