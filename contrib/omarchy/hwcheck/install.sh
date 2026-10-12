@@ -52,17 +52,19 @@ if [[ ${1:-} == --remove ]]; then
 fi
 [[ -z ${1:-} ]] || fail "opción desconocida: $1 (usa --remove o nada)"
 
-command -v python3 > /dev/null || fail "falta python3"
+command -v go > /dev/null || fail "falta go (omarchy pkg add go)"
+GO=$HERE/../go
 
 say "Pruebas unitarias"
-out=$(cd "$HERE" && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest test_hwcheck 2>&1) || {
+out=$(cd "$GO" && go test ./internal/hwcheck 2>&1) || {
   printf '%s\n' "$out" >&2
   fail "las pruebas fallan: no instalo"
 }
 printf '%s\n' "$out" | tail -1
 
 say "Instalando"
-put "$HERE/hwcheck.py" "$BIN"
+built=$("$GO/tool.sh" --build omarchy-hwcheck) || fail "no compila"
+put "$built" "$BIN"
 for ev in "${EVENTS[@]}"; do
   put "$HERE/omarchy-hwcheck.hook" "$HOOKS/$ev.d/omarchy-hwcheck.hook"
 done

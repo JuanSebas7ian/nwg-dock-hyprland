@@ -49,8 +49,7 @@ case $event in
     fi
     sleep "${HWCHECK_SETTLE:-30}"
     baseline=$dir/baseline.json
-    want_bt=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("bluetooth", [])))' \
-      "$baseline" 2> /dev/null || echo 0)
+    want_bt=$(jq -r '.bluetooth // [] | length' "$baseline" 2> /dev/null || echo 0)
     for ((i = 0; i < ${HWCHECK_BT_WAIT:-150} && want_bt > 0; i += 5)); do
       compgen -G '/sys/class/bluetooth/hci*' > /dev/null && break
       sleep 5

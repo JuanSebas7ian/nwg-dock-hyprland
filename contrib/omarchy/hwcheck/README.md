@@ -28,7 +28,7 @@ quieras: si un archivo cambió, guarda el anterior en `~/.local/state/omarchy-hw
 de las carpetas de hooks, porque Omarchy ejecuta todo lo que hay ahí). Para desinstalar,
 `install.sh --remove` (los informes quedan en `~/.local/state/omarchy-hwcheck/`).
 
-Requisitos: `python3`, `pciutils` y `pacman`, que vienen con Omarchy. `--online` necesita además
+Requisitos: `go` (para compilarlo), `pciutils` y `pacman`, que vienen con Omarchy. `--online` necesita además
 `pacman-contrib`.
 
 ## Uso
@@ -97,7 +97,7 @@ arranque y de dispositivos USB conectados son informativos.
 
 ```bash
 cd contrib/omarchy/hwcheck
-python3 -m unittest -v test_hwcheck
+cd ../go && go test ./internal/hwcheck
 ```
 
 Las pruebas usan un sistema simulado (archivos de `/sys` y `/proc` y salidas de comandos fijas), así que
