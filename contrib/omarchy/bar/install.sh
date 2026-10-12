@@ -39,7 +39,7 @@ RETIRED=(
   juansebas7ian.gdrive juansebas7ian.icloud juansebas7ian.gphotos
   juansebas7ian.sysmon juansebas7ian.cooling juansebas7ian.storage juansebas7ian.nvidia juansebas7ian.drivers
 )
-COLLECTORS=(omarchy-agent-usage-extra bt-pair-keyboard spotify-bar-setup icloud-setup gphotos-sync gphotos-setup omarchy-vpn omarchy-gcal oc-run pi-web)
+COLLECTORS=(omarchy-agent-usage-extra spotify-bar-setup icloud-setup gphotos-sync gphotos-setup omarchy-vpn omarchy-gcal oc-run pi-web)
 
 say() { printf '==> %s\n' "$*"; }
 warn() { printf 'AVISO: %s\n' "$*" >&2; }
@@ -104,7 +104,7 @@ remove_all() {
   for unit in omarchy-spotify-heal.service llama-router.service; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
-  for c in "${COLLECTORS[@]}" omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers omarchy-freeze-guard omarchy-memguard pi-box opencode-ollama-sync omarchy-agent-usage-opencode omarchy-agent-usage-antigravity omarchy-session; do
+  for c in "${COLLECTORS[@]}" omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers omarchy-freeze-guard omarchy-memguard pi-box opencode-ollama-sync omarchy-agent-usage-opencode omarchy-agent-usage-antigravity omarchy-session bt-pair-keyboard; do
     [[ -e $BIN/$c ]] && backup "$BIN/$c" && rm -f "$BIN/$c"
   done
   rm -f "${XDG_STATE_HOME:-$HOME/.local/state}"/omarchy/agents/usage/{antigravity,opencode}.json
@@ -162,7 +162,7 @@ done
 # --------------------------------------------------------------- backends en Go
 # contrib/omarchy/go: un módulo con un binario por widget. Se prueban antes de
 # instalar; si las pruebas fallan, se conserva el binario anterior.
-GO_TOOLS=(omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers opencode-ollama-sync omarchy-agent-usage-opencode omarchy-agent-usage-antigravity omarchy-session)
+GO_TOOLS=(omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers opencode-ollama-sync omarchy-agent-usage-opencode omarchy-agent-usage-antigravity omarchy-session bt-pair-keyboard)
 GO_SRC=$(cd "$HERE/../go" && pwd)
 if command -v go >/dev/null; then
   say "Backends en Go (${GO_TOOLS[*]})"
