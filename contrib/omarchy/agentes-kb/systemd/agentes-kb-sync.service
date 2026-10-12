@@ -1,0 +1,7 @@
+[Unit]
+Description=Point agent harnesses at the Obsidian knowledge base (Agentes/)
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/agentes-kb-sync -q

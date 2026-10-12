@@ -36,6 +36,8 @@ PATHS=(
   .bashrc .bash_profile .profile
   # contexto, skill y agente de Claude para este equipo
   .claude/CLAUDE.md .claude/omarchy.md .claude/skills/omarchy-hardware .claude/agents
+  # base de conocimiento de los agentes (omarchy.md y los skills propios viven aquí)
+  "Documents/Obsidian Vault/Agentes"
 )
 
 cd "$HOME"

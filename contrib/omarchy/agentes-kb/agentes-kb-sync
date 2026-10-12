@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# agentes-kb-sync: points every agent harness (Claude Code, Pi, opencode, Antigravity) at the shared knowledge
+# base in Obsidian (Agentes/). The vault is the source of truth; this writes only generated files and links:
+#   ~/.agents/kb                                   -> <vault>/Agentes (stable path without spaces)
+#   ~/.pi/agent/AGENTS.md                          <- LEEME.md + Harness/pi.md
+#   ~/.config/opencode/AGENTS.md                   <- LEEME.md + Harness/opencode.md
+#   ~/.gemini/config/plugins/obsidian-kb/          <- plugin: rules/AGENTS.md (LEEME + Harness/antigravity.md), skills -> Skills/
+#   ~/.agents/skills/<n>, ~/.claude/skills/<n>     -> Skills/<n> (one link per skill; dangling ones removed)
+# Claude Code reads LEEME.md through an @import in ~/.claude/CLAUDE.md (added by install.sh).
+set -euo pipefail
+
+VAULT=${AGENTES_VAULT:-"$HOME/Documents/Obsidian Vault"}
+KB="$VAULT/Agentes"
+LINK="$HOME/.agents/kb"
+MARK="<!-- GENERADO por agentes-kb-sync"
+quiet=0; [[ ${1:-} == -q ]] && quiet=1
+say() { ((quiet)) || echo "agentes-kb-sync: $*"; }
+warn() { echo "agentes-kb-sync: $*" >&2; }
+
+[[ -f $KB/LEEME.md ]] || { warn "no $KB/LEEME.md (run install.sh)"; exit 1; }
+
+mkdir -p "$HOME/.agents"
+if [[ -e $LINK && ! -L $LINK ]]; then warn "$LINK exists and is not a link: left alone"; else
+  [[ $(readlink "$LINK" 2>/dev/null) == "$KB" ]] || { ln -sfn "$KB" "$LINK"; say "linked $LINK"; }
+fi
+
+# body of a note without its YAML front matter
+body() { awk 'NR==1 && /^---$/ {f=1; next} f && /^---$/ {f=0; next} !f' "$1"; }
+
+# compose <out> <harness>: LEEME + Harness/<harness>.md; a hand-written file is backed up once before the first write
+compose() {
+  local out=$1 h=$2 tmp
+  mkdir -p "$(dirname "$out")"
+  if [[ -f $out ]] && ! head -1 "$out" | grep -qF "$MARK"; then
+    cp -p "$out" "$out.bak.$(date +%Y%m%d-%H%M%S)"; say "backed up hand-written $out"
+  fi
+  tmp=$(mktemp "$out.XXXXXX")
+  {
+    echo "$MARK desde Obsidian: Agentes/LEEME.md + Agentes/Harness/$h.md. Edita allí, no aquí. -->"
+    echo
+    body "$KB/LEEME.md"
+    if [[ -f $KB/Harness/$h.md ]]; then echo; body "$KB/Harness/$h.md"; fi
+  } >"$tmp"
+  chmod 644 "$tmp"
+  if cmp -s "$tmp" "$out"; then rm -f "$tmp"; else mv -f "$tmp" "$out"; say "updated $out"; fi
+}
+
+[[ -d $HOME/.pi/agent ]] && compose "$HOME/.pi/agent/AGENTS.md" pi
+[[ -d $HOME/.config/opencode ]] && compose "$HOME/.config/opencode/AGENTS.md" opencode
+
+if [[ -d $HOME/.gemini/config ]]; then
+  plug="$HOME/.gemini/config/plugins/obsidian-kb"
+  mkdir -p "$plug/rules"
+  pj='{"name": "obsidian-kb", "displayName": "Obsidian knowledge base", "description": "Shared knowledge base of all agents (Obsidian vault, Agentes/)."}'
+  [[ $(cat "$plug/plugin.json" 2>/dev/null) == "$pj" ]] || { echo "$pj" >"$plug/plugin.json"; say "wrote $plug/plugin.json"; }
+  compose "$plug/rules/AGENTS.md" antigravity
+  mkdir -p "$KB/Skills"
+  [[ $(readlink "$plug/skills" 2>/dev/null) == "$KB/Skills" ]] || { rm -rf "$plug/skills"; ln -s "$KB/Skills" "$plug/skills"; say "linked $plug/skills"; }
+fi
+
+# one link per skill in the directories the harnesses scan
+for dir in "$HOME/.agents/skills" "$HOME/.claude/skills"; do
+  [[ $dir == "$HOME/.claude/skills" && ! -d $HOME/.claude ]] && continue
+  mkdir -p "$dir"
+  for s in "$KB"/Skills/*/; do
+    [[ -f $s/SKILL.md ]] || continue
+    n=$(basename "$s"); t="$KB/Skills/$n"
+    if [[ -L $dir/$n ]]; then
+      [[ $(readlink "$dir/$n") == "$t" ]] || { ln -sfn "$t" "$dir/$n"; say "relinked $dir/$n"; }
+    elif [[ -e $dir/$n ]]; then
+      warn "$dir/$n is a real folder: not replaced (move it to $KB/Skills/ to share it)"
+    else
+      ln -s "$t" "$dir/$n"; say "linked $dir/$n"
+    fi
+  done
+  for l in "$dir"/*; do
+    [[ -L $l ]] || continue
+    case $(readlink "$l") in "$KB"/*|"$LINK"/*) [[ -e $l ]] || { rm -f "$l"; say "removed stale $l"; } ;; esac
+  done
+done
+
+# a skill whose folder and name: disagree is ignored by some harnesses
+for f in "$KB"/Skills/*/SKILL.md; do
+  [[ -f $f ]] || continue
+  n=$(basename "$(dirname "$f")")
+  name=$(awk 'NR==1 && /^---$/ {f=1; next} f && /^---$/ {exit} f && /^name:/ {sub(/^name:[ \t]*/, ""); gsub(/["'\'']/, ""); print; exit}' "$f")
+  [[ $name == "$n" ]] || warn "Skills/$n/SKILL.md: name '$name' should be '$n'"
+  # an unquoted description with ": " is invalid YAML: Pi and Antigravity drop the skill, Claude tolerates it
+  awk 'NR==1 && /^---$/ {f=1; next} f && /^---$/ {exit} f && /^description:/ {v=$0; sub(/^description:[ \t]*/, "", v); if (v !~ /^[>|"'\'']/ && v ~ /: /) bad=1} END {exit !bad}' "$f" &&
+    warn "Skills/$n/SKILL.md: quote the description or use 'description: >' (it contains ': ', invalid YAML)"
+done
+
+if [[ -f $HOME/.claude/CLAUDE.md ]] && ! grep -qF "@~/.agents/kb/LEEME.md" "$HOME/.claude/CLAUDE.md"; then
+  warn "$HOME/.claude/CLAUDE.md does not import @~/.agents/kb/LEEME.md (run install.sh)"
+fi
+exit 0

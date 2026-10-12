@@ -1,0 +1,12 @@
+[Unit]
+Description=Re-sync agent harnesses when the knowledge base protocol or skills change
+
+[Path]
+PathChanged=%h/.agents/kb
+PathChanged=%h/.agents/kb/Harness
+PathModified=%h/.agents/kb/Harness
+PathChanged=%h/.agents/kb/Skills
+Unit=agentes-kb-sync.service
+
+[Install]
+WantedBy=default.target

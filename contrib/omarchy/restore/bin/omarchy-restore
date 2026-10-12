@@ -33,6 +33,7 @@ HEAL_PATHS=(
   .local/bin/omarchy-restore .local/bin/omarchy-agent-usage-extra .local/bin/omarchy-agent-usage-antigravity
   .local/bin/omarchy-agent-usage-opencode .local/bin/bt-pair-keyboard .local/bin/pad-keepalive .local/bin/bt-autopower .local/bin/gphotos-sync .local/bin/gphotos-setup .local/bin/spotify-bar-setup
   .cache/nwg-dock-pinned .claude/CLAUDE.md .claude/omarchy.md .claude/agents .claude/skills/omarchy-hardware
+  "Documents/Obsidian Vault/Agentes" .local/bin/agentes-kb-sync
   .ssh .gnupg
 )
 

@@ -1,0 +1,9 @@
+[Unit]
+Description=Re-sync agent harnesses with the knowledge base (startup and hourly)
+
+[Timer]
+OnStartupSec=30s
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

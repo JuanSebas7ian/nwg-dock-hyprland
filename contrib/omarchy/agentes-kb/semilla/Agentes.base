@@ -1,0 +1,56 @@
+filters:
+  and:
+    - file.inFolder("Agentes")
+    - file.ext == "md"
+views:
+  - type: table
+    name: Activos
+    filters:
+      and:
+        - estado != "obsoleto"
+        - estado != "hecho"
+    order:
+      - file.name
+      - tipo
+      - proyecto
+      - estado
+      - autor
+      - actualizado
+    sort:
+      - property: actualizado
+        direction: DESC
+  - type: table
+    name: Planes
+    filters:
+      and:
+        - tipo == "plan"
+    order:
+      - file.name
+      - proyecto
+      - estado
+      - autor
+      - actualizado
+    sort:
+      - property: actualizado
+        direction: DESC
+  - type: table
+    name: Conclusiones
+    filters:
+      and:
+        - tipo == "conclusion"
+    order:
+      - file.name
+      - proyecto
+      - autor
+      - actualizado
+    sort:
+      - property: actualizado
+        direction: DESC
+  - type: table
+    name: Todo
+    order:
+      - file.name
+      - file.folder
+      - tipo
+      - estado
+      - actualizado
