@@ -316,7 +316,7 @@ func TestImportIsIncrementalAndResumes(t *testing.T) {
 
 func TestImportRefusesToRunTwice(t *testing.T) {
 	p := testPaths(t)
-	release, err := p.lock("import")
+	release, err := p.lock(jobKey("import", udid))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +324,7 @@ func TestImportRefusesToRunTwice(t *testing.T) {
 	if _, err := Import((&fake{}).run, p, udid, "iPhone", nil); err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatal(err)
 	}
-	if !PhotoStatus(p, p.LoadConfig())["running"].(bool) {
+	if !PhotoStatus(p, p.LoadConfig(), udid)["running"].(bool) {
 		t.Fatal("status should say running")
 	}
 }
@@ -361,19 +361,19 @@ func TestBackupDue(t *testing.T) {
 	p := testPaths(t)
 	cfg := p.LoadConfig()
 	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
-	if BackupDue(p, cfg, now) {
+	if BackupDue(p, cfg, udid, now) {
 		t.Fatal("off by default")
 	}
 	cfg.AutoBackupDays = 7
-	if !BackupDue(p, cfg, now) {
+	if !BackupDue(p, cfg, udid, now) {
 		t.Fatal("never backed up")
 	}
-	_ = writeJSON(filepath.Join(p.State, "last-backup.json"), M{"time": now.Add(-48 * time.Hour).Format(time.RFC3339), "ok": true})
-	if BackupDue(p, cfg, now) {
+	_ = writeJSON(p.devFile(udid, "last-backup.json"), M{"time": now.Add(-48 * time.Hour).Format(time.RFC3339), "ok": true})
+	if BackupDue(p, cfg, udid, now) {
 		t.Fatal("2 days < 7")
 	}
-	_ = writeJSON(filepath.Join(p.State, "last-backup.json"), M{"time": now.Add(-48 * time.Hour).Format(time.RFC3339), "ok": false})
-	if !BackupDue(p, cfg, now) {
+	_ = writeJSON(p.devFile(udid, "last-backup.json"), M{"time": now.Add(-48 * time.Hour).Format(time.RFC3339), "ok": false})
+	if !BackupDue(p, cfg, udid, now) {
 		t.Fatal("a failed backup is retried")
 	}
 }
@@ -627,21 +627,21 @@ func TestGooglePhotosSources(t *testing.T) {
 
 func TestJobsStatus(t *testing.T) {
 	p := testPaths(t)
-	release, _ := p.lock("backup")
-	p.SaveProgress("backup", 0.5, "50% Finished")
-	js := JobsStatus(p)
+	release, _ := p.lock(jobKey("backup", udid))
+	p.SaveProgress("backup", udid, 0.5, "50% Finished")
+	js := JobsStatus(p, udid)
 	if js["backup"].(M)["running"] != true || js["backup"].(M)["progress"].(M)["fraction"] != 0.5 || js["import"].(M)["running"] != false {
 		t.Fatal(js)
 	}
 	release()
-	if JobsStatus(p)["backup"].(M)["progress"] != nil {
+	if JobsStatus(p, udid)["backup"].(M)["progress"] != nil {
 		t.Fatal("a finished job shows no progress")
 	}
 }
 
 func TestEjectRefusesDuringImport(t *testing.T) {
 	p := testPaths(t)
-	release, _ := p.lock("import")
+	release, _ := p.lock(jobKey("import", udid))
 	if _, err := Eject((&fake{}).run, p, ""); err != ErrInUse {
 		t.Fatal(err)
 	}
@@ -705,5 +705,41 @@ func TestShortCopiesAreNotRecorded(t *testing.T) {
 	}
 	if ents, _ := os.ReadDir(filepath.Join(dir, "2024")); len(ents) != 1 {
 		t.Fatal("the partial file was left behind", ents)
+	}
+}
+
+func TestTwoDevicesBackUpAtTheSameTime(t *testing.T) {
+	p := testPaths(t)
+	ipad := "00008027-000A1B2C3D4E5F60"
+	r1, err1 := p.lock(jobKey("backup", udid))
+	r2, err2 := p.lock(jobKey("backup", ipad)) // a second device is not blocked by the first
+	if err1 != nil || err2 != nil {
+		t.Fatal(err1, err2)
+	}
+	if _, err := p.lock(jobKey("backup", udid)); err == nil {
+		t.Fatal("the same device twice")
+	}
+	p.SaveProgress("backup", udid, 0.3, "30%")
+	p.SaveProgress("backup", ipad, 0.7, "70%")
+	per := PerDevice(p, p.LoadConfig())
+	a := per[udid].(M)["jobs"].(M)["backup"].(M)
+	b := per[ipad].(M)["jobs"].(M)["backup"].(M)
+	if a["running"] != true || b["running"] != true || a["progress"].(M)["fraction"] != 0.3 || b["progress"].(M)["fraction"] != 0.7 {
+		t.Fatal(per)
+	}
+	r1()
+	r2()
+}
+
+func TestMigrateStateMovesSingleDeviceFiles(t *testing.T) {
+	p := testPaths(t)
+	_ = writeJSON(filepath.Join(p.State, "last-backup.json"), M{"udid": udid, "ok": true, "time": "2026-10-12T17:33:20-05:00"})
+	_ = writeJSON(filepath.Join(p.State, "last-drive.json"), M{"udid": "bad", "ok": true})
+	MigrateState(p)
+	if !BackupStatus(p, p.LoadConfig(), udid)["last"].(M)["ok"].(bool) {
+		t.Fatal("backup history not migrated")
+	}
+	if _, err := os.Stat(filepath.Join(p.State, "last-backup.json")); err == nil {
+		t.Fatal("old file left")
 	}
 }

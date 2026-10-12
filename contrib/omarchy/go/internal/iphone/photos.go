@@ -85,8 +85,14 @@ var ErrInUse = errors.New("the device folder is in use by an import or a check: 
 
 // Eject is the widget's eject: it refuses while a job reads the camera roll.
 func Eject(run Runner, p Paths, udid string) ([]string, error) {
-	if p.locked("import") || p.locked("safe") {
-		return nil, ErrInUse
+	for _, job := range []string{"import", "safe"} {
+		locks, _ := filepath.Glob(filepath.Join(p.State, job+"-*.lock"))
+		for _, l := range locks {
+			name := strings.TrimSuffix(filepath.Base(l), ".lock")
+			if (udid == "" || name == jobKey(job, udid)) && p.locked(name) {
+				return nil, ErrInUse
+			}
+		}
 	}
 	return Unmount(run, p, udid), nil
 }
@@ -286,7 +292,7 @@ func Import(run Runner, p Paths, udid, class string, progress func(done, total i
 	cfg := p.LoadConfig()
 	dir := Folder(cfg, class)
 	res := ImportResult{Dir: dir}
-	release, err := p.lock("import")
+	release, err := p.lock(jobKey("import", udid))
 	if err != nil {
 		return res, err
 	}
@@ -317,7 +323,7 @@ func Import(run Runner, p Paths, udid, class string, progress func(done, total i
 				res.Failed = len(todo) - res.Imported - res.Already
 				res.Error = "the device was disconnected or its folder released; the rest is imported next time"
 				save()
-				_ = writeJSON(filepath.Join(p.State, "last-import.json"), M{"time": time.Now().Format(time.RFC3339), "udid": udid,
+				_ = writeJSON(p.devFile(udid, "last-import.json"), M{"time": time.Now().Format(time.RFC3339), "udid": udid,
 					"imported": res.Imported, "already": res.Already, "failed": res.Failed, "bytes": res.Bytes, "error": res.Error})
 				return res, errors.New(res.Error)
 			}
@@ -345,7 +351,7 @@ func Import(run Runner, p Paths, udid, class string, progress func(done, total i
 		"pendingBytes": pendingBytes, "time": time.Now().Format(time.RFC3339)})
 	last := M{"time": time.Now().Format(time.RFC3339), "udid": udid, "imported": res.Imported, "already": res.Already,
 		"failed": res.Failed, "bytes": res.Bytes, "pending": res.Failed}
-	_ = writeJSON(filepath.Join(p.State, "last-import.json"), last)
+	_ = writeJSON(p.devFile(udid, "last-import.json"), last)
 	return res, nil
 }
 
@@ -369,19 +375,12 @@ func Scan(run Runner, p Paths, udid string) (M, error) {
 	return r, nil
 }
 
-// PhotoStatus: last import, last scan of each device, whether an import runs now.
-func PhotoStatus(p Paths, cfg Config) M {
-	var last, scans M
-	readJSON(filepath.Join(p.State, "last-import.json"), &last)
-	scans = M{}
-	ents, _ := os.ReadDir(p.State)
-	for _, e := range ents {
-		var s M
-		if e.IsDir() && readJSON(filepath.Join(p.State, e.Name(), "scan.json"), &s) {
-			scans[e.Name()] = s
-		}
-	}
-	return M{"dir": cfg.PhotosDir, "autoImport": cfg.AutoImport, "last": last, "scans": scans, "running": p.locked("import")}
+// PhotoStatus: one device's last import and scan, whether an import runs now.
+func PhotoStatus(p Paths, cfg Config, udid string) M {
+	var last, scan M
+	readJSON(p.devFile(udid, "last-import.json"), &last)
+	readJSON(p.devFile(udid, "scan.json"), &scan)
+	return M{"dir": cfg.PhotosDir, "autoImport": cfg.AutoImport, "last": last, "scan": scan, "running": p.locked(jobKey("import", udid))}
 }
 
 // lock makes sure one import (or backup) runs at a time; the lock holds the pid.

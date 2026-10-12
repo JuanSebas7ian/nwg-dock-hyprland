@@ -170,7 +170,7 @@ func ICloudPhotos(run Runner, root, tmp string) string {
 // Safe runs the whole check for one device and saves it for the widget.
 func Safe(run Runner, p Paths, udid, class string) (SafeReport, error) {
 	cfg := p.LoadConfig()
-	release, err := p.lock("safe")
+	release, err := p.lock(jobKey("safe", udid))
 	if err != nil {
 		return SafeReport{}, err
 	}

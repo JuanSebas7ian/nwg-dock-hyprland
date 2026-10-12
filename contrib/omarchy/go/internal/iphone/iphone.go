@@ -144,26 +144,76 @@ func readJSON(path string, v any) bool {
 // them; they leave their progress in a file the status reads.
 var Jobs = []string{"import", "backup", "drive", "safe"}
 
-func (p Paths) progressPath(job string) string {
-	return filepath.Join(p.State, "progress-"+job+".json")
+// Every job, its lock, progress and history belong to one device (State/<udid>/), so an iPhone and an iPad
+// back up and upload at the same time.
+func (p Paths) devFile(udid, name string) string { return filepath.Join(p.State, udid, name) }
+
+func jobKey(job, udid string) string { return job + "-" + udid }
+
+// SaveProgress records a job's progress for one device (fraction -1 = unknown).
+func (p Paths) SaveProgress(job, udid string, frac float64, line string) {
+	_ = writeJSON(p.devFile(udid, "progress-"+job+".json"), M{"fraction": frac, "line": line, "time": time.Now().Format(time.RFC3339)})
 }
 
-// SaveProgress records a job's progress (fraction -1 = unknown).
-func (p Paths) SaveProgress(job string, frac float64, line string) {
-	_ = writeJSON(p.progressPath(job), M{"fraction": frac, "line": line, "time": time.Now().Format(time.RFC3339)})
-}
-
-// JobsStatus: which jobs run now and how far they are.
-func JobsStatus(p Paths) M {
+// JobsStatus: which jobs of one device run now and how far they are.
+func JobsStatus(p Paths, udid string) M {
 	out := M{}
 	for _, j := range Jobs {
-		running := p.locked(j)
+		running := p.locked(jobKey(j, udid))
 		var progress any // nil (JSON null) unless the job runs
 		var prog M
-		if running && readJSON(p.progressPath(j), &prog) {
+		if running && readJSON(p.devFile(udid, "progress-"+j+".json"), &prog) {
 			progress = prog
+		} else if !running && p.locked(j) && readJSON(filepath.Join(p.State, "progress-"+j+".json"), &prog) {
+			// a job started by the first, single-device version (global lock) is still running
+			running, progress = true, prog
 		}
 		out[j] = M{"running": running, "progress": progress}
+	}
+	return out
+}
+
+// KnownDevices: every device with state here (connected now or not).
+func KnownDevices(p Paths) []string {
+	var out []string
+	ents, _ := os.ReadDir(p.State)
+	for _, e := range ents {
+		if e.IsDir() && udidRe.MatchString(e.Name()) {
+			out = append(out, e.Name())
+		}
+	}
+	return out
+}
+
+// MigrateState moves the first version's single-device files (State/last-*.json) into State/<udid>/.
+func MigrateState(p Paths) {
+	for _, name := range []string{"last-backup.json", "last-drive.json", "last-import.json"} {
+		old := filepath.Join(p.State, name)
+		var rec M
+		if !readJSON(old, &rec) {
+			continue
+		}
+		udid, _ := rec["udid"].(string)
+		if !udidRe.MatchString(udid) {
+			continue
+		}
+		dst := p.devFile(udid, name)
+		if _, err := os.Stat(dst); err != nil {
+			_ = os.MkdirAll(filepath.Dir(dst), 0o755)
+			_ = os.Rename(old, dst)
+		} else {
+			_ = os.Remove(old)
+		}
+	}
+}
+
+// PerDevice is each known device's jobs and history.
+func PerDevice(p Paths, cfg Config) M {
+	out := M{}
+	for _, u := range KnownDevices(p) {
+		var dev Device
+		readJSON(p.devFile(u, "device.json"), &dev) // last known name/model, also when not connected now
+		out[u] = M{"device": dev, "jobs": JobsStatus(p, u), "backup": BackupStatus(p, cfg, u), "drive": DriveStatus(p, cfg, u), "photos": PhotoStatus(p, cfg, u)}
 	}
 	return out
 }
@@ -518,11 +568,11 @@ func KDEAction(run Runner, action, id string) error {
 func Status(run Runner, p Paths, sysClassNet string) M {
 	cfg := p.LoadConfig()
 	devs := ListUDIDs(run)
-	busy := p.locked("backup")
+	MigrateState(p)
 	for i := range devs {
 		cache := filepath.Join(p.State, devs[i].UDID, "device.json")
 		var c Device
-		if busy && readJSON(cache, &c) {
+		if p.locked(jobKey("backup", devs[i].UDID)) && readJSON(cache, &c) {
 			c.Conn = devs[i].Conn
 			devs[i] = c // during a backup the iPhone answers other queries slowly: show the last known details
 			continue
@@ -551,15 +601,13 @@ func Status(run Runner, p Paths, sysClassNet string) M {
 	}
 	return M{
 		"devices":    devs,
-		"photos":     PhotoStatus(p, cfg),
-		"backup":     BackupStatus(p, cfg),
-		"drive":      DriveStatus(p, cfg),
+		"perDevice":  PerDevice(p, cfg),
+		"backupDir":  cfg.BackupDir,
 		"safe":       SafeStatus(p),
 		"tether":     Tether(run, sysClassNet),
 		"airplay":    AirPlay(run, cfg),
 		"kdeconnect": KDEConnect(run),
 		"mounts":     Mounts(p),
-		"jobs":       JobsStatus(p),
 		"gphotos":    GooglePhotosStatus(p, cfg),
 		"config":     cfg,
 	}

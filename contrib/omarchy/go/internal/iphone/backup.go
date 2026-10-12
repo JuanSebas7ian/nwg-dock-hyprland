@@ -65,7 +65,7 @@ func PrepareBackupDir(dir string) error {
 // Backup makes (or updates: idevicebackup2 is incremental) the local backup of one device.
 func Backup(p Paths, udid string, progress func(pct int, line string)) error {
 	cfg := p.LoadConfig()
-	release, err := p.lock("backup")
+	release, err := p.lock(jobKey("backup", udid))
 	if err != nil {
 		return err
 	}
@@ -98,7 +98,7 @@ func Backup(p Paths, udid string, progress func(pct int, line string)) error {
 	if size, e := dirSize(filepath.Join(cfg.BackupDir, udid)); e == nil {
 		rec["bytes"] = size
 	}
-	_ = writeJSON(filepath.Join(p.State, "last-backup.json"), rec)
+	_ = writeJSON(p.devFile(udid, "last-backup.json"), rec)
 	if err != nil {
 		return fmt.Errorf("backup failed: %s", lastLine)
 	}
@@ -116,20 +116,20 @@ func dirSize(dir string) (int64, error) {
 	return n, err
 }
 
-// BackupStatus: the last backup and whether one runs now.
-func BackupStatus(p Paths, cfg Config) M {
+// BackupStatus: one device's last backup and whether one runs now.
+func BackupStatus(p Paths, cfg Config, udid string) M {
 	var last M
-	readJSON(filepath.Join(p.State, "last-backup.json"), &last)
-	return M{"dir": cfg.BackupDir, "autoDays": cfg.AutoBackupDays, "last": last, "running": p.locked("backup")}
+	readJSON(p.devFile(udid, "last-backup.json"), &last)
+	return M{"dir": cfg.BackupDir, "autoDays": cfg.AutoBackupDays, "last": last, "running": p.locked(jobKey("backup", udid))}
 }
 
 // BackupDue says whether the automatic backup should run now.
-func BackupDue(p Paths, cfg Config, now time.Time) bool {
-	if cfg.AutoBackupDays <= 0 || p.locked("backup") {
+func BackupDue(p Paths, cfg Config, udid string, now time.Time) bool {
+	if cfg.AutoBackupDays <= 0 || p.locked(jobKey("backup", udid)) {
 		return false
 	}
 	var last M
-	if !readJSON(filepath.Join(p.State, "last-backup.json"), &last) {
+	if !readJSON(p.devFile(udid, "last-backup.json"), &last) {
 		return true
 	}
 	t, err := time.Parse(time.RFC3339, fmt.Sprint(last["time"]))
@@ -217,7 +217,7 @@ func OnConnect(run Runner, p Paths, d Device) {
 	}
 	cfg := p.LoadConfig()
 	name := deviceLabel(d)
-	if cfg.AutoImport && !p.locked("import") {
+	if cfg.AutoImport && !p.locked(jobKey("import", d.UDID)) {
 		if res, err := Import(run, p, d.UDID, d.Class, nil); err != nil {
 			Notify(name+": no se pudieron importar las fotos", err.Error())
 		} else if res.Imported > 0 || res.Failed > 0 {
@@ -232,7 +232,7 @@ func OnConnect(run Runner, p Paths, d Device) {
 		Notify(name+" conectado", fmt.Sprintf("%d fotos y videos nuevos para importar", s["pending"]))
 		Unmount(run, p, d.UDID)
 	}
-	if BackupDue(p, cfg, time.Now()) {
+	if BackupDue(p, cfg, d.UDID, time.Now()) {
 		Notify(name+": respaldo automático", "Empezó el respaldo del iPhone; no lo desconectes")
 		if err := Backup(p, d.UDID, nil); err != nil {
 			Notify(name+": el respaldo falló", err.Error())
@@ -269,7 +269,7 @@ func TrustedDevice(run Runner, p Paths, udid string) (Device, error) {
 			continue
 		}
 		var c Device
-		if p.locked("backup") && readJSON(filepath.Join(p.State, d.UDID, "device.json"), &c) && c.Trusted {
+		if p.locked(jobKey("backup", d.UDID)) && readJSON(filepath.Join(p.State, d.UDID, "device.json"), &c) && c.Trusted {
 			return c, nil
 		}
 		if d := Describe(run, d); d.Trusted {

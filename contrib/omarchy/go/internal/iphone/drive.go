@@ -91,7 +91,7 @@ func DriveUpload(p Paths, udid string, progress func(frac float64, line string))
 	if err != nil {
 		return err
 	}
-	release, err := p.lock("drive")
+	release, err := p.lock(jobKey("drive", udid))
 	if err != nil {
 		return err
 	}
@@ -116,7 +116,7 @@ func DriveUpload(p Paths, udid string, progress func(frac float64, line string))
 	}
 	if err != nil || summary == nil {
 		rec["error"] = lastErr
-		_ = writeJSON(filepath.Join(p.State, "last-drive.json"), rec)
+		_ = writeJSON(p.devFile(udid, "last-drive.json"), rec)
 		return fmt.Errorf("upload to Google Drive failed: %s", lastErr)
 	}
 	// keep the 3 newest uploads of this device (pruning is omarchy-backup's weekly job)
@@ -125,13 +125,13 @@ func DriveUpload(p Paths, udid string, progress func(frac float64, line string))
 	if b, err := forget.CombinedOutput(); err != nil {
 		rec["warning"] = "old uploads not trimmed: " + strings.TrimSpace(string(b))
 	}
-	_ = writeJSON(filepath.Join(p.State, "last-drive.json"), rec)
+	_ = writeJSON(p.devFile(udid, "last-drive.json"), rec)
 	return nil
 }
 
-// DriveStatus: the last upload and whether one runs now.
-func DriveStatus(p Paths, cfg Config) M {
+// DriveStatus: one device's last upload and whether one runs now.
+func DriveStatus(p Paths, cfg Config, udid string) M {
 	var last M
-	readJSON(filepath.Join(p.State, "last-drive.json"), &last)
-	return M{"enabled": cfg.DriveBackup, "last": last, "running": p.locked("drive")}
+	readJSON(p.devFile(udid, "last-drive.json"), &last)
+	return M{"enabled": cfg.DriveBackup, "last": last, "running": p.locked(jobKey("drive", udid))}
 }

@@ -28,20 +28,40 @@ Panel {
   readonly property var phone: devices.length > 0 ? devices[Math.min(devIndex, devices.length - 1)] : null
   readonly property bool trusted: !!phone && phone.trusted
   readonly property string kind: phone && phone.class === "iPad" ? "iPad" : "iPhone"
-  readonly property var photos: info ? info.photos : null
-  readonly property var backup: info ? info.backup : null
-  readonly property var drive: info ? info.drive : null
+  readonly property var per: info && info.perDevice ? info.perDevice : ({})
+  readonly property var perPhone: phone && per[phone.udid] ? per[phone.udid] : null
+  readonly property var photos: perPhone ? perPhone.photos : null
+  readonly property var backup: perPhone ? perPhone.backup : null
+  readonly property var drive: perPhone ? perPhone.drive : null
+  // every device with history (connected or not), connected ones first
+  readonly property var knownUdids: {
+    var ids = devices.map(function(d) { return d.udid })
+    for (var u in per) if (ids.indexOf(u) < 0) ids.push(u)
+    return ids
+  }
+  function connected(udid) { return devices.some(function(d) { return d.udid === udid && d.trusted }) }
+  function devLabel(udid) {
+    var d = devices.filter(function(x) { return x.udid === udid })[0] || (per[udid] ? per[udid].device : null)
+    return d && d.name ? d.name + (d.model ? " · " + d.model : "") : udid.slice(0, 13)
+  }
+  function devRunning(udid, job) { var j = per[udid] && per[udid].jobs ? per[udid].jobs[job] : null; return !!(j && j.running) }
   readonly property var gphotos: info ? info.gphotos : null
   readonly property var gpThis: gphotos ? gphotos[kind.toLowerCase()] : null
   readonly property var cfg: info ? info.config : null
   readonly property var kde: info ? info.kdeconnect : null
   readonly property var kdeDevices: kde ? (kde.devices || []) : []
-  readonly property var jobs: info ? (info.jobs || {}) : {}
-  readonly property var scan: phone && photos && photos.scans ? photos.scans[phone.udid] : null
+  readonly property var jobs: perPhone ? (perPhone.jobs || {}) : ({})
+  readonly property var scan: photos ? photos.scan : null
   readonly property var safe: phone && info && info.safe ? info.safe[phone.udid] : null
   readonly property var runningJobs: ["import", "backup", "drive", "safe"].filter(function(j) { return jobs[j] && jobs[j].running })
   readonly property bool jobRunning: runningJobs.length > 0
-  readonly property var mainJob: jobRunning ? jobs[runningJobs[0]] : null
+  // jobs of every device (the bar icon and the list above the tabs)
+  readonly property var allRunning: {
+    var out = []
+    for (var u in per) for (var j in (per[u].jobs || {})) if (per[u].jobs[j].running) out.push({ udid: u, job: j, progress: per[u].jobs[j].progress })
+    return out
+  }
+  readonly property var mainJob: allRunning.length > 0 ? allRunning[0] : null
   readonly property real jobFraction: mainJob && mainJob.progress ? mainJob.progress.fraction : -1
   readonly property var jobNames: ({ "import": "Importing photos", "backup": "Backing up", "drive": "Uploading the backup to Google Drive", "safe": "Checking what is safe to delete" })
   property var wasRunning: []
@@ -93,6 +113,17 @@ Panel {
   }
   function isRunning(j) { return !!(jobs[j] && jobs[j].running) }
   function startJob(job) { act(["start", job, phone ? phone.udid : ""], "") }
+  function startFor(job, udid) { act(["start", job, udid], "") }
+  // one start at a time through actionProcess: queue them
+  property var startQueue: []
+  function backupAll() {
+    startQueue = devices.filter(function(d) { return d.trusted && !devRunning(d.udid, "backup") }).map(function(d) { return d.udid })
+    queueTimer.start()
+  }
+  Timer { id: queueTimer; interval: 700; repeat: true; onTriggered: {
+    if (actionProcess.running) return
+    if (root.startQueue.length === 0) { stop(); return }
+    var q = root.startQueue.slice(); var u = q.shift(); root.startQueue = q; root.startFor("backup", u) } }
   function terminal(cmd) { if (bar) bar.run("uwsm-app -- xdg-terminal-exec bash -c " + Util.shellQuote(cmd + "; read -p 'Enter to close'")); root.close() }
   function openPath(p) { if (bar) bar.run("xdg-open " + Util.shellQuote(p)); root.close() }
   function loadApps() { if (trusted && !appsProcess.running) { appsLoading = true; appsProcess.command = [ctl, "apps", phone.udid]; appsProcess.running = true } }
@@ -157,12 +188,12 @@ Panel {
     // grows with the text, see the BarIconButton trap in omarchy.md
     fixedWidth: vertical ? -1 : Math.max(slotSize, Math.ceil(glyphPaintedWidth) + Style.space(10))
     readonly property string glyph: root.kind === "iPad" ? "󰓶" : "󰄜"
-    text: root.jobRunning ? glyph + " " + (root.jobFraction >= 0 ? Math.round(root.jobFraction * 100) + "%" : "…")
+    text: root.allRunning.length > 0 ? glyph + " " + (root.jobFraction >= 0 ? Math.round(root.jobFraction * 100) + "%" : "…") + (root.allRunning.length > 1 ? " ×" + root.allRunning.length : "")
       : root.trusted && root.phone.battery ? glyph + " " + root.phone.battery.level + "%" : glyph
     dimmed: !root.phone
     tooltipText: !root.phone ? "iPhone / iPad: not connected" : !root.trusted ? root.kind + ": tap Trust on the device"
       : (root.phone.name || root.kind) + (root.phone.battery ? " · " + root.phone.battery.level + "%" + (root.phone.battery.charging ? " charging" : "") : "")
-        + (root.jobRunning ? " · " + root.jobNames[root.runningJobs[0]] : "")
+        + (root.allRunning.length > 0 ? " · " + root.allRunning.map(function(r) { return root.jobNames[r.job] + " (" + root.devLabel(r.udid) + ")" }).join(", ") : "")
     onPressed: function(code) {
       if (code === Qt.RightButton && root.trusted && !root.jobRunning) root.startJob("import")
       else root.toggle()
@@ -258,15 +289,15 @@ Panel {
           }
 
           Repeater {
-            model: root.runningJobs
+            model: root.allRunning
             Column {
               required property var modelData
-              readonly property var job: root.jobs[modelData]
+              readonly property var job: modelData
               width: column.width
               spacing: Style.space(4)
               Text {
                 width: parent.width
-                text: root.jobNames[modelData] + (job.progress && job.progress.line ? " · " + job.progress.line : "")
+                text: root.jobNames[modelData.job] + (root.knownUdids.length > 1 ? " · " + root.devLabel(modelData.udid) : "") + (job.progress && job.progress.line ? " · " + job.progress.line : "")
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -478,35 +509,53 @@ Panel {
             spacing: Style.space(8)
             Text {
               width: parent.width
-              text: "A full backup like Finder makes, in " + (root.backup ? root.backup.dir : "~/iPhoneBackup") + " (its own btrfs subvolume), then uploaded to Google Drive encrypted (restic, same password as the PC backup). The first one takes long; later ones only copy changes."
+              text: "A full backup like Finder makes, in " + (root.info ? root.info.backupDir : "~/iPhoneBackup") + " (its own btrfs subvolume), then uploaded to Google Drive encrypted (restic, same password as the PC backup). The first one takes long; later ones only copy changes."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
-            InfoPair {
-              label: "On this PC"
-              value: root.backup && root.backup.last ? root.ago(root.backup.last.time) + (root.backup.last.bytes ? " · " + root.fmtBytes(root.backup.last.bytes) : "")
-                + (root.backup.last.ok ? "" : " · FAILED: " + (root.backup.last.error || "")) : "never"
+            Repeater {
+              model: root.knownUdids
+              Column {
+                required property var modelData
+                readonly property string udid: modelData
+                readonly property var pd: root.per[udid] || ({})
+                readonly property bool online: root.connected(udid)
+                readonly property bool busy: root.devRunning(udid, "backup") || root.devRunning(udid, "drive")
+                width: column.width
+                spacing: Style.space(4)
+                PanelSectionHeader { text: root.devLabel(udid).toUpperCase() + (online ? "" : " · NOT CONNECTED"); foreground: root.foreground; fontFamily: root.fontFamily }
+                InfoPair {
+                  label: "On this PC"
+                  value: pd.backup && pd.backup.last ? root.ago(pd.backup.last.time) + (pd.backup.last.bytes ? " · " + root.fmtBytes(pd.backup.last.bytes) : "")
+                    + (pd.backup.last.ok ? "" : " · FAILED: " + (pd.backup.last.error || "")) : "never"
+                }
+                InfoPair {
+                  label: "In Google Drive"
+                  value: pd.drive && pd.drive.last ? root.ago(pd.drive.last.time) + (pd.drive.last.ok ? " · " + root.fmtBytes(pd.drive.last.added) + " new of " + root.fmtBytes(pd.drive.last.total) : " · FAILED: " + (pd.drive.last.error || "")) : "never"
+                }
+                Flow {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  Chip { label: "Back up" + (root.cfg && root.cfg.driveBackup ? " + Google Drive" : ""); visible: online && !busy; onClicked: root.startFor("backup", udid) }
+                  Chip { label: "Upload to Google Drive"; visible: !busy && !!pd.backup && !!pd.backup.last && pd.backup.last.ok; onClicked: root.startFor("drive", udid) }
+                  Text { visible: busy; text: root.devRunning(udid, "backup") ? "backing up…" : "uploading to Google Drive…"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+                }
+              }
             }
-            InfoPair {
-              label: "In Google Drive"
-              value: root.drive && root.drive.last ? root.ago(root.drive.last.time) + (root.drive.last.ok ? " · " + root.fmtBytes(root.drive.last.added) + " new of " + root.fmtBytes(root.drive.last.total) : " · FAILED: " + (root.drive.last.error || "")) : "never"
-            }
+            Chip { label: "Back up all connected devices at once"; visible: root.devices.filter(function(d) { return d.trusted }).length > 1; onClicked: root.backupAll() }
             InfoPair {
               visible: root.trusted
-              label: "Encryption"
+              label: "Encryption (" + (root.phone ? root.phone.name : "") + ")"
               value: root.trusted && root.phone.backupEncrypted !== undefined ? (root.phone.backupEncrypted ? "on (passwords and Health included)" : "off (passwords and Health left out)") : "—"
             }
             Flow {
               width: parent.width
               spacing: Style.space(6)
-              Chip { label: "Back up now"; visible: root.trusted && !root.isRunning("backup") && !root.isRunning("drive"); onClicked: root.startJob("backup") }
-              Chip { label: "Upload to Google Drive"; visible: root.trusted && !root.isRunning("backup") && !root.isRunning("drive") && !!root.backup && !!root.backup.last && root.backup.last.ok
-                onClicked: root.startJob("drive") }
               Chip { label: root.trusted && root.phone.backupEncrypted ? "Turn encryption off" : "Turn encryption on"; visible: root.trusted && !root.isRunning("backup") && !root.isRunning("import")
                 onClicked: root.terminal(root.ctl + " encryption " + (root.phone.backupEncrypted ? "off" : "on") + " " + root.phone.udid) }
-              Chip { label: "Open folder"; onClicked: root.openPath(root.backup ? root.backup.dir : "") }
+              Chip { label: "Open folder"; onClicked: root.openPath(root.info ? root.info.backupDir : "") }
             }
             PanelSeparator { foreground: root.foreground }
             RowLayout {

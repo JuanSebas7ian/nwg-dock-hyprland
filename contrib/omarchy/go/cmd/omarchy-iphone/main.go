@@ -73,10 +73,8 @@ func main() {
 			fail(fmt.Errorf("start import|backup|drive|safe [udid]"))
 		}
 		exe, _ := os.Executable()
-		a := []string{"--user", "--collect", "--quiet", "--unit=omarchy-iphone-" + job + "-" + time.Now().Format("150405"), exe, job}
-		if arg(1) != "" {
-			a = append(a, arg(1))
-		}
+		u := device(1) // resolved now: the unit name carries the device, so two devices run side by side
+		a := []string{"--user", "--collect", "--quiet", "--unit=omarchy-iphone-" + job + "-" + u[len(u)-8:] + "-" + time.Now().Format("150405"), exe, job, u}
 		if b, err := exec.Command("systemd-run", a...).CombinedOutput(); err != nil {
 			fail(fmt.Errorf("could not start %s: %s", job, b))
 		}
@@ -111,7 +109,7 @@ func main() {
 			} else if done == 0 && name == "" {
 				line = "nothing new"
 			}
-			p.SaveProgress("import", frac, line)
+			p.SaveProgress("import", d.UDID, frac, line)
 		})
 		fail(err)
 		jsonout.OK(map[string]any{"result": res})
@@ -141,33 +139,34 @@ func main() {
 		fail(err)
 		jsonout.OK(map[string]any{"released": released})
 	case "backup":
-		err := iphone.Backup(p, device(0), func(pct int, line string) {
+		u := device(0)
+		err := iphone.Backup(p, u, func(pct int, line string) {
 			jsonout.Print(map[string]any{"progress": true, "pct": pct, "line": line})
 			frac := -1.0
 			if pct >= 0 {
 				frac = float64(pct) / 100
 			}
-			p.SaveProgress("backup", frac, line)
+			p.SaveProgress("backup", u, frac, line)
 		})
 		fail(err)
 		if p.LoadConfig().DriveBackup {
-			p.SaveProgress("drive", -1, "starting the upload to Google Drive…")
-			if err := iphone.DriveUpload(p, device(0), func(frac float64, line string) { p.SaveProgress("drive", frac, line) }); err != nil {
+			p.SaveProgress("drive", u, -1, "starting the upload to Google Drive…")
+			if err := iphone.DriveUpload(p, u, func(frac float64, line string) { p.SaveProgress("drive", u, frac, line) }); err != nil {
 				iphone.Notify("Respaldo local listo; la subida a Google Drive falló", err.Error())
 				fail(err)
 			}
 		}
 		jsonout.OK(nil)
 	case "drive":
-		err := iphone.DriveUpload(p, device(0), func(frac float64, line string) {
-			jsonout.Print(map[string]any{"progress": true, "pct": int(frac * 100), "line": line})
-			p.SaveProgress("drive", frac, line)
+		u := device(0)
+		err := iphone.DriveUpload(p, u, func(frac float64, line string) {
+			p.SaveProgress("drive", u, frac, line)
 		})
 		fail(err)
 		jsonout.OK(nil)
 	case "safe":
 		d := dev(0)
-		p.SaveProgress("safe", -1, "comparing the camera roll with this PC and Google Photos…")
+		p.SaveProgress("safe", d.UDID, -1, "comparing the camera roll with this PC and Google Photos…")
 		r, err := iphone.Safe(iphone.ExecRunner(10*time.Minute), p, d.UDID, d.Class)
 		fail(err)
 		jsonout.OK(map[string]any{"report": r})
