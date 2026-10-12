@@ -82,10 +82,10 @@ fi
 # ------------------------------------------------------------------ P5
 if [[ ${SKIP_UPDATE:-0} != 1 ]]; then
   say "-- P5 Actualizaciones"
-  "$OMARCHY_DIR/drivers/compat.py" preflight 2>&1 | tee -a "$LOG"
+  "$OMARCHY_DIR/go/tool.sh" omarchy-compat preflight 2>&1 | tee -a "$LOG"
   pre=${PIPESTATUS[0]}
   if ((pre >= 2)); then
-    fail "compat.py preflight = $pre: la actualización rompería algo; no actualizo"
+    fail "omarchy-compat preflight = $pre: la actualización rompería algo; no actualizo"
   else
     say ">>> omarchy update: confirma lo que pregunte. Si ofrece reiniciar, puedes decir que no (no hay kernel ni drivers)."
     omarchy update
@@ -96,7 +96,7 @@ fi
 
 # ------------------------------------------------------------------ comprobaciones
 say "-- Comprobaciones"
-"$OMARCHY_DIR/drivers/compat.py" post >>"$LOG" 2>&1 && ok "compat.py post" || fail "compat.py post (ver arriba)"
+OMARCHY_KNOWN_GAPS="$OMARCHY_DIR/drivers/known-gaps.json" "$OMARCHY_DIR/go/tool.sh" omarchy-compat post >>"$LOG" 2>&1 && ok "omarchy-compat post" || fail "omarchy-compat post (ver arriba)"
 omarchy-hwcheck >>"$LOG" 2>&1; hw=$?
 ((hw <= 1)) && ok "omarchy-hwcheck = $hw" || fail "omarchy-hwcheck = $hw"
 smoke=$(mktemp)

@@ -12,13 +12,13 @@ equipo `install.sh` solo se ejecuta con `--check`/`--dry-run`; el gancho de pacm
 ./install.sh --dry-run             # lo que haría una reinstalación
 ./install.sh [--groups nvidia,cuda] --wait   # real (terminal visible, sudo): snapshot pre/post, paquetes, /etc, DKMS, servicios
 ./install.sh --hook-only --wait    # solo el gancho de pacman
-python3 compat.py preflight        # ¿rompen drivers u otras apps las actualizaciones pendientes? (checkupdates)
-python3 compat.py post             # ¿funciona todo ahora? (driver, DKMS, nvidia-smi, cuInit, Vulkan, VA-API, ollama, Hyprland)
+../go/tool.sh omarchy-compat preflight        # ¿rompen drivers u otras apps las actualizaciones pendientes? (checkupdates)
+../go/tool.sh omarchy-compat post             # ¿funciona todo ahora? (driver, DKMS, nvidia-smi, cuInit, Vulkan, VA-API, ollama, Hyprland)
 ./smoke-test.sh [--json]           # prueba sin root del módulo
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 ```
 
-`compat.py`: salida `OK|WARN|FAIL|SKIP <id> <texto>`; código 0 todo bien, 1 avisos, 2 rompería algo, 3 no se pudo evaluar (sin red / `checkupdates` falló, o uso incorrecto). Reglas C01-C14 en `PLAN.md`.
+`omarchy-compat`: salida `OK|WARN|FAIL|SKIP <id> <texto>`; código 0 todo bien, 1 avisos, 2 rompería algo, 3 no se pudo evaluar (sin red / `checkupdates` falló, o uso incorrecto). Reglas C01-C14 en `PLAN.md`.
 
 ## Reinstalar con seguridad
 
@@ -42,7 +42,7 @@ Sin versiones: Arch es rolling; las versiones exactas quedan en `drivers-state.j
 ## Gancho de pacman
 
 `pacman-hook/90-omarchy-compat.hook` (`PreTransaction`, `NeedsTargets`, sin `AbortOnFail`) llama a `compat-hook`, que corre
-`compat.py hook` con `timeout 5` y sale siempre con 0. Imprime `[omarchy-compat] ...` con los avisos y un resumen. Limitación:
+`omarchy-compat hook` con `timeout 5` y sale siempre con 0. Imprime `[omarchy-compat] ...` con los avisos y un resumen. Limitación:
 pacman pasa solo nombres, así que el gancho solo se activa para `Install`/`Upgrade` (no para `Remove`). Si `pacman -Si` no responde imprime "no se pudo evaluar".
 
 ## Equipo nuevo
@@ -75,7 +75,7 @@ luego `contrib/omarchy/drivers/install.sh --wait` y reiniciar.
 
 ## Deshacer
 
-`sudo rm /etc/pacman.d/hooks/90-omarchy-compat.hook /usr/local/lib/omarchy/compat-hook /usr/local/lib/omarchy/compat.py`.
+`sudo rm /etc/pacman.d/hooks/90-omarchy-compat.hook /usr/local/lib/omarchy/compat-hook /usr/local/lib/omarchy/omarchy-compat /usr/local/lib/omarchy/known-gaps.json`.
 Una reinstalación real deja `<archivo>.bak.<fecha>` junto a cada archivo de `/etc` que reemplaza, y el snapshot `pre` en Limine.
 
 ## Bluetooth encendido al arrancar: `bt-autopower`

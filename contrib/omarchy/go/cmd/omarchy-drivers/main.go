@@ -9,9 +9,9 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"omarchy/internal/compat"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"omarchy/internal/drivers"
@@ -38,23 +38,13 @@ func ask(q string) bool {
 	return line == "s" || line == "si" || line == "sí" || line == "y" || line == "yes"
 }
 
-func compatScript() string {
-	home, _ := os.UserHomeDir()
-	for _, p := range []string{filepath.Join(home, "src/nwg-dock-hyprland-dnd/contrib/omarchy/drivers/compat.py"), "/usr/local/lib/omarchy/compat.py"} {
-		if _, err := os.Stat(p); err == nil {
-			return p
-		}
-	}
-	return ""
-}
-
 // update: Arch does not support updating only some packages (a partial
 // upgrade can leave the NVIDIA module built for the wrong kernel), so
 // drivers are updated with the whole system, after the compatibility check.
 func update() int {
-	fmt.Println("== 1/3 Compatibility check (compat.py preflight): what this update would change for the drivers")
-	if c := compatScript(); c != "" {
-		code := run("python3", c, "preflight")
+	fmt.Println("== 1/3 Compatibility check (omarchy-compat preflight): what this update would change for the drivers")
+	{
+		code := compat.Preflight(nil, false, func(s string) { fmt.Println(s) }, func(s string) { fmt.Println(s) })
 		switch code {
 		case 0:
 			fmt.Println("   OK: nothing in this update breaks the drivers.")
@@ -66,8 +56,6 @@ func update() int {
 		default:
 			fmt.Println("   Warnings above (exit", code, ").")
 		}
-	} else {
-		fmt.Println("   compat.py not found: skipping the check")
 	}
 	if !ask("== 2/3 Run `omarchy update` now (whole system, asks for your password)?") {
 		return 1

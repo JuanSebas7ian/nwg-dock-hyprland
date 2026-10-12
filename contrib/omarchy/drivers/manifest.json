@@ -240,8 +240,8 @@
       "mode": "755"
     },
     {
-      "src": "compat.py",
-      "dest": "/usr/local/lib/omarchy/compat.py",
+      "src": "go:omarchy-compat",
+      "dest": "/usr/local/lib/omarchy/omarchy-compat",
       "mode": "755"
     },
     {
@@ -266,5 +266,8 @@
       "note": "enciende el Bluetooth MT7925 cuando aparece (AutoEnable de bluetoothd falla por su arranque lento de ~17 s) y lo deja visible y emparejable; respeta el apagado de Omarchy (rfkill); usuario, sin root; lo ejecuta omarchy-restore full",
       "path": "contrib/omarchy/drivers/bt-autopower/install.sh"
     }
+  ],
+  "hook_obsolete": [
+    "/usr/local/lib/omarchy/compat.py"
   ]
 }

@@ -157,17 +157,19 @@ if want DRIVERS01; then
     else emit FAIL DRIVERS01 "drivers: install.sh --check: $(grep -m1 -E '^(FALTA|DIFIERE)' <<<"$dchk")"; fi
 fi
 if want DRIVERS02; then
-    dout=$(python3 "$DRIVERS_DIR/compat.py" post 2>&1); drc=$?
-    if [ "$drc" -ge 2 ]; then emit FAIL DRIVERS02 "drivers: compat.py post: $(grep -m1 '^FAIL' <<<"$dout")"
-    elif [ "$drc" -eq 1 ]; then emit WARN DRIVERS02 "drivers: compat.py post con avisos: $(grep -m1 '^WARN' <<<"$dout")"
-    else emit PASS DRIVERS02 "drivers: compat.py post sin fallos"; fi
+    # shellcheck disable=SC2086
+    dout=$(OMARCHY_KNOWN_GAPS="$DRIVERS_DIR/known-gaps.json" ${COMPAT_CMD:-"$DRIVERS_DIR/../go/tool.sh" omarchy-compat post} 2>&1); drc=$?
+    if [ "$drc" -ge 2 ]; then emit FAIL DRIVERS02 "drivers: omarchy-compat post: $(grep -m1 '^FAIL' <<<"$dout")"
+    elif [ "$drc" -eq 1 ]; then emit WARN DRIVERS02 "drivers: omarchy-compat post con avisos: $(grep -m1 '^WARN' <<<"$dout")"
+    else emit PASS DRIVERS02 "drivers: omarchy-compat post sin fallos"; fi
 fi
 
 if want HOOK01; then  # not part of the reward: informational only
     bad=""
     [ -f "$HOOK_ETC/90-omarchy-compat.hook" ] && cmp -s "$DRIVERS_DIR/pacman-hook/90-omarchy-compat.hook" "$HOOK_ETC/90-omarchy-compat.hook" || bad="$bad hook"
     [ -x "$HOOK_LIB/compat-hook" ] && cmp -s "$DRIVERS_DIR/pacman-hook/compat-hook" "$HOOK_LIB/compat-hook" || bad="$bad compat-hook"
-    [ -x "$HOOK_LIB/compat.py" ] && cmp -s "$DRIVERS_DIR/compat.py" "$HOOK_LIB/compat.py" || bad="$bad compat.py"
+    bin=${COMPAT_BIN:-$("$DRIVERS_DIR/../go/tool.sh" --build omarchy-compat 2>/dev/null)}
+    [ -x "$HOOK_LIB/omarchy-compat" ] && cmp -s "$bin" "$HOOK_LIB/omarchy-compat" || bad="$bad omarchy-compat"
     if [ -z "$bad" ]; then emit PASS HOOK01 "drivers: gancho de pacman instalado y al día"
     else emit WARN HOOK01 "drivers: gancho de pacman ausente o desactualizado:$bad"; fi
 fi

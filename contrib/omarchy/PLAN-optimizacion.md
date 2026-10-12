@@ -64,7 +64,7 @@ Nada se cambia sin esto. Si algo sale mal, se vuelve aquí.
 ### P0.3 Línea base
 - `systemd-analyze` (tiempos de firmware, Limine, kernel, servicios).
 - `omarchy-hwcheck` (debe salir 0) y `omarchy-hwcheck diff`.
-- `contrib/omarchy/drivers/compat.py post` y `contrib/omarchy/maintenance/smoke-test.sh` + `go/tool.sh omarchy-reward`.
+- `contrib/omarchy/drivers/go/tool.sh omarchy-compat post` y `contrib/omarchy/maintenance/smoke-test.sh` + `go/tool.sh omarchy-reward`.
 - Se anota en la bitácora para comparar al final (P7).
 
 ### P0.4 Snapshot de root
@@ -141,7 +141,7 @@ Script único: `contrib/omarchy/plan/apply-system.sh` (pide la contraseña una v
 - **Antes:** `contrib/omarchy/drivers/compat.py preflight` (0 = sin riesgos conocidos).
 - **Actualizar:** `omarchy update` en una terminal (el usuario confirma). El gancho de pacman `[omarchy-compat]` avisa
   de incompatibilidades; el de `omarchy-hwcheck` valida NVIDIA antes de ofrecer el reinicio.
-- **Después:** `compat.py post`, `omarchy-hwcheck`, `smoke-test.sh` + `go/tool.sh omarchy-reward` (estable ≥ 90).
+- **Después:** `go/tool.sh omarchy-compat post`, `omarchy-hwcheck`, `smoke-test.sh` + `go/tool.sh omarchy-reward` (estable ≥ 90).
 - **Deshacer:** el snapshot de P0.4 desde Limine (y `omarchy snapshot restore` para fijarlo), o
   `sudo pacman -U /var/cache/pacman/pkg/<paquete-versión-anterior>.pkg.tar.zst`.
 

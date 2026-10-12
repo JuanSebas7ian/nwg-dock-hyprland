@@ -33,22 +33,13 @@ static int nv_putils(void *h, nv_putil *a, unsigned *c, unsigned long long since
 	return f ? f(h, a, c, since) : -1;
 }
 
-static void *cu;
-static int cu_init(void) {
-	cu = dlopen("libcuda.so.1", RTLD_NOW);
-	if (!cu) return -1000;
-	int (*f)(unsigned) = dlsym(cu, "cuInit");
-	return f ? f(0) : -1001;
-}
-static int cu_i(const char *n, int *o) { int (*f)(int*) = dlsym(cu, n); return f ? f(o) : -1; }
-static int cu_dev(int *d, int i) { int (*f)(int*, int) = dlsym(cu, "cuDeviceGet"); return f ? f(d, i) : -1; }
-static int cu_name(char *b, int n, int d) { int (*f)(char*, int, int) = dlsym(cu, "cuDeviceGetName"); return f ? f(b, n, d) : -1; }
-static int cu_attr(int *o, int a, int d) { int (*f)(int*, int, int) = dlsym(cu, "cuDeviceGetAttribute"); return f ? f(o, a, d) : -1; }
 */
 import "C"
 
 import (
 	"fmt"
+
+	cudalib "omarchy/internal/cuda"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -238,35 +229,4 @@ func (g *Nvml) Snapshot(withProcs bool) []M {
 
 // CudaProbe checks CUDA through libcuda. Run it in a short-lived process
 // (omarchy-hardwared cuda-probe) so the daemon never keeps a CUDA context.
-func CudaProbe() M {
-	info := M{"works": false}
-	rc := C.cu_init()
-	if rc == -1000 {
-		info["error"] = "libcuda not available (libcuda.so.1: cannot open shared object file)"
-		return info
-	}
-	if rc != 0 {
-		info["error"] = fmt.Sprintf("cuInit failed (%d)", int(rc))
-		return info
-	}
-	var v, n C.int
-	cv, cc := cs("cuDriverGetVersion"), cs("cuDeviceGetCount")
-	C.cu_i(cv, &v)
-	C.cu_i(cc, &n)
-	C.free(unsafe.Pointer(cv))
-	C.free(unsafe.Pointer(cc))
-	info["driverCuda"] = fmt.Sprintf("%d.%d", int(v)/1000, (int(v)%1000)/10)
-	devices := []M{}
-	for i := 0; i < int(n); i++ {
-		var d, ma, mi C.int
-		C.cu_dev(&d, C.int(i))
-		var buf [100]C.char
-		C.cu_name(&buf[0], 100, d)
-		C.cu_attr(&ma, 75, d)
-		C.cu_attr(&mi, 76, d)
-		devices = append(devices, M{"name": C.GoString(&buf[0]), "cc": fmt.Sprintf("%d.%d", int(ma), int(mi))})
-	}
-	info["devices"] = devices
-	info["works"] = n > 0
-	return info
-}
+func CudaProbe() M { return cudalib.Probe() }

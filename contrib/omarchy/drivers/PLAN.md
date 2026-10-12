@@ -34,14 +34,14 @@ pacman** que solo imprime avisos.
 | `manifest.json` | Declarativo: `groups` → `{repo: [...], aur: [...]}`, `etc_files` (ruta destino → copia en `etc/` del repo, modo, dueño), `services` (system/user), `dkms` (módulos esperados), `omarchy_owned` (solo verificar). Sin versiones fijadas (Arch es rolling); las versiones exactas van en el manifiesto de estado de cada snapshot estable |
 | `etc/` | Copias de los `/etc` propios (no los de Omarchy). Sin secretos |
 | `capture.sh` | Sin root. Regenera `manifest.json` (preservando la estructura) y `etc/` desde el sistema; muestra el diff; nunca escribe fuera del repo. `--state <dir>` escribe además el estado con versiones exactas (`drivers-state.json`: paquetes y versiones, DKMS, kernel, driver cargado, CUDA, `nvidia-smi`, `/proc/cmdline`, BIOS) — lo llama `../maintenance/stable-snapshot.sh` |
-| `install.sh` | (Re)instala desde el manifiesto, idempotente. `--check` (sin root): lista lo que falta o difiere (paquetes, `etc`, servicios, DKMS) y sale 0 si no falta nada. `--dry-run`: lo que haría. Real (root, terminal visible): snapshot `pre` (`-c number`), `pacman -S --needed` por grupos, AUR con `omarchy pkg aur add` (o `yay`/`paru` si existe), copia de `etc` con respaldo `.bak.<fecha>` **solo si difiere**, `dkms autoinstall` si falta un módulo, `limine-update` solo si cambió algún `limine-entry-tool.d`, `mkinitcpio -P` solo si cambió `mkinitcpio.conf.d` o `modprobe.d`, habilitar servicios, snapshot `post`, y al final `compat.py post`. `--groups nvidia,cuda` para grupos sueltos. Log + `exit=N` |
-| `compat.py` | Validador, Python stdlib. `preflight`: lee las actualizaciones pendientes con `checkupdates` (sin root, base temporal; `--from-file` para pruebas) y aplica las reglas de abajo sobre el estado **final** (versión instalada o la nueva). `post`: comprueba que todo funciona ahora. `--json`. Salida 0 OK, 1 avisos, 2 rompería algo |
-| `pacman-hook/90-omarchy-compat.hook` + `compat-hook` | Gancho `PreTransaction` (`Operation = Upgrade/Install/Remove`, `Target = *`, `NeedsTargets`, **sin `AbortOnFail`**): llama `compat.py hook` con los objetivos por stdin; imprime avisos en la salida de pacman; tiempo máximo 5 s; si algo falla, sale 0 en silencio. Se instala en `/etc/pacman.d/hooks/` y `/usr/local/lib/omarchy/` |
-| `smoke-test.sh` | Sin root: `install.sh --check` limpio, `compat.py post` sin FAIL, gancho instalado y ejecutable, `etc/` del repo igual al sistema |
-| `tests/` | `unittest`: reglas de `compat.py` con escenarios simulados (cada regla con un caso OK y uno que rompe), `install.sh --check/--dry-run` con `ROOT=` falso y binarios simulados en `PATH` (pacman, systemctl, dkms), `capture.sh` determinista (dos ejecuciones = mismo resultado), y el gancho: nunca devuelve ≠ 0 ni tarda > 5 s |
+| `install.sh` | (Re)instala desde el manifiesto, idempotente. `--check` (sin root): lista lo que falta o difiere (paquetes, `etc`, servicios, DKMS) y sale 0 si no falta nada. `--dry-run`: lo que haría. Real (root, terminal visible): snapshot `pre` (`-c number`), `pacman -S --needed` por grupos, AUR con `omarchy pkg aur add` (o `yay`/`paru` si existe), copia de `etc` con respaldo `.bak.<fecha>` **solo si difiere**, `dkms autoinstall` si falta un módulo, `limine-update` solo si cambió algún `limine-entry-tool.d`, `mkinitcpio -P` solo si cambió `mkinitcpio.conf.d` o `modprobe.d`, habilitar servicios, snapshot `post`, y al final `omarchy-compat post`. `--groups nvidia,cuda` para grupos sueltos. Log + `exit=N` |
+| `omarchy-compat` | Validador, Python stdlib. `preflight`: lee las actualizaciones pendientes con `checkupdates` (sin root, base temporal; `--from-file` para pruebas) y aplica las reglas de abajo sobre el estado **final** (versión instalada o la nueva). `post`: comprueba que todo funciona ahora. `--json`. Salida 0 OK, 1 avisos, 2 rompería algo |
+| `pacman-hook/90-omarchy-compat.hook` + `compat-hook` | Gancho `PreTransaction` (`Operation = Upgrade/Install/Remove`, `Target = *`, `NeedsTargets`, **sin `AbortOnFail`**): llama `omarchy-compat hook` con los objetivos por stdin; imprime avisos en la salida de pacman; tiempo máximo 5 s; si algo falla, sale 0 en silencio. Se instala en `/etc/pacman.d/hooks/` y `/usr/local/lib/omarchy/` |
+| `smoke-test.sh` | Sin root: `install.sh --check` limpio, `omarchy-compat post` sin FAIL, gancho instalado y ejecutable, `etc/` del repo igual al sistema |
+| `tests/` | `unittest`: reglas de `omarchy-compat` con escenarios simulados (cada regla con un caso OK y uno que rompe), `install.sh --check/--dry-run` con `ROOT=` falso y binarios simulados en `PATH` (pacman, systemctl, dkms), `capture.sh` determinista (dos ejecuciones = mismo resultado), y el gancho: nunca devuelve ≠ 0 ni tarda > 5 s |
 | `README.md` | Uso, cómo reinstalar en un equipo nuevo, cómo deshacer |
 
-## Reglas de compatibilidad (`compat.py`)
+## Reglas de compatibilidad (`omarchy-compat`)
 
 Cada una con id, nivel (FAIL = rompería, WARN = riesgo), y texto en español.
 
@@ -64,19 +64,19 @@ Cada una con id, nivel (FAIL = rompería, WARN = riesgo), y texto en español.
 
 ## Integración
 
-- `../maintenance/stable-snapshot.sh`: llama `capture.sh --state "$MAN"` (`drivers-state.json`) y exige `compat.py post` sin FAIL
+- `../maintenance/stable-snapshot.sh`: llama `capture.sh --state "$MAN"` (`drivers-state.json`) y exige `omarchy-compat post` sin FAIL
   antes de crear el snapshot (además del reward).
 - `../maintenance/smoke-test.sh` + `omarchy-reward`: nuevo grupo `DRIVERS` (peso 15, bloqueante) con `install.sh --check` limpio y
-  `compat.py post` sin FAIL; los pesos se reescalan a 100.
+  `omarchy-compat post` sin FAIL; los pesos se reescalan a 100.
 - `../restore/bin/omarchy-restore full`: tras restaurar `~`, ejecutar `drivers/install.sh` (real) antes de los demás instaladores.
-- Barra: el plugin `juansebas7ian.drivers` puede leer `compat.py preflight --json` (cacheado 1 h) — **opcional, solo si sobra**.
+- Barra: el plugin `juansebas7ian.drivers` puede leer `omarchy-compat preflight --json` (cacheado 1 h) — **opcional, solo si sobra**.
 - `~/.claude/omarchy.md` y `~/.claude/agents/omarchy-admin.md`: lo actualiza la sesión principal.
 
 ## Ejecución en este equipo (no romper nada)
 
 1. Pruebas unitarias; `capture.sh` (genera manifest y `etc/`); `install.sh --check` debe salir limpio (todo ya está).
 2. `install.sh --dry-run` debe decir que no hay nada que hacer.
-3. `compat.py post` y `compat.py preflight` (lo que haya pendiente hoy).
+3. `omarchy-compat post` y `omarchy-compat preflight` (lo que haya pendiente hoy).
 4. **Única acción con root**: instalar el gancho de pacman (`install.sh --hook-only`, con snapshot `pre/post`), en una terminal
    visible. Probarlo con una transacción inocua: `sudo pacman -S --needed vulkan-tools` (ya instalado → "nada que hacer", pero el
    gancho no corre si no hay transacción; usar `pacman -S vulkan-tools` reinstalando el mismo paquete, que sí la dispara).
@@ -84,5 +84,5 @@ Cada una con id, nivel (FAIL = rompería, WARN = riesgo), y texto en español.
 
 ## Deshacer
 
-`sudo rm /etc/pacman.d/hooks/90-omarchy-compat.hook /usr/local/lib/omarchy/compat-hook /usr/local/lib/omarchy/compat.py`;
+`sudo rm /etc/pacman.d/hooks/90-omarchy-compat.hook /usr/local/lib/omarchy/compat-hook /usr/local/lib/omarchy/omarchy-compat /usr/local/lib/omarchy/known-gaps.json`;
 el resto son archivos del repo y del estado del usuario. O el snapshot `pre` en Limine.

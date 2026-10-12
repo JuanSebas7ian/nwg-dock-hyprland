@@ -20,7 +20,7 @@ main() {
     "$HERE/smoke-test.sh" --json >"$tmp/smoke.json"
     "$FORK_DIR/contrib/omarchy/go/tool.sh" omarchy-reward "$tmp/smoke.json" >"$tmp/reward.json"
     if [ $? -ne 0 ]; then echo "reward no es estable: me niego a crear el snapshot."; cat "$tmp/reward.json"; return 1; fi
-    # compat.py post already ran inside smoke-test.sh (DRIVERS02); a FAIL there is a DRIVERS blocker for omarchy-reward
+    # omarchy-compat post already ran inside smoke-test.sh (DRIVERS02); a FAIL there is a DRIVERS blocker for omarchy-reward
     echo ">>> Escribe tu contrasena de sudo. <<<"
     sudo -v || return 1
 

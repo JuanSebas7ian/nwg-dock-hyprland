@@ -8,7 +8,7 @@
 #   --allow-pending  go on even if checkupdates shows pending updates (a real run stops otherwise: no partial upgrades)
 #   --wait       ask for Enter before closing (visible terminal)
 # A real run needs sudo: snapshot pre, packages, etc files (backup .bak.<date> only if they differ), DKMS,
-# limine-update / mkinitcpio only if their inputs changed, services, snapshot post, compat.py post.
+# limine-update / mkinitcpio only if their inputs changed, services, snapshot post, omarchy-compat post.
 # Env (tests): ROOT (prefix for destination paths), MANIFEST, ETC_DIR, KERNEL_RELEASE, OMARCHY_DRIVERS_STATE, COMPAT_CMD.
 # Log: ~/.local/state/omarchy-drivers/install-<date>.log, ends with exit=N.
 set -uo pipefail
@@ -19,7 +19,9 @@ MANIFEST=${MANIFEST:-$HERE/manifest.json}
 ROOT=${ROOT:-}
 STATE=${OMARCHY_DRIVERS_STATE:-$HOME/.local/state/omarchy-drivers}
 KERNEL=${KERNEL_RELEASE:-$(uname -r)}
-COMPAT_CMD=${COMPAT_CMD:-python3 $HERE/compat.py post}
+GO_TOOL=${GO_TOOL:-$HERE/../go/tool.sh}
+export OMARCHY_KNOWN_GAPS=${OMARCHY_KNOWN_GAPS:-$HERE/known-gaps.json}
+COMPAT_CMD=${COMPAT_CMD:-$GO_TOOL omarchy-compat post}
 DATE=$(date +%Y%m%d-%H%M%S)
 MODE=real; WAIT=0; ALLOW_PENDING=0; GROUPS_SEL=""; HOOK_ONLY=0
 
@@ -67,11 +69,16 @@ if not sel:
         print("OWNED", p, sep="\t")
 for h in m.get("hook", []):
     print("HOOK", h["src"], h["dest"], h["mode"], sep="\t")
+for p in m.get("hook_obsolete", []):
+    print("OBSOLETE", p, sep="\t")
 PY
 }
 
-MISS_REPO=(); MISS_AUR=(); DIFF_ETC=(); BAD_SVC=(); BAD_DKMS=(); MISS_OWNED=(); DIFF_HOOK=()
+MISS_REPO=(); MISS_AUR=(); DIFF_ETC=(); BAD_SVC=(); BAD_DKMS=(); MISS_OWNED=(); DIFF_HOOK=(); OLD_HOOK=()
 declare -A GRP_REPO GRP_AUR
+
+# A hook source "go:<command>" is that Go command, built from the repo (go/tool.sh --build).
+src_of() { case "$1" in go:*) "$GO_TOOL" --build "${1#go:}" ;; *) echo "$MAN_DIR/$1" ;; esac; }
 
 file_state() { # dest src mode [policy] -> prints "ok" or reason. Policy if-missing: Omarchy owns the file; never compared
     local d=$ROOT$1 s=$2 mode=$3 policy=${4:-own}
@@ -99,7 +106,8 @@ collect() {
                   [[ "$dk_out" =~ (^|$'\n')"$a"/[^,]*,\ "$KERNEL",[^:]*:\ installed ]] || BAD_DKMS+=("$a") ;;
             OWNED) [ "$HOOK_ONLY" -eq 1 ] && continue
                    [ -e "$ROOT$a" ] || MISS_OWNED+=("$a") ;;
-            HOOK) st=$(file_state "$b" "$MAN_DIR/$a" "$c"); [ "$st" = ok ] || DIFF_HOOK+=("$b|$a|$c|$st") ;;
+            HOOK) st=$(file_state "$b" "$(src_of "$a")" "$c"); [ "$st" = ok ] || DIFF_HOOK+=("$b|$a|$c|$st") ;;
+            OBSOLETE) [ -e "$ROOT$a" ] && OLD_HOOK+=("$a") ;;
         esac
     done < <(flat)
 }
@@ -114,6 +122,7 @@ report() {
     for x in "${BAD_SVC[@]}"; do IFS='|' read -r k u <<<"$x"; say "FALTA servicio habilitado ($k): $u"; done
     for x in "${BAD_DKMS[@]}"; do say "FALTA módulo DKMS instalado para $KERNEL: $x"; done
     for x in "${MISS_OWNED[@]}"; do say "FALTA archivo de Omarchy: $x"; done
+    for x in "${OLD_HOOK[@]}"; do say "INFO archivo viejo del gancho (se borra con --hook-only): $x"; done
     if [ "${#DIFF_HOOK[@]}" -gt 0 ]; then say "INFO gancho de pacman no instalado o desactualizado (install.sh --hook-only)"; fi
 }
 
@@ -180,8 +189,9 @@ apply() {
         esac
     done
     for x in "${DIFF_HOOK[@]}"; do
-        IFS='|' read -r d s m st <<<"$x"; install_file "$d" "$MAN_DIR/$s" "$m" || fails=$((fails + 1))
+        IFS='|' read -r d s m st <<<"$x"; install_file "$d" "$(src_of "$s")" "$m" || fails=$((fails + 1))
     done
+    for x in "${OLD_HOOK[@]}"; do rt rm -f "$ROOT$x" || fails=$((fails + 1)); done
     [ "$c_systemd" -eq 1 ] && { rt systemctl daemon-reload || fails=$((fails + 1)); }
     if [ "${#BAD_DKMS[@]}" -gt 0 ] && [ "$grp_fail" -eq 0 ]; then rt dkms autoinstall -k "$KERNEL" || fails=$((fails + 1)); fi
     # One rebuild only: limine-update regenerates the UKI (Omarchy has no mkinitcpio presets); mkinitcpio -P is the fallback

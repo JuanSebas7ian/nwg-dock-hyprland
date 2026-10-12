@@ -15,7 +15,8 @@ class DriversSmoke(Sandbox):
         self.d = os.path.join(self.t, "drivers")
         os.makedirs(os.path.join(self.d, "pacman-hook"))
         shutil.copy(os.path.join(DRV, "smoke-test.sh"), self.d)
-        shutil.copy(os.path.join(DRV, "compat.py"), self.d)
+        put(os.path.join(self.d, "omarchy-compat"), "#!/bin/sh\n", 0o755)  # stands for the built Go binary
+        shutil.copy(os.path.join(DRV, "known-gaps.json"), self.d)
         for f in ("90-omarchy-compat.hook", "compat-hook"):
             shutil.copy(os.path.join(DRV, "pacman-hook", f), os.path.join(self.d, "pacman-hook"))
         self.etc, self.lib = os.path.join(self.t, "hooks"), os.path.join(self.t, "lib")
@@ -28,7 +29,7 @@ class DriversSmoke(Sandbox):
         os.makedirs(self.etc, exist_ok=True)
         os.makedirs(self.lib, exist_ok=True)
         shutil.copy(os.path.join(self.d, "pacman-hook/90-omarchy-compat.hook"), self.etc)
-        for src, name in (("pacman-hook/compat-hook", "compat-hook"), ("compat.py", "compat.py")):
+        for src, name in (("pacman-hook/compat-hook", "compat-hook"), ("omarchy-compat", "omarchy-compat"), ("known-gaps.json", "known-gaps.json")):
             shutil.copy(os.path.join(self.d, src), os.path.join(self.lib, name))
             os.chmod(os.path.join(self.lib, name), 0o755)
 
@@ -36,7 +37,7 @@ class DriversSmoke(Sandbox):
         fake = os.path.join(self.t, "fake-compat")
         put(fake, "#!/bin/sh\necho '%s'\nexit %d\n" % (compat_out, compat_rc), 0o755)
         return self.sh(["bash", os.path.join(self.d, "smoke-test.sh"), *args], HOOK_ETC=self.etc, HOOK_LIB=self.lib,
-                       COMPAT_CMD=fake)
+                       COMPAT_CMD=fake, COMPAT_BIN=os.path.join(self.d, "omarchy-compat"))
 
     def test_all_pass(self):
         self.install_hook()
