@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.iphone",
+  "name": "iPhone",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "iPhone status (battery, storage), photo import, app files and local backups over USB; screen mirroring (UxPlay/AirPlay) and KDE Connect over Wi-Fi (Go backend omarchy-iphone).",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "iPhone",
+    "description": "Left = panel · right = import new photos.",
+    "category": "Devices",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

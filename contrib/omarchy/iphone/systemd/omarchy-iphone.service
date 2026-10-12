@@ -1,0 +1,14 @@
+[Unit]
+Description=iPhone: import new photos and run the automatic backup when it is plugged in
+PartOf=graphical-session.target
+After=graphical-session.target
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=%h/.local/bin/omarchy-iphone watch
+Restart=always
+RestartSec=5
+
+
+[Install]
+WantedBy=graphical-session.target

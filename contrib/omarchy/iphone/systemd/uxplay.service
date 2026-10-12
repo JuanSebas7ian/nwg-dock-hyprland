@@ -1,0 +1,12 @@
+[Unit]
+Description=AirPlay receiver (UxPlay): mirror the iPhone screen to this PC
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Environment=AIRPLAY_NAME=Omarchy
+EnvironmentFile=-%h/.config/omarchy-iphone/airplay.env
+# legacy ports (-p) are the ones opened in ufw for the home network; -nh: no "@hostname" in the name
+ExecStart=/usr/bin/uxplay -nh -p -n ${AIRPLAY_NAME}
+Restart=on-failure
+RestartSec=3

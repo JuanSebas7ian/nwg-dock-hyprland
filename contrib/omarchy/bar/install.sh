@@ -30,6 +30,7 @@ WIDGETS=(
   "juansebas7ian.hardware:juansebas7ian.ollama"
   "juansebas7ian.memguard:juansebas7ian.hardware"
   "juansebas7ian.vpn:omarchy.network"
+  "juansebas7ian.iphone:omarchy.bluetooth"
 )
 # Clones de widgets de Omarchy: al activarse ocupan el lugar del original con sus mismos ajustes
 # (omarchy plugin disable <clon> devuelve el original). juansebas7ian.clock = reloj + Google Calendar.
@@ -162,7 +163,7 @@ done
 # --------------------------------------------------------------- backends en Go
 # contrib/omarchy/go: un módulo con un binario por widget. Se prueban antes de
 # instalar; si las pruebas fallan, se conserva el binario anterior.
-GO_TOOLS=(omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers opencode-ollama-sync omarchy-agent-usage-opencode omarchy-agent-usage-antigravity omarchy-session bt-pair-keyboard omarchy-gcal gphotos-sync omarchy-vpn omarchy-cloud omarchy-hardwared)
+GO_TOOLS=(omarchy-iphone omarchy-spotify omarchy-llm omarchy-agent-usage-pi omarchy-drivers opencode-ollama-sync omarchy-agent-usage-opencode omarchy-agent-usage-antigravity omarchy-session bt-pair-keyboard omarchy-gcal gphotos-sync omarchy-vpn omarchy-cloud omarchy-hardwared)
 GO_SRC=$(cd "$HERE/../go" && pwd)
 if command -v go >/dev/null; then
   say "Backends en Go (${GO_TOOLS[*]})"

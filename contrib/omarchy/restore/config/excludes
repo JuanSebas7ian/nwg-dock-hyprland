@@ -24,3 +24,5 @@
 node_modules
 .venv
 __pycache__
+# iPhone: local device backups (idevicebackup2) are huge and are already a backup
+@HOME@/iPhoneBackup
