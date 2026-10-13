@@ -148,7 +148,7 @@ func launcherButton(position *string) *gtk.Box {
 					return
 				}
 				elements := strings.Split(*launcherCmd, " ")
-				cmd := exec.Command(elements[0], elements[1:]...)
+				cmd := appCommand(elements[0], elements[1:]...)
 
 				go func() {
 					err := cmd.Run()
@@ -1304,6 +1304,39 @@ func savePinnedOrder(order []string) error {
 	return d.Sync()
 }
 
+// appCommand builds the command that starts an app. With -dnd the app gets its own systemd scope instead of
+// living in the dock's: children inherit their parent's cgroup, and the Omarchy supervisor caps the dock's
+// (MemoryMax=400M, CPUQuota=80%), so Steam started from the dock ran ELDEN RING at 80% of one CPU and 400 MB.
+// Without -dnd the official behaviour is kept.
+func appCommand(name string, args ...string) *exec.Cmd {
+	if *dnd {
+		return exec.Command(scopeWrapper(exec.LookPath), append(scopeArgs(exec.LookPath), append([]string{name}, args...)...)...)
+	}
+	return exec.Command(name, args...)
+}
+
+// scopeWrapper / scopeArgs: uwsm-app (how Omarchy starts apps: app-*.scope) or systemd-run --scope; neither
+// found = run the app directly.
+func scopeWrapper(look func(string) (string, error)) string {
+	if p, err := look("uwsm-app"); err == nil {
+		return p
+	}
+	if p, err := look("systemd-run"); err == nil {
+		return p
+	}
+	return "env"
+}
+
+func scopeArgs(look func(string) (string, error)) []string {
+	if _, err := look("uwsm-app"); err == nil {
+		return []string{"--"}
+	}
+	if _, err := look("systemd-run"); err == nil {
+		return []string{"--user", "--scope", "--collect", "--quiet", "--"}
+	}
+	return nil
+}
+
 func launch(ID string) {
 	command, err := getExec(ID)
 	if err != nil {
@@ -1341,7 +1374,7 @@ func launch(ID string) {
 		}
 	}
 
-	cmd := exec.Command(elements[cmdIdx], elements[1+cmdIdx:]...)
+	cmd := appCommand(elements[cmdIdx], elements[1+cmdIdx:]...)
 
 	// set env variables
 	if len(envVars) > 0 {
