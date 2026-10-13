@@ -56,7 +56,9 @@ func mounted(p Paths, dir string) bool {
 
 // Mount mounts the camera roll ("media") or an app's Documents ("app:<bundle id>") and returns the folder.
 func Mount(run Runner, p Paths, udid, what string) (string, error) {
-	args := []string{"-u", udid}
+	// -s: one FUSE thread. With several, ifuse sometimes returns a 128 KB block from another part of the file
+	// (two reads racing on one AFC handle): copies came out with the right size and wrong content.
+	args := []string{"-u", udid, "-s"}
 	name := "media"
 	if strings.HasPrefix(what, "app:") {
 		id := strings.TrimPrefix(what, "app:")
@@ -86,7 +88,7 @@ var ErrInUse = errors.New("the device folder is in use by an import or a check: 
 
 // Eject is the widget's eject: it refuses while a job reads the camera roll.
 func Eject(run Runner, p Paths, udid string) ([]string, error) {
-	for _, job := range []string{"import", "safe"} {
+	for _, job := range []string{"import", "safe", "free"} {
 		locks, _ := filepath.Glob(filepath.Join(p.State, job+"-*.lock"))
 		for _, l := range locks {
 			name := strings.TrimSuffix(filepath.Base(l), ".lock")
@@ -151,6 +153,10 @@ type LedgerEntry struct {
 	Size  int64  `json:"size"`
 	Local string `json:"local,omitempty"`
 	Taken string `json:"taken,omitempty"` // capture date (RFC 3339); empty if the metadata had none
+	// set by the safety check: SHA-256 of the device file, the same as the copy of this size and date
+	Hash      string `json:"sha256,omitempty"`
+	LocalSize int64  `json:"localSize,omitempty"`
+	LocalMod  int64  `json:"localMod,omitempty"`
 }
 
 // UnmarshalJSON also reads the first version's ledger (path -> size).

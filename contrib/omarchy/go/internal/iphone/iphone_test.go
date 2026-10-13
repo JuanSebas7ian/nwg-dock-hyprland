@@ -958,3 +958,9 @@ func TestUnreachableIsNotAPairingProblem(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// the tests never depend on this PC's game mode (the watcher skips devices while it is on)
+func TestMain(m *testing.M) {
+	gameOn = func() bool { return false }
+	os.Exit(m.Run())
+}

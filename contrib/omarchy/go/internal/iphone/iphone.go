@@ -142,7 +142,7 @@ func readJSON(path string, v any) bool {
 
 // Long jobs (import, backup, drive, safe) run detached from the bar (systemd-run), so a bar restart does not kill
 // them; they leave their progress in a file the status reads.
-var Jobs = []string{"import", "backup", "drive", "safe"}
+var Jobs = []string{"import", "backup", "drive", "safe", "free"}
 
 // Every job, its lock, progress and history belong to one device (State/<udid>/), so an iPhone and an iPad
 // back up and upload at the same time.
@@ -242,7 +242,7 @@ func PerDevice(p Paths, cfg Config) M {
 		readJSON(p.devFile(u, "device.json"), &dev) // last known name/model, also when not connected now
 		var apps M
 		readJSON(p.devFile(u, "apps.json"), &apps)
-		out[u] = M{"device": dev, "apps": apps, "jobs": JobsStatus(p, u), "backup": BackupStatus(p, cfg, u), "drive": DriveStatus(p, cfg, u), "photos": PhotoStatus(p, cfg, u)}
+		out[u] = M{"device": dev, "apps": apps, "jobs": JobsStatus(p, u), "backup": BackupStatus(p, cfg, u), "drive": DriveStatus(p, cfg, u), "photos": PhotoStatus(p, cfg, u), "free": FreeStatus(p, u)}
 	}
 	return out
 }

@@ -13,9 +13,8 @@ import (
 	"time"
 )
 
-// Freeing space on the iPhone is done in the Photos app (Select → Delete, then empty Recently Deleted): deleting
-// files over AFC/PTP leaves the Photos library pointing at missing files. This check says which photos are safe to
-// delete there: copied to this PC (same size, and a sample compared byte by byte) AND uploaded to Google Photos.
+// This check says which photos are safe to delete on the device: copied to this PC (the whole file compared with
+// the device) AND uploaded to Google Photos. The deleting itself is in free.go (over PTP, never AFC).
 
 // UploadedPaths reads gphotos-sync's ledger (uploaded.jsonl): the local paths already in Google Photos.
 func UploadedPaths(ledger string) map[string]bool {
@@ -104,6 +103,12 @@ type SafeReport struct {
 	ICloudPhotos  string      `json:"icloudPhotos"` // on | off | unknown
 	Dir           string      `json:"dir"`
 	Largest       []LargeFile `json:"largest"` // the heaviest photos/videos and whether each is safe to delete
+	// whole-file check (see free.go): what can be deleted from the device
+	Groups         []SafeGroup `json:"groups"`
+	Deletable      int         `json:"deletable"`
+	DeletableBytes int64       `json:"deletableBytes"`
+	Repaired       []string    `json:"repaired"` // copies that differed: fixed and sent to Google Photos again
+	Unstable       []string    `json:"unstable"`
 }
 
 // CheckSafe compares the camera roll mounted at root with the local copies in dir and the Google Photos ledger.
@@ -204,24 +209,59 @@ func ICloudPhotos(run Runner, root, tmp string) string {
 	return "off"
 }
 
-// Safe runs the whole check for one device and saves it for the widget.
-func Safe(run Runner, p Paths, udid, class string) (SafeReport, error) {
+// Safe runs the whole check for one device and saves it for the widget: every copied and uploaded file is
+// compared whole with the device (only once: the hash is kept), bad copies are fixed, and the photos that can be
+// deleted are listed. progress(done, total, name) follows the comparison.
+func Safe(run Runner, p Paths, udid, class string, progress func(int, int, string)) (SafeReport, error) {
 	cfg := p.LoadConfig()
 	release, err := p.lock(jobKey("safe", udid))
 	if err != nil {
 		return SafeReport{}, err
 	}
 	defer release()
+	if p.locked(jobKey("import", udid)) || p.locked(jobKey("free", udid)) {
+		return SafeReport{}, ErrInUse
+	}
 	root, err := Mount(run, p, udid, "media")
 	if err != nil {
 		return SafeReport{}, err
 	}
-	ledger := filepath.Join(filepath.Dir(p.State), "gphotos-sync", "uploaded.jsonl")
-	r, err := CheckSafe(root, Folder(cfg, class), UploadedPaths(ledger), p.LoadLedger(udid), 30)
+	dir := Folder(cfg, class)
+	gledger := filepath.Join(p.gphotosState(), "uploaded.jsonl")
+	uploaded := UploadedPaths(gledger)
+	l := p.LoadLedger(udid)
+	files, err := ScanDCIM(root)
+	if err != nil {
+		return SafeReport{}, err
+	}
+	var cands []MediaFile
+	var locals []string
+	for _, f := range files {
+		if local, ok := LocalCopy(dir, f, l); ok && uploaded[local] {
+			cands = append(cands, f)
+			locals = append(locals, local)
+		}
+	}
+	v, drop := VerifyCopies(root, l, cands, locals, progress)
+	if err := writeJSON(p.ledgerPath(udid), l); err != nil {
+		return SafeReport{}, err
+	}
+	if _, err := dropFromGooglePhotosLedger(gledger, drop); err != nil {
+		return SafeReport{}, err
+	}
+	uploaded = UploadedPaths(gledger)
+	r, err := CheckSafe(root, dir, uploaded, l, 0)
 	if err != nil {
 		return r, err
 	}
 	r.UDID = udid
+	r.Verified, r.Mismatched = v.Verified, len(v.Unstable)
+	r.Repaired, r.Unstable = v.Repaired, v.Unstable
+	r.Groups = SafeGroups(files, l, uploaded)
+	r.Deletable = len(r.Groups)
+	for _, g := range r.Groups {
+		r.DeletableBytes += g.Bytes
+	}
 	r.ICloudPhotos = ICloudPhotos(run, root, filepath.Join(p.Runtime, "photosdb-"+udid))
 	_ = writeJSON(filepath.Join(p.State, udid, "safe.json"), r)
 	return r, nil
@@ -234,6 +274,7 @@ func SafeStatus(p Paths) M {
 	for _, e := range ents {
 		var r SafeReport
 		if e.IsDir() && readJSON(filepath.Join(p.State, e.Name(), "safe.json"), &r) {
+			r.Groups = nil // the list is large: safe-list gives it
 			out[e.Name()] = r
 		}
 	}

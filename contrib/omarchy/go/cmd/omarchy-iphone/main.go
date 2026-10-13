@@ -1,6 +1,6 @@
 // omarchy-iphone: the iPhone bar widget backend (libimobiledevice, ifuse, UxPlay, KDE Connect).
 //
-//	omarchy-iphone start import|backup|drive|safe [udid]   run a job detached (systemd-run), as the widget does
+//	omarchy-iphone start import|backup|drive|safe|free [udid]   run a job detached (systemd-run), as the widget does
 //	omarchy-iphone status                       devices, photos, backup, tethering, AirPlay, KDE Connect (JSON)
 //	omarchy-iphone pair [udid]                  ask the iPhone to trust this PC
 //	omarchy-iphone scan|import [udid]           count / copy new photos and videos (import prints progress lines)
@@ -9,7 +9,9 @@
 //	omarchy-iphone eject [udid]                 release the mounts
 //	omarchy-iphone backup [udid]                local backup (incremental; progress lines)
 //	omarchy-iphone drive [udid]                 upload the local backup to Google Drive (restic, encrypted)
-//	omarchy-iphone safe [udid]                  which photos are safe to delete on the device (copied + in Google Photos)
+//	omarchy-iphone safe [udid]                  which photos are safe to delete on the device (copied, identical, in Google Photos)
+//	omarchy-iphone safe-list [udid]             the photos that can be deleted (from the last check)
+//	omarchy-iphone free-start <udid> --all|<key>...   delete safe photos from the device (detached; over PTP)
 //	omarchy-iphone reorganize [--dry-run]       move imported photos to the folder of the year they were taken
 //	omarchy-iphone app-sizes [udid]             apps on the device by size (app + its data)
 //	omarchy-iphone backup-delete <udid>         delete a device backup from this PC (only if Google Drive has it)
@@ -165,9 +167,49 @@ func main() {
 	case "safe":
 		d := dev(0)
 		p.SaveProgress("safe", d.UDID, -1, "comparing the camera roll with this PC and Google Photos…")
-		r, err := iphone.Safe(iphone.ExecRunner(10*time.Minute), p, d.UDID, d.Class)
+		r, err := iphone.Safe(iphone.ExecRunner(10*time.Minute), p, d.UDID, d.Class, func(done, total int, name string) {
+			if done%10 == 0 || done == total {
+				p.SaveProgress("safe", d.UDID, float64(done)/float64(max(total, 1)), fmt.Sprintf("comparing copies byte by byte · %d of %d · %s", done, total, name))
+			}
+		})
 		fail(err)
+		r.Groups = nil
 		jsonout.OK(map[string]any{"report": r})
+	case "safe-list":
+		u := arg(0)
+		if u == "" {
+			u = device(0)
+		}
+		jsonout.OK(map[string]any{"groups": iphone.SafeGroupsOf(p, u)})
+	case "free-start":
+		u := arg(0)
+		req := iphone.FreeRequest{All: slices.Contains(rest, "--all")}
+		for _, k := range rest[min(1, len(rest)):] {
+			if k != "--all" {
+				req.Keys = append(req.Keys, k)
+			}
+		}
+		if u == "" || (!req.All && len(req.Keys) == 0) {
+			fail(fmt.Errorf("free-start <udid> --all|<key>..."))
+		}
+		fail(iphone.StartFree(p, u, req))
+		jsonout.OK(nil)
+	case "free":
+		d := dev(0)
+		req, err := iphone.LoadFreeRequest(p, d.UDID)
+		fail(err)
+		p.SaveProgress("free", d.UDID, -1, "checking the photos again before deleting…")
+		res, err := iphone.Free(iphone.ExecRunner(2*time.Minute), p, d.UDID, req, func(done, total int, name string) {
+			p.SaveProgress("free", d.UDID, float64(done)/float64(max(total, 1)), fmt.Sprintf("deleting · %d of %d · %s", done, total, name))
+		})
+		if err != nil {
+			res.Error = err.Error()
+			iphone.SaveFreeResult(p, d.UDID, res)
+			iphone.Notify(d.Name+": no se borró nada", err.Error())
+			fail(err)
+		}
+		iphone.Notify(d.Name+": espacio liberado", fmt.Sprintf("%d archivos borrados (%.1f GB). Para recuperar el espacio ya: Fotos › Eliminado › Eliminar todo", res.Deleted, float64(res.Bytes)/1e9))
+		jsonout.OK(map[string]any{"result": res})
 	case "reorganize":
 		d := dev(0)
 		dry := slices.Contains(rest, "--dry-run")

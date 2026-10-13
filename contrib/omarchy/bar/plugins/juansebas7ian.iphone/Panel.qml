@@ -53,7 +53,7 @@ Panel {
   readonly property var jobs: perPhone ? (perPhone.jobs || {}) : ({})
   readonly property var scan: photos ? photos.scan : null
   readonly property var safe: phone && info && info.safe ? info.safe[phone.udid] : null
-  readonly property var runningJobs: ["import", "backup", "drive", "safe"].filter(function(j) { return jobs[j] && jobs[j].running })
+  readonly property var runningJobs: ["import", "backup", "drive", "safe", "free"].filter(function(j) { return jobs[j] && jobs[j].running })
   readonly property bool jobRunning: runningJobs.length > 0
   // jobs of every device (the bar icon and the list above the tabs)
   readonly property var allRunning: {
@@ -63,7 +63,7 @@ Panel {
   }
   readonly property var mainJob: allRunning.length > 0 ? allRunning[0] : null
   readonly property real jobFraction: mainJob && mainJob.progress ? mainJob.progress.fraction : -1
-  readonly property var jobNames: ({ "import": "Importing photos", "backup": "Backing up", "drive": "Uploading the backup to Google Drive", "safe": "Checking what is safe to delete" })
+  readonly property var jobNames: ({ "import": "Importing photos", "backup": "Backing up", "drive": "Uploading the backup to Google Drive", "safe": "Checking what is safe to delete", "free": "Deleting from the device" })
   property var wasRunning: []
 
   property string tab: "overview"
@@ -103,7 +103,12 @@ Panel {
       if (j === "import" && photos && photos.last) say(photos.last.imported + " new photos and videos" + (photos.last.failed ? " · " + photos.last.failed + " failed" : ""), photos.last.failed > 0)
       else if (j === "backup" && backup && backup.last) say(backup.last.ok ? "Backup finished" : "Backup failed: " + (backup.last.error || ""), !backup.last.ok)
       else if (j === "drive" && drive && drive.last) say(drive.last.ok ? "Backup uploaded to Google Drive" : "Upload failed: " + (drive.last.error || ""), !drive.last.ok)
-      else if (j === "safe") say("Check finished: see Free up space", false)
+      else if (j === "safe") { say("Check finished: see Free up space", false); freeList = []; freeSel = ({}) }
+      else if (j === "free" && perPhone && perPhone.free && perPhone.free.last) {
+        var fr = perPhone.free.last
+        say(fr.error ? "Nothing deleted: " + fr.error : fr.deleted + " files deleted (" + fmtBytes(fr.bytes) + ")" + (fr.failed && fr.failed.length ? " · " + fr.failed.length + " kept" : "") + ". To get the space now: Photos › Recently Deleted › Delete All", !!fr.error)
+        freeList = []; freeSel = ({})
+      }
     }
     wasRunning = runningJobs.slice()
   }
@@ -130,13 +135,31 @@ Panel {
     var q = root.startQueue.slice(); var u = q.shift(); root.startQueue = q; root.startFor("backup", u) } }
   function terminal(cmd) { if (bar) bar.run("uwsm-app -- xdg-terminal-exec bash -c " + Util.shellQuote(cmd + "; read -p 'Enter to close'")); root.close() }
   function openPath(p) { if (bar) bar.run("xdg-open " + Util.shellQuote(p)); root.close() }
+  // freeing space: the deletable photos of the last check, and the ones picked
+  property var freeList: []
+  property var freeSel: ({})
+  property bool freeChoosing: false
+  property bool freeLoading: false
+  property bool freeVideos: false
+  property bool freeBySize: false
+  property int freeShow: 40
+  readonly property var freeShown: {
+    var l = freeList.filter(function(g) { return !freeVideos || g.video })
+    if (freeBySize) l = l.slice().sort(function(a, b) { return b.bytes - a.bytes })
+    return l
+  }
+  readonly property var freePicked: { var n = 0, b = 0; for (var i = 0; i < freeList.length; i++) if (freeSel[freeList[i].key]) { n++; b += freeList[i].bytes } return { n: n, bytes: b } }
+  function loadFree() { if (phone && !freeProcess.running) { freeLoading = true; freeProcess.command = [ctl, "safe-list", phone.udid]; freeProcess.running = true } }
+  function pick(key) { var s = Object.assign({}, freeSel); if (s[key]) delete s[key]; else s[key] = true; freeSel = s }
+  function pickShown(on) { var s = Object.assign({}, freeSel); var l = freeShown.slice(0, freeShow); for (var i = 0; i < l.length; i++) { if (on) s[l[i].key] = true; else delete s[l[i].key] } freeSel = s }
+  function freeKeys() { return Object.keys(freeSel) }
   function loadApps() { if (trusted && !appsProcess.running) { appsLoading = true; appsProcess.command = [ctl, "apps", phone.udid]; appsProcess.running = true } }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
   onOpenedChanged: if (opened) { refresh(); Qt.callLater(function() { keyCatcher.forceActiveFocus() }) }
   onTabChanged: if (tab === "files" && apps.length === 0) loadApps()
-  onDevIndexChanged: { apps = []; if (tab === "files") loadApps() }
+  onDevIndexChanged: { apps = []; freeList = []; freeSel = ({}); freeChoosing = false; if (tab === "files") loadApps() }
 
   Timer {
     interval: root.opened || root.jobRunning ? 3000 : 20000
@@ -157,6 +180,16 @@ Panel {
       onStreamFinished: {
         root.appsLoading = false
         try { var r = JSON.parse(text); root.apps = r.apps || []; if (r.ok === false) root.say(r.error, true) } catch (e) {}
+      }
+    }
+  }
+  Process {
+    id: freeProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.freeLoading = false
+        try { var r = JSON.parse(text); root.freeList = r.groups || []; if (r.ok === false) root.say(r.error, true) } catch (e) {}
       }
     }
   }
@@ -338,7 +371,7 @@ Panel {
                 font.pixelSize: Style.font.body
                 wrapMode: Text.WordWrap
               }
-              PanelActionButton { visible: !root.phone.unreachable; iconText: "󰌹"; tooltipText: "Pair (then tap Trust on the device)"; foreground: root.foreground; fontFamily: root.fontFamily
+              PanelActionButton { visible: !!root.phone && !root.phone.unreachable; iconText: "󰌹"; tooltipText: "Pair (then tap Trust on the device)"; foreground: root.foreground; fontFamily: root.fontFamily
                 onClicked: root.act(["pair", root.phone.udid], "Paired: the device trusts this PC") }
             }
             Column {
@@ -428,27 +461,26 @@ Panel {
             PanelSectionHeader { text: "FREE UP SPACE ON THE " + root.kind.toUpperCase(); foreground: root.foreground; fontFamily: root.fontFamily }
             Text {
               width: parent.width
-              text: "A photo is safe to delete when it is on this PC (same size; a sample compared byte by byte) and in Google Photos. Delete in the Photos app: removing files from the PC breaks the Photos library."
+              text: "A photo is deleted only when its copy on this PC is identical (the whole file compared with the " + root.kind + ") and it is in Google Photos; a Live Photo or an edited photo only with all its parts. The " + root.kind + " deletes it itself (over PTP, like Windows' \"delete after import\"), so the Photos app stays consistent. Keep it unlocked while deleting."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
-            Chip { label: "Check what is safe to delete"; visible: root.trusted && !root.jobRunning; onClicked: root.startJob("safe") }
+            Chip { label: root.safe ? "Check again" : "Check what is safe to delete"; visible: root.trusted && !root.jobRunning; onClicked: root.startJob("safe") }
             Column {
               visible: !!root.safe
               width: parent.width
               spacing: Style.space(4)
-              InfoPair { label: "Safe to delete"; value: root.safe ? root.safe.safe + " of " + root.safe.total + " · " + root.fmtBytes(root.safe.safeBytes) + " · checked " + root.ago(root.safe.time) : "" }
+              InfoPair { label: "Can be deleted"; value: root.safe ? (root.safe.deletable || 0) + " photos and videos · " + root.fmtBytes(root.safe.deletableBytes || 0) + " · checked " + root.ago(root.safe.time) : "" }
               InfoPair { label: "Not on this PC yet"; value: root.safe ? String(root.safe.notCopied) : "" }
-              InfoPair { label: "Not in Google Photos yet"; value: root.safe ? String(root.safe.notUploaded) : "" }
-              InfoPair { label: "Verified byte by byte"; value: root.safe ? root.safe.verified + " (" + root.safe.mismatched + " different)" : "" }
+              InfoPair { label: "Not in Google Photos yet"; value: root.safe ? String(root.safe.notUploaded) + (root.gphotos && root.gphotos.state ? " · uploader: " + root.gphotos.state : "") : "" }
+              InfoPair { label: "Compared whole"; value: root.safe ? root.safe.verified + " identical" + (root.safe.repaired && root.safe.repaired.length ? " · " + root.safe.repaired.length + " fixed" : "") + (root.safe.mismatched ? " · " + root.safe.mismatched + " unreadable" : "") : "" }
               Text {
+                visible: !!root.safe && !!root.safe.repaired && root.safe.repaired.length > 0
                 width: parent.width
-                text: !root.safe ? "" : root.safe.mismatched > 0 ? "⚠ Some copies differ from the originals: do not delete anything; import again and re-check."
-                  : root.safe.safeUntil ? "Everything taken up to " + root.safe.safeUntil + " is safe.\nOn the " + root.kind + ": Photos › Library › All Photos › Select, drag over the photos up to " + root.safe.safeUntil + " › Delete. Then Albums › Recently Deleted › Delete All to get the space back."
-                  : "Nothing is safe to delete yet: import and let gphotos-sync upload first."
-                color: root.safe && root.safe.mismatched > 0 ? root.urgent : root.foreground
+                text: "⚠ " + (root.safe && root.safe.repaired ? root.safe.repaired.length : 0) + " copies on this PC had a damaged block (an old ifuse read error): copied again from the " + root.kind + " and sent to Google Photos again. The damaged versions already in Google Photos can be deleted there: " + (root.safe && root.safe.repaired ? root.safe.repaired.slice(0, 8).map(function(r) { return r.split("/").pop() }).join(", ") : "") + (root.safe && root.safe.repaired && root.safe.repaired.length > 8 ? "…" : "")
+                color: root.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
@@ -456,11 +488,88 @@ Panel {
               Text {
                 visible: !!root.safe && root.safe.icloudPhotos === "on"
                 width: parent.width
-                text: "⚠ iCloud Photos is on: deleting on the " + root.kind + " also deletes from iCloud and your other Apple devices. Alternative without deleting: Settings › Photos › Optimize Storage."
+                text: "⚠ iCloud Photos is on: deleting on the " + root.kind + " also deletes from iCloud and your other Apple devices (Google Photos and this PC keep them). They stay 30 days in Photos › Recently Deleted; delete them there to get the space back now."
                 color: root.urgent
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
+              }
+              Flow {
+                width: parent.width
+                spacing: Style.space(6)
+                visible: root.trusted && !!root.safe && root.safe.deletable > 0 && !root.isRunning("free")
+                Chip {
+                  readonly property bool confirming: root.confirmDelete === "free-all"
+                  label: !root.safe ? "" : confirming ? "Click again: delete " + root.safe.deletable + " from the " + root.kind : "Delete everything safe (" + root.fmtBytes(root.safe.deletableBytes) + ")"
+                  on: confirming
+                  onClicked: {
+                    if (confirming) { root.confirmDelete = ""; root.act(["free-start", root.phone.udid, "--all"], "Deleting… keep the " + root.kind + " unlocked") }
+                    else { root.confirmDelete = "free-all"; confirmTimer.restart() }
+                  }
+                }
+                Chip { label: root.freeChoosing ? "Hide the list" : "Choose what to delete"; on: root.freeChoosing
+                  onClicked: { root.freeChoosing = !root.freeChoosing; if (root.freeChoosing && root.freeList.length === 0) root.loadFree() } }
+              }
+              Text {
+                visible: !!root.safe && !root.safe.deletable
+                width: parent.width
+                text: "Nothing can be deleted yet: import, let Google Photos finish uploading, and check again."
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Text {
+                readonly property var fr: root.perPhone && root.perPhone.free ? root.perPhone.free.last : null
+                visible: !!fr && !root.isRunning("free")
+                width: parent.width
+                text: !fr ? "" : "Last deletion " + root.ago(fr.time) + ": " + (fr.error ? fr.error : fr.deleted + " files · " + root.fmtBytes(fr.bytes) + (fr.failed && fr.failed.length ? " · kept " + fr.failed.length + ": " + fr.failed.slice(0, 4).join(", ") : ""))
+                color: fr && fr.error ? root.urgent : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              // the list to pick from
+              Column {
+                visible: root.freeChoosing
+                width: parent.width
+                spacing: Style.space(4)
+                Text { visible: root.freeLoading; text: "Loading…"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+                Flow {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  Chip { label: "Oldest first"; on: !root.freeBySize; onClicked: root.freeBySize = false }
+                  Chip { label: "Largest first"; on: root.freeBySize; onClicked: root.freeBySize = true }
+                  Chip { label: "Videos only"; on: root.freeVideos; onClicked: root.freeVideos = !root.freeVideos }
+                  Chip { label: "Select shown"; onClicked: root.pickShown(true) }
+                  Chip { label: "Clear"; onClicked: root.freeSel = ({}) }
+                }
+                Repeater {
+                  model: root.freeShown.slice(0, root.freeShow)
+                  ModelRow {
+                    required property var modelData
+                    width: parent.width
+                    readonly property bool picked: !!root.freeSel[modelData.key]
+                    title: (picked ? "☑ " : "☐ ") + (modelData.video ? "󰕧 " : "󰋩 ") + modelData.name + " · " + root.fmtBytes(modelData.bytes)
+                    meta: modelData.taken + " · " + modelData.files.map(function(r) { return r.split(".").pop() }).join(" + ")
+                    actions: [
+                      { icon: picked ? "󰄲" : "󰄱", tip: picked ? "Do not delete" : "Delete this one", run: function() { root.pick(modelData.key) } },
+                      { icon: "󰈈", tip: "Look at the copy on this PC", run: function() { root.openPath(modelData.local) } }
+                    ]
+                  }
+                }
+                Chip { visible: root.freeShown.length > root.freeShow; label: "Show more (" + (root.freeShown.length - root.freeShow) + " left)"; onClicked: root.freeShow += 80 }
+                Chip {
+                  visible: root.freePicked.n > 0 && !root.isRunning("free")
+                  readonly property bool confirming: root.confirmDelete === "free-sel"
+                  label: confirming ? "Click again: delete " + root.freePicked.n + " from the " + root.kind : "Delete selected (" + root.freePicked.n + " · " + root.fmtBytes(root.freePicked.bytes) + ")"
+                  on: confirming
+                  onClicked: {
+                    if (confirming) { root.confirmDelete = ""; root.act(["free-start", root.phone.udid].concat(root.freeKeys()), "Deleting… keep the " + root.kind + " unlocked") }
+                    else { root.confirmDelete = "free-sel"; confirmTimer.restart() }
+                  }
+                }
               }
             }
           }
@@ -506,7 +615,7 @@ Panel {
             Text {
               width: parent.width
               text: !root.safe ? "Run the check to list them (it also says which are safe to delete)."
-                : "✓ = on this PC and in Google Photos: safe to delete in the Photos app (Albums › Media Types › Videos, sorted by size helps). Checked " + root.ago(root.safe.time) + "."
+                : "✓ = on this PC and in Google Photos: safe to delete (Photos tab › Free up space › Choose what to delete › Largest first). Checked " + root.ago(root.safe.time) + "."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
