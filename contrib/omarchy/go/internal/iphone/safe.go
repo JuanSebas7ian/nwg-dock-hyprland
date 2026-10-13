@@ -109,6 +109,7 @@ type SafeReport struct {
 	DeletableBytes int64       `json:"deletableBytes"`
 	Repaired       []string    `json:"repaired"` // copies that differed: fixed and sent to Google Photos again
 	Unstable       []string    `json:"unstable"`
+	Runs           []SafeRun   `json:"runs"` // stretches of safe photos to select in one drag in the Photos app
 }
 
 // CheckSafe compares the camera roll mounted at root with the local copies in dir and the Google Photos ledger.
@@ -260,6 +261,11 @@ func Safe(run Runner, p Paths, udid, class string, progress func(int, int, strin
 	r.Repaired, r.Unstable = v.Repaired, v.Unstable
 	r.Groups = SafeGroups(files, l, uploaded)
 	r.Deletable = len(r.Groups)
+	safeKeys := map[string]bool{}
+	for _, g := range r.Groups {
+		safeKeys[g.Key] = true
+	}
+	r.Runs = SafeRuns(files, l, safeKeys, 15)
 	for _, g := range r.Groups {
 		r.DeletableBytes += g.Bytes
 	}

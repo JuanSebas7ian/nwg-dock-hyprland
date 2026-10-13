@@ -1,10 +1,12 @@
 package iphone
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGroupKey(t *testing.T) {
@@ -195,5 +197,24 @@ func TestPTPReady(t *testing.T) {
 	answer = "[Storage 0]\nbasedir=/store_00010001\naccess=0 Read-Write\n"
 	if ok, _ := PTPReady("x"); !ok {
 		t.Fatal("ready device not seen")
+	}
+}
+
+func TestSafeRuns(t *testing.T) {
+	at := func(d int) string { return time.Date(2024, 1, d, 10, 0, 0, 0, time.UTC).Format(time.RFC3339) }
+	l := Ledger{}
+	var files []MediaFile
+	for d := 1; d <= 7; d++ {
+		rel := fmt.Sprintf("100APPLE/IMG_%04d.HEIC", d)
+		l[rel] = LedgerEntry{Taken: at(d)}
+		files = append(files, MediaFile{Rel: rel, Size: int64(d)})
+	}
+	files = append(files, MediaFile{Rel: "100APPLE/IMG_0002.MOV", Size: 100}) // the Live Photo part counts with its photo
+	l["100APPLE/IMG_0002.MOV"] = LedgerEntry{Taken: at(2)}
+	safe := map[string]bool{"100APPLE/0001": true, "100APPLE/0002": true, "100APPLE/0003": true, "100APPLE/0005": true, "100APPLE/0006": true}
+	r := SafeRuns(files, l, safe, 10)
+	if len(r) != 2 || r[0].FirstName != "IMG_0001" || r[0].LastName != "IMG_0003" || r[0].N != 3 || r[0].Bytes != 106 ||
+		r[1].FirstName != "IMG_0005" || r[1].N != 2 || r[0].From != "2024-01-01 10:00" {
+		t.Fatalf("%+v", r)
 	}
 }

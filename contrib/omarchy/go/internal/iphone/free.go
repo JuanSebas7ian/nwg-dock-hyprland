@@ -19,6 +19,10 @@ import (
 	"time"
 )
 
+// Tested 2026-10-13 on iOS 26.7.1: the device accepts a PTP delete and stops offering the object, but the Photos
+// library keeps the photo (DCIM file and ZASSET row untouched). So the widget does not offer it; deleting is done in
+// the Photos app, guided by SafeRuns and the safe list. The code stays for devices where it works.
+//
 // Freeing space deletes photos and videos from the device over PTP: the same way Windows' "delete after import"
 // does it, through the device's own Photos framework, so the Photos library stays consistent (deleting the files
 // over AFC would leave the library pointing at missing files). Only what is proven safe is deleted:
@@ -35,6 +39,7 @@ type SafeGroup struct {
 	Files []string `json:"files"` // DCIM paths (100APPLE/IMG_0362.HEIC, 100APPLE/IMG_0362.MOV)
 	Bytes int64    `json:"bytes"`
 	Taken string   `json:"taken"` // capture day
+	At    string   `json:"at"`    // capture time (HH:MM), to find it in the Photos app
 	Video bool     `json:"video"` // a video (not a Live Photo's motion part)
 	Local string   `json:"local"` // a copy on this PC, to look at it
 }
@@ -203,6 +208,7 @@ func SafeGroups(files []MediaFile, l Ledger, uploaded map[string]bool) []SafeGro
 		g.Name = strings.TrimSuffix(path.Base(g.Files[0]), path.Ext(g.Files[0]))
 		g.Video = video && !still
 		g.Taken = taken.Format("2006-01-02")
+		g.At = taken.Format("15:04")
 		out = append(out, g)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -667,4 +673,69 @@ func PTPReady(udid string) (bool, string) {
 		return false, "unplug the device, unlock it and plug it in again (accept \"Allow access to photos\" if it asks)"
 	}
 	return true, ""
+}
+
+// SafeRun is a stretch of the camera roll, in capture order (the order of Photos › Library), where every photo is
+// safe: in the Photos app it is selected in one drag, from the first to the last.
+type SafeRun struct {
+	From      string `json:"from"` // capture time of the first ("2006-01-02 15:04")
+	To        string `json:"to"`
+	FirstName string `json:"firstName"`
+	LastName  string `json:"lastName"`
+	N         int    `json:"n"`
+	Bytes     int64  `json:"bytes"`
+}
+
+// SafeRuns finds the stretches of safe photos (keys of the safe groups) in capture order, largest first.
+func SafeRuns(files []MediaFile, l Ledger, safe map[string]bool, max int) []SafeRun {
+	type item struct {
+		key   string
+		name  string
+		taken time.Time
+		bytes int64
+	}
+	byKey := map[string]*item{}
+	for _, f := range files {
+		k := GroupKey(f.Rel)
+		it := byKey[k]
+		t := takenOf(f, l)
+		if it == nil {
+			it = &item{key: k, name: strings.TrimSuffix(path.Base(f.Rel), path.Ext(f.Rel)), taken: t}
+			byKey[k] = it
+		}
+		if t.Before(it.taken) {
+			it.taken = t
+		}
+		it.bytes += f.Size
+	}
+	items := make([]*item, 0, len(byKey))
+	for _, it := range byKey {
+		items = append(items, it)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].taken.Equal(items[j].taken) {
+			return items[i].taken.Before(items[j].taken)
+		}
+		return items[i].key < items[j].key
+	})
+	var runs []SafeRun
+	var cur *SafeRun
+	for _, it := range items {
+		if !safe[it.key] {
+			cur = nil
+			continue
+		}
+		if cur == nil {
+			runs = append(runs, SafeRun{From: it.taken.Format("2006-01-02 15:04"), FirstName: it.name})
+			cur = &runs[len(runs)-1]
+		}
+		cur.To, cur.LastName = it.taken.Format("2006-01-02 15:04"), it.name
+		cur.N++
+		cur.Bytes += it.bytes
+	}
+	sort.SliceStable(runs, func(i, j int) bool { return runs[i].Bytes > runs[j].Bytes })
+	if len(runs) > max {
+		runs = runs[:max]
+	}
+	return runs
 }
