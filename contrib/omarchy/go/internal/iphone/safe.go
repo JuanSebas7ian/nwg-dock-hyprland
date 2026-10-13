@@ -237,7 +237,8 @@ func Safe(run Runner, p Paths, udid, class string, progress func(int, int, strin
 	var cands []MediaFile
 	var locals []string
 	for _, f := range files {
-		if local, ok := LocalCopy(dir, f, l); ok && uploaded[local] {
+		// every copy, uploaded or not: one with a bad block must be fixed before gphotos-sync uploads it
+		if local, ok := LocalCopy(dir, f, l); ok {
 			cands = append(cands, f)
 			locals = append(locals, local)
 		}
