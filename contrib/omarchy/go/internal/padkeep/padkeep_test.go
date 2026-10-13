@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func addNode(t *testing.T, root, name, vendor, product, phys string) {
@@ -194,5 +195,59 @@ func TestEffectID(t *testing.T) {
 	}
 	if uiBeginFFUpload != 0xc06855c8 || eviocSFF != 0x40304580 || uiDevSetup != 0x405c5503 || eviocGrab != 0x40044590 {
 		t.Fatalf("%x %x %x %x", uiBeginFFUpload, eviocSFF, uiDevSetup, eviocGrab)
+	}
+}
+
+func TestStaleRumbleIsStopped(t *testing.T) {
+	p, _, logs := newProxy()
+	clock := time.Date(2026, 10, 12, 21, 40, 0, 0, time.UTC)
+	p.now = func() time.Time { return clock }
+	pad := &fakePad{nextID: 3}
+	p.Attach(pad)
+	var e Effect
+	e.SetID(0)
+	p.effects[0] = e
+	p.HandleUI([]Event{{Type: EvFF, Code: 0, Value: 1}}) // the game starts a rumble
+	clock = clock.Add(5 * time.Second)
+	p.StopStaleRumble()
+	if has(pad.wrote, write{EvFF, 3, 0, false}) {
+		t.Fatal("stopped too early")
+	}
+	clock = clock.Add(4 * time.Second) // 9 s without news from the game
+	p.StopStaleRumble()
+	if !has(pad.wrote, write{EvFF, 3, 0, false}) || len(p.playing) != 0 {
+		t.Fatal("a stale rumble was not stopped", pad.wrote)
+	}
+	if !strings.Contains(strings.Join(*logs, "\n"), "rumble stopped") {
+		t.Fatal(*logs)
+	}
+}
+
+func TestStoppedRumbleIsNotTouched(t *testing.T) {
+	p, _, _ := newProxy()
+	clock := time.Date(2026, 10, 12, 21, 40, 0, 0, time.UTC)
+	p.now = func() time.Time { return clock }
+	pad := &fakePad{nextID: 3}
+	p.Attach(pad)
+	var e Effect
+	e.SetID(0)
+	p.effects[0] = e
+	p.HandleUI([]Event{{Type: EvFF, Code: 0, Value: 1}, {Type: EvFF, Code: 0, Value: 0}})
+	clock = clock.Add(time.Minute)
+	n := len(pad.wrote)
+	p.StopStaleRumble()
+	if len(pad.wrote) != n {
+		t.Fatal("wrote to a pad with nothing playing")
+	}
+}
+
+func TestANewPadStartsSilent(t *testing.T) {
+	p, _, _ := newProxy()
+	p.Attach(&fakePad{})
+	p.playing[5] = true
+	p.Detach("unplugged")
+	p.Attach(&fakePad{})
+	if len(p.playing) != 0 {
+		t.Fatal(p.playing)
 	}
 }

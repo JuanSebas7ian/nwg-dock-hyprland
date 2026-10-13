@@ -24,6 +24,9 @@ const (
 	Phys                     = "pad-keepalive/input0"
 	ScanEvery                = 250 * time.Millisecond // between looks for the physical pad while it is gone
 	GrabRetry                = 5 * time.Second        // before retrying a pad another process holds
+	// RumbleTimeout: an effect still marked playing with no rumble traffic from the game for this long is
+	// stopped (a stop lost around a USB drop or a game hang left the pad vibrating non-stop)
+	RumbleTimeout = 8 * time.Second
 )
 
 var Keys = []uint16{BtnA, BtnB, BtnX, BtnY, BtnTL, BtnTR, BtnSelect, BtnStart, BtnMode, BtnThumbL, BtnThumbR}
@@ -118,10 +121,14 @@ type Proxy struct {
 	mapped    map[int16]int16  // virtual effect id -> physical effect id (current pad)
 	Log       func(string)
 	msgs      chan msg
+	playing   map[int16]bool // physical effect ids the game started and did not stop
+	lastFF    time.Time      // last rumble traffic from the game (play, stop, upload)
+	now       func() time.Time
 }
 
 func NewProxy(ui Virtual, log func(string)) *Proxy {
-	return &Proxy{UI: ui, effects: map[int16]Effect{}, mapped: map[int16]int16{}, Log: log, msgs: make(chan msg, 64)}
+	return &Proxy{UI: ui, effects: map[int16]Effect{}, mapped: map[int16]int16{}, Log: log, msgs: make(chan msg, 64),
+		playing: map[int16]bool{}, now: time.Now}
 }
 
 // Attach grabs the physical pad; false if it cannot be grabbed (the caller backs off).
@@ -135,7 +142,7 @@ func (p *Proxy) Attach(d Physical) bool {
 		return false
 	}
 	p.grabError = ""
-	p.phys, p.mapped = d, map[int16]int16{}
+	p.phys, p.mapped, p.playing = d, map[int16]int16{}, map[int16]bool{} // a new pad starts silent
 	p.gen++
 	gen := p.gen
 	go func() {
@@ -229,6 +236,7 @@ func (p *Proxy) HandleUI(evs []Event) {
 				continue
 			}
 			p.effects[eff.ID()] = eff
+			p.lastFF = p.now()
 			p.physEffect(eff.ID())
 			p.UI.EndUpload(e.Value, eff, 0)
 		case e.Type == EvUinput && e.Code == UIFFErase:
@@ -255,10 +263,28 @@ func (p *Proxy) HandleUI(evs []Event) {
 					continue
 				}
 				code = uint16(pid)
+				p.lastFF = p.now()
+				if e.Value > 0 {
+					p.playing[pid] = true
+				} else {
+					delete(p.playing, pid)
+				}
 			}
 			p.phys.Write(EvFF, code, e.Value)
 		}
 	}
+}
+
+// StopStaleRumble stops effects the game left playing without any rumble traffic for RumbleTimeout.
+func (p *Proxy) StopStaleRumble() {
+	if p.phys == nil || len(p.playing) == 0 || p.now().Sub(p.lastFF) < RumbleTimeout {
+		return
+	}
+	for pid := range p.playing {
+		p.phys.Write(EvFF, uint16(pid), 0)
+	}
+	p.Log(fmt.Sprintf("rumble stopped: %d effect(s) still playing with no update from the game for %.0f s", len(p.playing), RumbleTimeout.Seconds()))
+	p.playing = map[int16]bool{}
 }
 
 // Run is the main loop; find opens the physical pad (nil while it is gone).
@@ -301,6 +327,7 @@ func (p *Proxy) Run(find func() Physical) {
 				p.forward(m.evs)
 			}
 		case <-tick.C:
+			p.StopStaleRumble()
 		}
 	}
 }
