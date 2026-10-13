@@ -10,6 +10,10 @@
 #   sudo contrib/omarchy/boot/install.sh splash-nodebug  # quita plymouth.debug tras revisar un arranque
 #   sudo contrib/omarchy/boot/install.sh splash-smooth   # sin texto de terminal: quita plymouth.debug y deja el
 #                                                        # logo en pantalla hasta que dibuja el escritorio
+#   sudo contrib/omarchy/boot/install.sh fast-audio      # el driver de audio ignora el micrófono de la webcam
+#                                                        # NexiGo: frenaba el arranque 7-20 s (/boot y el escritorio
+#                                                        # esperan a que termine de revisar el audio USB)
+#   sudo contrib/omarchy/boot/install.sh remove-fast-audio
 #        contrib/omarchy/boot/install.sh check           # estado, sin root
 #
 # Nunca toca archivos de Omarchy: el tema y la configuración de rEFInd van en /boot/EFI/refind, los
@@ -253,6 +257,30 @@ X
   say "listo: en el próximo arranque, logo de Omarchy de rEFInd al escritorio sin texto"
 }
 
+# The webcam's microphone (NexiGo N60, 1d6c:0103) never answers (usb_set_interface -110): snd-usb-audio waits for it
+# ~7 s at every boot, and nothing mounts /boot or starts the desktop until the driver has finished with every USB
+# audio device (/boot mounted 0.1 s after "registered new interface driver snd-usb-audio" in each boot). Its slot 0
+# with this vid/pid and enable=0 makes the driver skip just that device ("device (1d6c:0103) is disabled"); the
+# camera's video and the board's audio are untouched. Applies from the next boot (reloading the driver would cut
+# the sound now).
+WEBCAM_MIC=/etc/modprobe.d/claude-nexigo-mic.conf
+install_fast_audio() {
+  need_root
+  snapshot "claude $STAMP: antes de fast-audio (snd-usb-audio sin el micrófono de la webcam)"
+  cat >"$WEBCAM_MIC" <<'X'
+# Claude 2026-10-13: the NexiGo N60 webcam microphone never answers and held the boot 7-20 s.
+# snd-usb-audio skips this one device; the camera's video and every other sound card are unchanged.
+options snd_usb_audio vid=0x1d6c pid=0x0103 enable=0
+X
+  say "listo: desde el próximo arranque el audio USB no espera al micrófono de la webcam"
+}
+
+remove_fast_audio() {
+  need_root
+  rm -f "$WEBCAM_MIC"
+  say "quitado: el micrófono de la webcam vuelve a revisarse al arrancar (desde el próximo arranque)"
+}
+
 remove_splash() {
   need_root
   rm -f "$RETAIN"
@@ -275,6 +303,10 @@ check() {
   tr ' ' '\n' </proc/cmdline | grep -E '^plymouth|^splash|^quiet' || true
   grep -qw plymouth.debug /proc/cmdline && echo "AVISO: plymouth.debug activo (texto en pantalla al arrancar): sudo $0 splash-smooth"
   [[ -f $RETAIN ]] && echo "logo retenido hasta el escritorio: sí" || echo "logo retenido hasta el escritorio: no"
+  echo "== Audio al arrancar"
+  [[ -f /etc/modprobe.d/claude-nexigo-mic.conf ]] && echo "micrófono de la webcam ignorado: sí" || echo "micrófono de la webcam ignorado: no (sudo $0 fast-audio)"
+  journalctl -b -o short-monotonic --no-pager 2>/dev/null | grep -m1 'registered new interface driver snd-usb-audio' | sed 's/^/audio USB listo: /' || true
+  journalctl -b -o short-monotonic --no-pager 2>/dev/null | grep -m1 'Mounted /boot' | sed 's/^/\/boot montado: /' || true
 }
 
 case ${1:-} in
@@ -286,6 +318,8 @@ splash) install_splash ;;
 remove-splash) remove_splash ;;
 splash-nodebug) need_root; "$KERNEL_PARAM" remove plymouth-debug ;;
 splash-smooth) install_smooth ;;
+fast-audio) install_fast_audio ;;
+remove-fast-audio) remove_fast_audio ;;
 check) check ;;
-*) sed -n "2,18p" "$0"; exit 3 ;;
+*) sed -n "2,22p" "$0"; exit 3 ;;
 esac
