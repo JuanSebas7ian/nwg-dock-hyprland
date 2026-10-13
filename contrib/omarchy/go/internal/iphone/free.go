@@ -256,7 +256,7 @@ func dropFromGooglePhotosLedger(ledger string, paths []string) (int, error) {
 // ---- PTP ----
 
 // ErrLocked: PTP shows no photos while the device is locked.
-var ErrLocked = errors.New("unlock the device and keep it unlocked (with the screen on) while deleting")
+var ErrLocked = errors.New("the device does not offer its photos: unplug it, unlock it and plug it in again (accept \"Allow access to photos\"), then keep it unlocked")
 
 // PTPPort finds the gphoto2 port (usb:BUS,DEV) of a device: its USB serial is the UDID without dashes.
 func PTPPort(sys, udid string) (string, error) {
@@ -305,48 +305,95 @@ func ParsePTPList(out string) map[string][]string {
 // ptpPortFn finds the device on this PC; tests replace it.
 var ptpPortFn = func(udid string) (string, error) { return PTPPort("/sys/bus/usb/devices", udid) }
 
+// PTPLibDir holds a libgphoto2 2.5.33 (usr/lib of Arch's package), used when present: with 2.5.34 an iOS 26 device
+// shows its storage empty (the photo folders are not listed). install.sh puts it there.
+func PTPLibDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "lib", "omarchy-iphone", "libgphoto2")
+}
+
+// ptpEnv points gphoto2 at the bundled libgphoto2 and its camera/port drivers.
+func ptpEnv(dir string) []string {
+	cams, _ := filepath.Glob(filepath.Join(dir, "libgphoto2", "2.*"))
+	ports, _ := filepath.Glob(filepath.Join(dir, "libgphoto2_port", "0.*"))
+	if len(cams) == 0 || len(ports) == 0 {
+		return nil
+	}
+	return append(os.Environ(), "LD_LIBRARY_PATH="+dir, "CAMLIBS="+cams[len(cams)-1], "IOLIBS="+ports[len(ports)-1])
+}
+
 // ptpRun runs gphoto2 (shell commands on stdin when script is not empty); tests replace it.
 var ptpRun = func(port, script string, args ...string) ([]byte, error) {
 	cmd := exec.Command("gphoto2", append([]string{"--port", port}, args...)...)
+	cmd.Env = ptpEnv(PTPLibDir())
 	if script != "" {
 		cmd.Stdin = strings.NewReader(script)
 	}
 	return cmd.CombinedOutput()
 }
 
-// PTPPlan maps the DCIM files to delete to PTP folders and names. The device may show a HEIC as JPG over PTP
-// ("Transfer to Mac or PC: Automatic"), so files are matched by folder and name without extension.
-func PTPPlan(list map[string][]string, rels []string) (plan map[string][]string, missing []string) {
-	byDir := map[string]string{} // 100APPLE -> /store_…/DCIM/100APPLE
-	for f := range list {
-		byDir[path.Base(f)] = f
+// PTPPlan maps the DCIM files to delete to PTP objects. iOS lays PTP out by month (/store_…/202306_a) and offers a
+// HEIC as JPG ("Transfer to Mac or PC: Automatic"), so a file is matched by its name without extension and by being
+// a still or a video; when the name is in several folders, the one of its capture month (month[rel] = "200601")
+// decides, and if that does not settle it the file is left alone. An edit's .AAE sidecar goes after its photo.
+// owner says which DCIM files each PTP object stands for.
+func PTPPlan(list map[string][]string, rels []string, month map[string]string) (plan map[string][]string, owner map[string][]string, missing []string) {
+	type obj struct{ folder, name string }
+	byStem := map[string][]obj{}
+	for folder, names := range list {
+		for _, n := range names {
+			byStem[strings.ToUpper(strings.TrimSuffix(n, path.Ext(n)))] = append(byStem[strings.ToUpper(strings.TrimSuffix(n, path.Ext(n)))], obj{folder, n})
+		}
 	}
-	plan = map[string][]string{}
+	plan, owner = map[string][]string{}, map[string][]string{}
+	sidecars := map[string][]string{}
 	for _, rel := range rels {
 		dir, name := path.Split(rel)
-		folder := byDir[strings.TrimSuffix(dir, "/")]
 		stem := strings.ToUpper(strings.TrimSuffix(name, path.Ext(name)))
-		ext := strings.ToUpper(path.Ext(name))
-		var hit []string
-		for _, n := range list[folder] {
-			s := strings.ToUpper(strings.TrimSuffix(n, path.Ext(n)))
-			ne := strings.ToUpper(path.Ext(n))
-			// the motion part of a Live Photo keeps .MOV; a still may be offered as .JPG
-			if s == stem && (ne == ext || (!isVideo(name) && !isVideo(n))) {
-				hit = append(hit, n)
+		var cands []obj
+		folders := map[string]bool{}
+		for _, o := range byStem[stem] {
+			if strings.EqualFold(path.Ext(o.name), ".aae") || isVideo(o.name) != isVideo(name) {
+				continue
 			}
+			cands = append(cands, o)
+			folders[o.folder] = true
 		}
-		if len(hit) == 0 {
+		if len(folders) > 1 {
+			var keep []obj
+			kf := map[string]bool{}
+			for _, o := range cands {
+				base := path.Base(o.folder)
+				if (month[rel] != "" && strings.HasPrefix(base, month[rel])) || base == strings.TrimSuffix(dir, "/") {
+					keep = append(keep, o)
+					kf[o.folder] = true
+				}
+			}
+			cands, folders = keep, kf
+		}
+		if len(cands) == 0 || len(folders) != 1 {
 			missing = append(missing, rel)
 			continue
 		}
-		for _, h := range hit {
-			if !contains(plan[folder], h) {
-				plan[folder] = append(plan[folder], h)
+		for _, o := range cands {
+			k := o.folder + "/" + o.name
+			if !contains(plan[o.folder], o.name) {
+				plan[o.folder] = append(plan[o.folder], o.name)
+			}
+			if !contains(owner[k], rel) {
+				owner[k] = append(owner[k], rel)
+			}
+			for _, x := range byStem[stem] {
+				if x.folder == o.folder && strings.EqualFold(path.Ext(x.name), ".aae") && !contains(sidecars[o.folder], x.name) {
+					sidecars[o.folder] = append(sidecars[o.folder], x.name)
+				}
 			}
 		}
 	}
-	return plan, missing
+	for folder, names := range sidecars {
+		plan[folder] = append(plan[folder], names...)
+	}
+	return plan, owner, missing
 }
 
 func contains(xs []string, x string) bool {
@@ -460,7 +507,13 @@ func Free(run Runner, p Paths, udid string, req FreeRequest, progress func(done,
 	if len(list) == 0 {
 		return res, ErrLocked
 	}
-	plan, missing := PTPPlan(list, rels)
+	month := map[string]string{}
+	for _, rel := range rels {
+		if t := l[rel].Taken; len(t) >= 7 {
+			month[rel] = t[:4] + t[5:7]
+		}
+	}
+	plan, owner, missing := PTPPlan(list, rels, month)
 	res.Missing = missing
 	folders := make([]string, 0, len(plan))
 	total := 0
@@ -484,27 +537,27 @@ func Free(run Runner, p Paths, udid string, req FreeRequest, progress func(done,
 			out, _ := ptpRun(port, script.String(), "--shell")
 			// what is left decides what was deleted (the shell's own messages vary between versions)
 			after, err := ptpRun(port, "", "--folder", folder, "--list-files")
-			left := ParsePTPList(string(after))[folder]
 			if err != nil {
 				res.Error = lastLine(string(out))
 				return res, fmt.Errorf("PTP stopped answering: %s", lastLine(string(after)))
 			}
+			left := ParsePTPList(string(after))[folder]
 			for _, n := range batch {
+				rels := owner[folder+"/"+n]
+				if len(rels) == 0 {
+					continue // an edit's sidecar: it usually goes with its photo
+				}
 				if contains(left, n) {
 					res.Failed = append(res.Failed, path.Base(folder)+"/"+n)
-					failedKeys[GroupKey(path.Base(folder)+"/"+n)] = true
+					for _, rel := range rels {
+						failedKeys[GroupKey(rel)] = true
+					}
 					continue
 				}
 				res.Deleted++
-				// sizes are the AFC ones (the JPG offered over PTP is not the stored size)
-				stem := strings.ToUpper(strings.TrimSuffix(n, path.Ext(n)))
-				for rel, sz := range sizes {
-					d, name := path.Split(rel)
-					if strings.TrimSuffix(d, "/") == path.Base(folder) && strings.ToUpper(strings.TrimSuffix(name, path.Ext(name))) == stem &&
-						(isVideo(rel) == isVideo(n)) {
-						res.Bytes += sz
-						delete(sizes, rel)
-					}
+				for _, rel := range rels {
+					res.Bytes += sizes[rel] // the stored size (a JPG offered over PTP is not it)
+					delete(sizes, rel)
 				}
 			}
 			done += len(batch)
@@ -512,6 +565,10 @@ func Free(run Runner, p Paths, udid string, req FreeRequest, progress func(done,
 				progress(done, total, batch[len(batch)-1])
 			}
 		}
+	}
+	// photos none of whose files were offered over PTP were not deleted
+	for _, rel := range missing {
+		failedKeys[GroupKey(rel)] = true
 	}
 	appendJSONL(filepath.Join(p.State, udid, "deleted.jsonl"), res)
 	// the deleted photos leave the list until the next check
@@ -592,4 +649,22 @@ func appendJSONL(file string, v any) {
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	return strings.TrimSpace(lines[len(lines)-1])
+}
+
+// PTPReady says whether the device offers its photos over PTP now. Locked when plugged in, iOS shows only an empty
+// read-only store (store_feedface) until it is unplugged and plugged in again unlocked.
+func PTPReady(udid string) (bool, string) {
+	port, err := ptpPortFn(udid)
+	if err != nil {
+		return false, err.Error()
+	}
+	b, err := ptpRun(port, "", "--storage-info")
+	out := string(b)
+	if err != nil {
+		return false, "PTP: " + lastLine(out)
+	}
+	if !strings.Contains(out, "basedir=") || strings.Contains(out, "store_feedface") {
+		return false, "unplug the device, unlock it and plug it in again (accept \"Allow access to photos\" if it asks)"
+	}
+	return true, ""
 }

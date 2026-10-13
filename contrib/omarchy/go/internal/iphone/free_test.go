@@ -90,21 +90,34 @@ func TestPTPPortAndPlan(t *testing.T) {
 		t.Fatal(p, err)
 	}
 	out := `There is no file in folder '/'.
-There is no file in folder '/store_00010001'.
-There is no file in folder '/store_00010001/DCIM'.
-There are 3 files in folder '/store_00010001/DCIM/100APPLE'.
-#1     IMG_0001.JPG               rd  2607 KB image/jpeg
-#2     IMG_0001.MOV               rd  3000 KB video/quicktime
-#3     IMG_0002.HEIC              rd  2000 KB image/heif
+There are 3 files in folder '/store_00010001/202306_a'.
+#1     IMG_0012.AAE               rd     2 KB application/x-unknown 1687295501
+#2     IMG_0012.JPG               rd  5215 KB 3024x4032 image/jpeg 1687295501
+#3     IMG_0013.MOV               rd  3000 KB video/quicktime 1687295501
+There are 2 files in folder '/store_00010001/202307_a'.
+#1     IMG_0013.JPG               rd  2000 KB image/jpeg 1687295501
+#2     IMG_0014.HEIC              rd  2000 KB image/heif 1687295501
+There are 1 files in folder '/store_00010001/202405_a'.
+#1     IMG_0014.HEIC              rd  2000 KB image/heif 1687295501
 `
 	list := ParsePTPList(out)
-	if len(list["/store_00010001/DCIM/100APPLE"]) != 3 {
+	if len(list["/store_00010001/202306_a"]) != 3 {
 		t.Fatalf("%v", list)
 	}
-	plan, missing := PTPPlan(list, []string{"100APPLE/IMG_0001.HEIC", "100APPLE/IMG_0001.MOV", "100APPLE/IMG_0009.HEIC"})
-	got := plan["/store_00010001/DCIM/100APPLE"]
-	if strings.Join(got, ",") != "IMG_0001.JPG,IMG_0001.MOV" || len(missing) != 1 || missing[0] != "100APPLE/IMG_0009.HEIC" {
-		t.Fatalf("%v %v", plan, missing)
+	rels := []string{"100APPLE/IMG_0012.HEIC", "100APPLE/IMG_0013.HEIC", "100APPLE/IMG_0013.MOV", "100APPLE/IMG_0014.HEIC", "100APPLE/IMG_0099.HEIC"}
+	month := map[string]string{"100APPLE/IMG_0012.HEIC": "202306", "100APPLE/IMG_0014.HEIC": "202405"}
+	plan, owner, missing := PTPPlan(list, rels, month)
+	if strings.Join(plan["/store_00010001/202306_a"], ",") != "IMG_0012.JPG,IMG_0013.MOV,IMG_0012.AAE" ||
+		strings.Join(plan["/store_00010001/202307_a"], ",") != "IMG_0013.JPG" ||
+		strings.Join(plan["/store_00010001/202405_a"], ",") != "IMG_0014.HEIC" || len(plan["/store_00010001/202307_a"]) != 1 {
+		t.Fatalf("%v", plan)
+	}
+	if strings.Join(owner["/store_00010001/202306_a/IMG_0012.JPG"], ",") != "100APPLE/IMG_0012.HEIC" || len(missing) != 1 || missing[0] != "100APPLE/IMG_0099.HEIC" {
+		t.Fatalf("%v %v", owner, missing)
+	}
+	// the same name in two folders and no capture month: left alone
+	if _, _, missing := PTPPlan(list, []string{"100APPLE/IMG_0014.HEIC"}, nil); len(missing) != 1 {
+		t.Fatal(missing)
 	}
 }
 
@@ -145,7 +158,7 @@ func TestFreeDeletesOnlyWhatIsStillSafe(t *testing.T) {
 			return nil, nil
 		}
 		var b strings.Builder
-		b.WriteString("There are 3 files in folder '/store_00010001/DCIM/100APPLE'.\n")
+		b.WriteString("There are 3 files in folder '/store_00010001/202412_a'.\n")
 		for i, n := range left {
 			b.WriteString("#" + string(rune('1'+i)) + "     " + n + "   rd 1 KB image/heif\n")
 		}
@@ -155,7 +168,7 @@ func TestFreeDeletesOnlyWhatIsStillSafe(t *testing.T) {
 	if err != nil || res.Deleted != 1 || res.Bytes != 3 || res.Groups != 1 || len(res.Failed) != 1 {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if len(scripts) != 1 || !strings.Contains(scripts[0], "cd /store_00010001/DCIM/100APPLE\ndelete IMG_0001.HEIC\n") {
+	if len(scripts) != 1 || !strings.Contains(scripts[0], "cd /store_00010001/202412_a\ndelete IMG_0001.HEIC\n") {
 		t.Fatal(scripts)
 	}
 	if g := SafeGroupsOf(p, udid); len(g) != 1 || g[0].Key != "100APPLE/0002" {
@@ -167,5 +180,20 @@ func TestFreeDeletesOnlyWhatIsStillSafe(t *testing.T) {
 	}
 	if _, err := Free(f.run, p, udid, FreeRequest{Keys: []string{"100APPLE/0002"}}, nil); err == nil {
 		t.Fatal("deleted an edited photo")
+	}
+}
+
+func TestPTPReady(t *testing.T) {
+	origPort, origRun := ptpPortFn, ptpRun
+	defer func() { ptpPortFn, ptpRun = origPort, origRun }()
+	ptpPortFn = func(string) (string, error) { return "usb:001,002", nil }
+	answer := "[Storage 0]\nbasedir=/store_feedface\naccess=1 Read-Only\n"
+	ptpRun = func(string, string, ...string) ([]byte, error) { return []byte(answer), nil }
+	if ok, why := PTPReady("x"); ok || !strings.Contains(why, "unplug") {
+		t.Fatal(ok, why)
+	}
+	answer = "[Storage 0]\nbasedir=/store_00010001\naccess=0 Read-Write\n"
+	if ok, _ := PTPReady("x"); !ok {
+		t.Fatal("ready device not seen")
 	}
 }

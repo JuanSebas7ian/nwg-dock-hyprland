@@ -15,6 +15,7 @@ if [[ ${1:-} == --remove ]]; then
   systemctl --user disable --now omarchy-iphone.service uxplay.service 2>/dev/null || true
   "$BIN/omarchy-iphone" eject >/dev/null 2>&1 || true
   rm -f "$UNITS/omarchy-iphone.service" "$UNITS/uxplay.service" "$BIN/omarchy-iphone"
+  rm -rf "$HOME/.local/lib/omarchy-iphone"
   omarchy plugin disable juansebas7ian.iphone >/dev/null 2>&1 || true
   rm -rf "$PLUG"
   systemctl --user daemon-reload
@@ -25,6 +26,26 @@ fi
 for t in idevice_id ideviceinfo idevicepair idevicebackup2 ifuse fusermount3; do
   command -v "$t" >/dev/null || { echo "iphone: missing $t: run $here/setup-system.sh first" >&2; exit 1; }
 done
+# libgphoto2 2.5.33 for deleting over PTP: with Arch's 2.5.34 an iOS 26 device shows its storage empty. Only
+# gphoto2 run by omarchy-iphone uses it (LD_LIBRARY_PATH); the system's stays as it is.
+LG=$HOME/.local/lib/omarchy-iphone/libgphoto2
+LG_PKG=libgphoto2-2.5.33-1-x86_64.pkg.tar.zst
+LG_SHA=e692d461c002458ac53b8b69584bb6eb81262bbcf80aad22c3dc1a8daf37f4eb
+if command -v gphoto2 >/dev/null && [[ ! -e $LG/libgphoto2.so.6 ]]; then
+  tmp=$(mktemp -d)
+  if curl -sfL -o "$tmp/$LG_PKG" "https://archive.archlinux.org/packages/l/libgphoto2/$LG_PKG" &&
+    echo "$LG_SHA  $tmp/$LG_PKG" | sha256sum -c --quiet; then
+    mkdir -p "$tmp/x" "$LG"
+    tar -C "$tmp/x" -xf "$tmp/$LG_PKG" usr/lib
+    cp -a "$tmp/x/usr/lib/." "$LG/"
+    say "libgphoto2 2.5.33 in $LG (deleting photos over PTP)"
+  else
+    say "could not fetch libgphoto2 2.5.33: deleting from the device may not see the photos"
+  fi
+  rm -rf "$tmp"
+elif ! command -v gphoto2 >/dev/null; then
+  say "gphoto2 is not installed (omarchy pkg add gphoto2): needed to free space on the device"
+fi
 (cd "$repo/go" && go vet ./internal/iphone ./cmd/omarchy-iphone && go test ./internal/iphone >/dev/null) || { echo "iphone: tests failed" >&2; exit 1; }
 built=$("$repo/go/tool.sh" --build omarchy-iphone)
 install -Dm755 "$built" "$BIN/omarchy-iphone"
