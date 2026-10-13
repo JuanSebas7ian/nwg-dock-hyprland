@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"omarchy/internal/game"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -159,6 +160,9 @@ func Watch(run Runner, p Paths, every time.Duration, stop <-chan struct{}) {
 			if known[d.UDID] || d.Conn != "usb" {
 				continue
 			}
+			if gameOn() {
+				continue // playing: imports and backups wait until game mode ends (then this device is handled)
+			}
 			d = Describe(run, d)
 			if d.Unreachable {
 				if !warned[d.UDID] {
@@ -280,6 +284,9 @@ func needsReorganize(l Ledger) bool {
 	}
 	return false
 }
+
+// gameOn: game mode is on (omarchy-game); tests replace it.
+var gameOn = game.IsOn
 
 func fraction(done, total int) float64 {
 	if total <= 0 {

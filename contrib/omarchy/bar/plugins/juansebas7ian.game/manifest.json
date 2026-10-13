@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "juansebas7ian.game",
+  "name": "Game mode",
+  "version": "1.0.0",
+  "author": "juansebas7ian",
+  "license": "MIT",
+  "description": "One button game mode: freezes background uploads, backups and indexing while you play (automatic with gamemoderun). Go backend omarchy-game.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Game mode",
+    "description": "Click = game mode on/off · right click = what is paused.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
