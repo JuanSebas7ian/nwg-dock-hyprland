@@ -11,6 +11,7 @@
 //	omarchy-iphone drive [udid]                 upload the local backup to Google Drive (restic, encrypted)
 //	omarchy-iphone safe [udid]                  which photos are safe to delete on the device (copied, identical, in Google Photos)
 //	omarchy-iphone safe-list [udid]             the photos that can be deleted (from the last check)
+//	omarchy-iphone storage [udid]               what fills the device besides photos, from its local backup (WhatsApp by chat)
 //	omarchy-iphone ptp-check [udid]             can the device delete now (photos offered over PTP)
 //	omarchy-iphone free-start <udid> --all|<key>...   delete safe photos from the device (detached; over PTP)
 //	omarchy-iphone reorganize [--dry-run]       move imported photos to the folder of the year they were taken
@@ -182,6 +183,14 @@ func main() {
 			u = device(0)
 		}
 		jsonout.OK(map[string]any{"groups": iphone.SafeGroupsOf(p, u)})
+	case "storage":
+		u := arg(0)
+		if u == "" {
+			u = device(0)
+		}
+		r, err := iphone.Storage(iphone.ExecRunner(5*time.Minute), p, u)
+		fail(err)
+		jsonout.OK(map[string]any{"report": r})
 	case "ptp-check":
 		u := arg(0)
 		if u == "" {

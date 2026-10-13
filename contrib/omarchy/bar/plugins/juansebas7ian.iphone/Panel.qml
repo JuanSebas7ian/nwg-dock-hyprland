@@ -53,6 +53,7 @@ Panel {
   readonly property var jobs: perPhone ? (perPhone.jobs || {}) : ({})
   readonly property var scan: photos ? photos.scan : null
   readonly property var safe: phone && info && info.safe ? info.safe[phone.udid] : null
+  readonly property var storage: perPhone ? perPhone.storage : null
   readonly property var runningJobs: ["import", "backup", "drive", "safe", "free"].filter(function(j) { return jobs[j] && jobs[j].running })
   readonly property bool jobRunning: runningJobs.length > 0
   // jobs of every device (the bar icon and the list above the tabs)
@@ -509,13 +510,14 @@ Panel {
             Text {
               visible: !!root.safe && !!root.safe.runs && root.safe.runs.length > 0
               width: parent.width
-              text: "Everything between these two photos is backed up. On the " + root.kind + ": Photos › Library › All Photos › Select, tap the first and drag to the last › 🗑 › Delete. Then Albums › Recently Deleted › Delete All for the space."
+              text: "Everything between these two photos is backed up. Easiest from this PC: iCloud Photos (button below) › Library › click the first, Shift+click the last › 🗑, then Recently Deleted › Delete All; the " + root.kind + " follows. On the " + root.kind + ": Photos › Library › Select, tap the first and drag to the last › 🗑."
                 + (root.safe && root.safe.icloudPhotos === "on" ? " (iCloud Photos is on: it also leaves iCloud and your other Apple devices; this PC and Google Photos keep it.)" : "")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
             }
+            Chip { visible: !!root.safe && root.safe.icloudPhotos === "on"; label: "Open iCloud Photos"; onClicked: root.openPath("https://www.icloud.com/photos/") }
             Repeater {
               model: root.safe && root.safe.runs ? root.safe.runs : []
               ModelRow {
@@ -524,6 +526,8 @@ Panel {
                 title: root.fmtBytes(modelData.bytes) + " · " + modelData.n + (modelData.n === 1 ? " item" : " items")
                 meta: modelData.n === 1 ? modelData.firstName + " · " + modelData.from
                   : "from " + modelData.firstName + " (" + modelData.from + ") to " + modelData.lastName + " (" + modelData.to + ")"
+                actions: [{ icon: "󰆏", tip: "Copy the names (to search them in iCloud Photos)", run: function() {
+                  if (bar) bar.run("wl-copy " + Util.shellQuote(modelData.firstName + " " + modelData.lastName)); root.say("Copied: " + modelData.firstName + " … " + modelData.lastName, false) } }]
               }
             }
 
@@ -559,6 +563,72 @@ Panel {
               }
             }
             Chip { visible: root.freeShown.length > root.freeShow; label: "Show more (" + (root.freeShown.length - root.freeShow) + " left)"; onClicked: root.freeShow += 60 }
+
+            // 5. what else fills the device (from its last local backup)
+            PanelSeparator { foreground: root.foreground }
+            PanelSectionHeader { text: "OTHER HEAVY THINGS"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Text {
+              width: parent.width
+              text: !root.storage ? "Not analysed yet: it is read from the device's local backup (Backup tab)."
+                : "From the backup of " + root.ago(root.storage.backupTime) + ". Apps keep their files inside themselves: a PC cannot delete them, so each one says where to do it on the " + root.kind + "."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Flow {
+              width: parent.width
+              spacing: Style.space(6)
+              Chip { label: root.storage ? "Analyse again" : "Analyse"; onClicked: root.act(["storage", root.phone ? root.phone.udid : ""], "Updated from the last backup") }
+              Chip { label: "Apps by size"; onClicked: root.tab = "space" }
+            }
+            Repeater {
+              model: root.storage ? root.storage.areas.filter(function(a) { return a.domain !== "CameraRollDomain" }).slice(0, 5) : []
+              ModelRow {
+                required property var modelData
+                width: parent.width
+                title: modelData.name + " · " + root.fmtBytes(modelData.bytes)
+                meta: modelData.hint || (modelData.files + " files")
+              }
+            }
+
+            // WhatsApp, usually the largest
+            Column {
+              visible: !!root.storage && root.storage.whatsapp > 500000000
+              width: parent.width
+              spacing: Style.space(4)
+              PanelSectionHeader { text: "WHATSAPP · " + (root.storage ? root.fmtBytes(root.storage.whatsapp) : ""); foreground: root.foreground; fontFamily: root.fontFamily }
+              Text {
+                width: parent.width
+                readonly property var k: root.storage ? root.storage.kinds : ({})
+                text: "Videos " + root.fmtBytes(k.video || 0) + " · stickers " + root.fmtBytes(k.sticker || 0) + " · photos " + root.fmtBytes(k.photo || 0) + " · documents " + root.fmtBytes(k.document || 0) + " · audio " + root.fmtBytes(k.audio || 0)
+                  + ".\nOn the " + root.kind + ": WhatsApp › Settings › Storage and Data › Manage Storage › \"Larger than 5 MB\" (or a chat below) › Select › select all › 🗑. Chats and messages stay; only the files go. Turn off Settings › Chats › Save to Photos so they do not fill the camera roll too."
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Repeater {
+                model: root.storage ? root.storage.chats.slice(0, 8) : []
+                ModelRow {
+                  required property var modelData
+                  width: parent.width
+                  title: (modelData.group ? "󰡉 " : "󰀄 ") + modelData.name + " · " + root.fmtBytes(modelData.bytes)
+                  meta: modelData.files + " files"
+                }
+              }
+              Text { text: "Largest files"; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+              Repeater {
+                model: root.storage ? root.storage.heavy.slice(0, 10) : []
+                ModelRow {
+                  required property var modelData
+                  width: parent.width
+                  readonly property var icons: ({ video: "󰕧", document: "󰈙", photo: "󰋩", audio: "󰎆", sticker: "󰱫" })
+                  title: (icons[modelData.kind] || "󰈔") + " " + modelData.kind + " (" + modelData.ext + ") · " + root.fmtBytes(modelData.bytes)
+                  meta: modelData.chat + (modelData.date ? " · " + modelData.date : "")
+                }
+              }
+            }
           }
 
           // ============================================== Space

@@ -242,7 +242,7 @@ func PerDevice(p Paths, cfg Config) M {
 		readJSON(p.devFile(u, "device.json"), &dev) // last known name/model, also when not connected now
 		var apps M
 		readJSON(p.devFile(u, "apps.json"), &apps)
-		out[u] = M{"device": dev, "apps": apps, "jobs": JobsStatus(p, u), "backup": BackupStatus(p, cfg, u), "drive": DriveStatus(p, cfg, u), "photos": PhotoStatus(p, cfg, u), "free": FreeStatus(p, u)}
+		out[u] = M{"device": dev, "apps": apps, "jobs": JobsStatus(p, u), "backup": BackupStatus(p, cfg, u), "drive": DriveStatus(p, cfg, u), "photos": PhotoStatus(p, cfg, u), "free": FreeStatus(p, u), "storage": StorageStatus(p, u)}
 	}
 	return out
 }

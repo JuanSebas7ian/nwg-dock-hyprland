@@ -103,6 +103,8 @@ func Backup(p Paths, udid string, progress func(pct int, line string)) error {
 	if err != nil {
 		return fmt.Errorf("backup failed: %s", lastLine)
 	}
+	// what fills the device, for the Free up space tab (read from this backup)
+	_, _ = Storage(ExecRunner(5*time.Minute), p, udid)
 	return nil
 }
 

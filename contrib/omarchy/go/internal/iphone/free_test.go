@@ -1,6 +1,7 @@
 package iphone
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -216,5 +217,51 @@ func TestSafeRuns(t *testing.T) {
 	if len(r) != 2 || r[0].FirstName != "IMG_0001" || r[0].LastName != "IMG_0003" || r[0].N != 3 || r[0].Bytes != 106 ||
 		r[1].FirstName != "IMG_0005" || r[1].N != 2 || r[0].From != "2024-01-01 10:00" {
 		t.Fatalf("%+v", r)
+	}
+}
+
+func TestStorageReport(t *testing.T) {
+	dir := t.TempDir()
+	put := func(id string, n int) {
+		p := filepath.Join(dir, id[:2], id)
+		_ = os.MkdirAll(filepath.Dir(p), 0o755)
+		_ = os.WriteFile(p, make([]byte, n), 0o644)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "Manifest.db"), []byte("db"), 0o644)
+	put("aa01", 100) // camera roll
+	put("bb01", 500) // a WhatsApp video
+	put("bb02", 300) // a WhatsApp document in a group
+	put("bb03", 10)  // ChatStorage.sqlite
+	put("cc01", 50)  // an app
+	run := func(name string, args ...string) ([]byte, error) {
+		q := args[len(args)-1]
+		switch {
+		case strings.Contains(q, "FROM Files"):
+			return []byte(`[{"fileID":"aa01","domain":"CameraRollDomain","relativePath":"Media/DCIM/100APPLE/IMG_1.HEIC"},
+{"fileID":"bb01","domain":"` + waDomain + `","relativePath":"Message/Media/5731@s.whatsapp.net/a/b/x.mp4"},
+{"fileID":"bb02","domain":"` + waDomain + `","relativePath":"Message/Media/120@g.us/c/d/y.pdf"},
+{"fileID":"bb03","domain":"` + waDomain + `","relativePath":"ChatStorage.sqlite"},
+{"fileID":"cc01","domain":"AppDomain-com.spotify.client","relativePath":"Documents/z"},
+{"fileID":"dd01","domain":"HomeDomain","relativePath":"missing blob"}]`), nil
+		case strings.Contains(q, "ZWACHATSESSION"):
+			return []byte(`[{"j":"5731@s.whatsapp.net","n":"Ana"},{"j":"120@g.us","n":"Familia"}]`), nil
+		case strings.Contains(q, "ZWAMEDIAITEM"):
+			return []byte(`[{"p":"Media/5731@s.whatsapp.net/a/b/x.mp4","d":"2025-06-18"}]`), nil
+		}
+		return nil, errors.New("unexpected " + q)
+	}
+	r, err := MakeStorageReport(run, dir, filepath.Join(t.TempDir(), "tmp"), map[string]string{"com.spotify.client": "Spotify"})
+	if err != nil || r.Total != 960 || r.WhatsApp != 810 || r.Areas[0].Name != "WhatsApp" || r.Areas[2].Name != "Spotify" {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if len(r.Chats) != 2 || r.Chats[0].Name != "Ana" || r.Chats[1].Name != "Familia" || !r.Chats[1].Group ||
+		r.Kinds["video"] != 500 || r.Kinds["document"] != 300 {
+		t.Fatalf("%+v", r)
+	}
+	if len(r.Heavy) != 2 || r.Heavy[0].Chat != "Ana" || r.Heavy[0].Date != "2025-06-18" || r.Heavy[0].Kind != "video" || r.Heavy[1].Ext != "pdf" {
+		t.Fatalf("%+v", r.Heavy)
+	}
+	if _, err := MakeStorageReport(run, t.TempDir(), t.TempDir(), nil); err == nil {
+		t.Fatal("no backup: no error")
 	}
 }
