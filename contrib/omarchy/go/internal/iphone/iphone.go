@@ -269,6 +269,9 @@ type Device struct {
 	} `json:"storage,omitempty"`
 	BackupEncrypted *bool  `json:"backupEncrypted,omitempty"`
 	Error           string `json:"error,omitempty"`
+	// Unreachable: listed on USB but its services do not answer (locked/asleep, or the link is stuck); pairing
+	// would not help
+	Unreachable bool `json:"unreachable,omitempty"`
 }
 
 var udidRe = regexp.MustCompile(`^[0-9A-Fa-f-]{24,40}$`)
@@ -313,7 +316,12 @@ func Describe(run Runner, d Device) Device {
 	b, err := run("idevicepair", args("validate")...)
 	d.Trusted = err == nil && strings.Contains(string(b), "SUCCESS")
 	if !d.Trusted {
-		d.Error = pairingHint(string(b))
+		if unreachable(string(b)) {
+			d.Unreachable = true
+			d.Error = "Connected but not answering over USB: unlock it; if that does not help, unplug the cable and plug it in again"
+		} else {
+			d.Error = pairingHint(string(b))
+		}
 		return d
 	}
 	if b, err := run("ideviceinfo", args("-x")...); err == nil {
@@ -351,6 +359,12 @@ func Describe(run Runner, d Device) Device {
 		d.BackupEncrypted = &v
 	}
 	return d
+}
+
+// unreachable: the device's lockdown service could not be reached at all (usbmuxd "Mux error"), which is not a
+// pairing problem: a locked or sleeping iPad/iPhone refuses data connections, or the USB link is stuck.
+func unreachable(out string) bool {
+	return strings.Contains(out, "Mux error") || strings.Contains(out, "error code -8")
 }
 
 func pairingHint(out string) string {
@@ -607,6 +621,10 @@ func Status(run Runner, p Paths, sysClassNet string) M {
 			continue
 		}
 		devs[i] = Describe(run, devs[i])
+		if !devs[i].Trusted && readJSON(cache, &c) {
+			// not answering or not paired now: still show which device it is
+			devs[i].Name, devs[i].Model, devs[i].Class, devs[i].ProductType = c.Name, c.Model, c.Class, c.ProductType
+		}
 		if devs[i].Trusted {
 			// a busy device (import running) may not answer every query: keep the last known values
 			if readJSON(cache, &c) {

@@ -160,6 +160,13 @@ func Watch(run Runner, p Paths, every time.Duration, stop <-chan struct{}) {
 				continue
 			}
 			d = Describe(run, d)
+			if d.Unreachable {
+				if !warned[d.UDID] {
+					warned[d.UDID] = true
+					Notify(deviceLabel(d)+" conectado pero no responde", "Desbloquéalo; si sigue igual, desconecta y vuelve a conectar el cable")
+				}
+				continue // retried every tick: it is used as soon as it answers
+			}
 			if !d.Trusted {
 				// keep asking every tick: the user taps Trust a moment after plugging in
 				if !warned[d.UDID] {
@@ -293,6 +300,9 @@ func deviceLabel(d Device) string {
 
 var errNoDevice = errors.New("no trusted iPhone or iPad connected")
 
+// ErrUnreachable: the device is plugged in but does not answer (locked, asleep or a stuck USB link).
+var ErrUnreachable = errors.New("the device is connected but not answering over USB: unlock it, or unplug and plug the cable again")
+
 // TrustedDevice picks the device to act on: the named one, or the first trusted one. While a backup holds the
 // phone (slow to answer) the last known details are used.
 func TrustedDevice(run Runner, p Paths, udid string) (Device, error) {
@@ -304,8 +314,12 @@ func TrustedDevice(run Runner, p Paths, udid string) (Device, error) {
 		if p.locked(jobKey("backup", d.UDID)) && readJSON(filepath.Join(p.State, d.UDID, "device.json"), &c) && c.Trusted {
 			return c, nil
 		}
-		if d := Describe(run, d); d.Trusted {
-			return d, nil
+		dd := Describe(run, d)
+		if dd.Trusted {
+			return dd, nil
+		}
+		if udid != "" && dd.Unreachable {
+			return Device{}, ErrUnreachable
 		}
 	}
 	return Device{}, errNoDevice

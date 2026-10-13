@@ -945,3 +945,16 @@ func TestReorganizeMovesByCaptureDateWithoutReuploading(t *testing.T) {
 		t.Fatalf("second run: %+v", again)
 	}
 }
+
+func TestUnreachableIsNotAPairingProblem(t *testing.T) {
+	f := trustedFake()
+	f.out["idevicepair -u "+udid+" validate"] = "ERROR: Could not connect to lockdownd, error code -8"
+	f.fail["idevicepair -u "+udid+" validate"] = true
+	d := Describe(f.run, Device{UDID: udid, Conn: "usb"})
+	if d.Trusted || !d.Unreachable || strings.Contains(d.Error, "pair") || !strings.Contains(d.Error, "unlock") {
+		t.Fatalf("%+v", d)
+	}
+	if _, err := TrustedDevice(f.run, testPaths(t), udid); err != ErrUnreachable {
+		t.Fatal(err)
+	}
+}

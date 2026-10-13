@@ -264,7 +264,7 @@ Panel {
               Chip {
                 required property var modelData
                 required property int index
-                label: (modelData.class === "iPad" ? "󰓶 " : "󰄜 ") + (modelData.name || modelData.udid.slice(0, 8))
+                label: (modelData.class === "iPad" ? "󰓶 " : "󰄜 ") + (modelData.name || modelData.udid.slice(0, 8)) + (modelData.trusted ? "" : " ⚠")
                 on: root.devIndex === index
                 onClicked: root.devIndex = index
               }
@@ -338,7 +338,7 @@ Panel {
                 font.pixelSize: Style.font.body
                 wrapMode: Text.WordWrap
               }
-              PanelActionButton { iconText: "󰌹"; tooltipText: "Pair (then tap Trust on the device)"; foreground: root.foreground; fontFamily: root.fontFamily
+              PanelActionButton { visible: !root.phone.unreachable; iconText: "󰌹"; tooltipText: "Pair (then tap Trust on the device)"; foreground: root.foreground; fontFamily: root.fontFamily
                 onClicked: root.act(["pair", root.phone.udid], "Paired: the device trusts this PC") }
             }
             Column {
