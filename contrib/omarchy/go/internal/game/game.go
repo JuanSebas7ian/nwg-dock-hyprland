@@ -28,9 +28,13 @@ var FreezePrefixes = []string{
 	"omarchy-iphone-",        // device backups and their Google Drive uploads
 	"gphotos-sync.service",   // Google Photos uploads
 	"omarchy-backup.service", // the daily restic backup
-	"localsearch-3.service",  // GNOME's file indexer
 	"opencode-ollama-sync.service",
 }
+
+// Services other programs talk to (D-Bus) are never frozen: a frozen one hangs whoever asks it (freezing GNOME's
+// indexer kept ELDEN RING at "Checking save data" until it was thawed). They only get the lowest CPU and I/O
+// share while playing.
+var SlowUnits = []string{"localsearch-3.service"}
 
 // Timers and path units that would start more background work; stopped while playing, started again after.
 var StopUnits = []string{"gphotos-sync.timer", "gphotos-sync.path", "omarchy-backup.timer", "opencode-ollama-sync.path", "opencode-ollama-sync.timer"}
@@ -42,6 +46,7 @@ type State struct {
 	Since   string   `json:"since,omitempty"`
 	Frozen  []string `json:"frozen"`
 	Stopped []string `json:"stopped"`
+	Slowed  []string `json:"slowed"`
 	Xalia   int      `json:"xaliaStopped"`
 }
 
@@ -132,6 +137,13 @@ func On(run Runner, path string, auto bool) (State, error) {
 			}
 		}
 	}
+	for _, u := range SlowUnits {
+		if active(run, u) {
+			if _, err := run("systemctl", "--user", "set-property", "--runtime", u, "CPUWeight=1", "IOWeight=1"); err == nil {
+				s.Slowed = append(s.Slowed, u)
+			}
+		}
+	}
 	// Proton's UI-automation helper (gamepad navigation for launchers) costs CPU in games that do not need it
 	if b, err := run("pgrep", "-c", "-x", "xalia.exe"); err == nil {
 		n := 0
@@ -169,6 +181,10 @@ func Off(run Runner, path string, auto bool) (State, error) {
 		if _, err := run("systemctl", "--user", "start", u); err != nil {
 			errs = append(errs, u)
 		}
+	}
+	for _, u := range s.Slowed {
+		// an empty assignment drops the runtime value: back to the unit's own weights
+		_, _ = run("systemctl", "--user", "set-property", "--runtime", u, "CPUWeight=", "IOWeight=")
 	}
 	s = State{}
 	if err := save(path, s); err != nil {

@@ -45,12 +45,12 @@ func has(calls []string, want string) bool {
 }
 
 func TestMatches(t *testing.T) {
-	for _, u := range []string{"omarchy-iphone-drive-173403.service", "omarchy-iphone-backup-3EFA401E-203547.service", "gphotos-sync.service", "localsearch-3.service"} {
+	for _, u := range []string{"omarchy-iphone-drive-173403.service", "omarchy-iphone-backup-3EFA401E-203547.service", "gphotos-sync.service"} {
 		if !Matches(u) {
 			t.Fatal(u)
 		}
 	}
-	for _, u := range []string{"omarchy-iphone.service", "voxtype.service", "spotifyd.service", "rclone-gdrive.service", "omarchy-iphone-x.timer"} {
+	for _, u := range []string{"omarchy-iphone.service", "voxtype.service", "spotifyd.service", "rclone-gdrive.service", "omarchy-iphone-x.timer", "localsearch-3.service"} {
 		if Matches(u) {
 			t.Fatal(u)
 		}
@@ -157,5 +157,20 @@ func TestFallsBackToTheCgroupWhenSystemdRefuses(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(root, cg, "cgroup.freeze")); string(b) != "0" {
 		t.Fatal("cgroup not thawed")
+	}
+}
+
+func TestServicesOthersTalkToAreSlowedNotFrozen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	f := &fake{running: []string{"localsearch-3.service", "gphotos-sync.service"}, active: map[string]bool{"localsearch-3.service": true}}
+	s, err := On(f.run, path, true)
+	if err != nil || len(s.Slowed) != 1 || has(f.calls, "systemctl --user freeze localsearch-3.service") ||
+		!has(f.calls, "systemctl --user set-property --runtime localsearch-3.service CPUWeight=1 IOWeight=1") {
+		t.Fatal(s, f.calls)
+	}
+	f.calls = nil
+	_, _ = Off(f.run, path, true)
+	if !has(f.calls, "systemctl --user set-property --runtime localsearch-3.service CPUWeight= IOWeight=") {
+		t.Fatal(f.calls)
 	}
 }
