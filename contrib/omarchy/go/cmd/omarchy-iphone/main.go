@@ -10,6 +10,9 @@
 //	omarchy-iphone backup [udid]                local backup (incremental; progress lines)
 //	omarchy-iphone drive [udid]                 upload the local backup to Google Drive (restic, encrypted)
 //	omarchy-iphone safe [udid]                  which photos are safe to delete on the device (copied + in Google Photos)
+//	omarchy-iphone reorganize [--dry-run]       move imported photos to the folder of the year they were taken
+//	omarchy-iphone app-sizes [udid]             apps on the device by size (app + its data)
+//	omarchy-iphone backup-delete <udid>         delete a device backup from this PC (only if Google Drive has it)
 //	omarchy-iphone gphotos-add                  add the iPhone/iPad photo folders to gphotos-sync (Google Photos)
 //	omarchy-iphone encryption on|off [udid]     encrypted backups (asks for the password: run it in a terminal)
 //	omarchy-iphone airplay on|off               screen mirroring receiver (UxPlay)
@@ -72,12 +75,7 @@ func main() {
 		if !slices.Contains(iphone.Jobs, job) {
 			fail(fmt.Errorf("start import|backup|drive|safe [udid]"))
 		}
-		exe, _ := os.Executable()
-		u := device(1) // resolved now: the unit name carries the device, so two devices run side by side
-		a := []string{"--user", "--collect", "--quiet", "--unit=omarchy-iphone-" + job + "-" + u[len(u)-8:] + "-" + time.Now().Format("150405"), exe, job, u}
-		if b, err := exec.Command("systemd-run", a...).CombinedOutput(); err != nil {
-			fail(fmt.Errorf("could not start %s: %s", job, b))
-		}
+		fail(iphone.StartJob(job, device(1)))
 		jsonout.OK(nil)
 	case "status":
 		jsonout.Print(iphone.Status(run, p, "/sys/class/net"))
@@ -170,6 +168,23 @@ func main() {
 		r, err := iphone.Safe(iphone.ExecRunner(10*time.Minute), p, d.UDID, d.Class)
 		fail(err)
 		jsonout.OK(map[string]any{"report": r})
+	case "reorganize":
+		d := dev(0)
+		dry := slices.Contains(rest, "--dry-run")
+		res, err := iphone.Reorganize(iphone.ExecRunner(time.Minute), p, d.UDID, d.Class, dry, func(done, total int) {
+			p.SaveProgress("import", d.UDID, float64(done)/float64(total), fmt.Sprintf("reorganizing by capture date · %d of %d", done, total))
+		})
+		fail(err)
+		jsonout.OK(map[string]any{"result": res})
+	case "app-sizes":
+		r, err := iphone.AppSizes(p, device(0))
+		fail(err)
+		r["ok"] = true
+		jsonout.Print(r)
+	case "backup-delete":
+		freed, err := iphone.DeleteLocalBackup(p, arg(0))
+		fail(err)
+		jsonout.OK(map[string]any{"freed": freed})
 	case "gphotos-add":
 		added, err := iphone.AddGooglePhotosSources(p)
 		fail(err)

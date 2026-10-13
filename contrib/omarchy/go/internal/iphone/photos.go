@@ -2,6 +2,7 @@ package iphone
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -143,7 +144,36 @@ func ParseApps(out string) []M {
 }
 
 // Ledger remembers what was imported from one device: DCIM path -> size.
-type Ledger map[string]int64
+type Ledger map[string]LedgerEntry
+
+// LedgerEntry: the device file's size, where its copy is on this PC and when it was taken.
+type LedgerEntry struct {
+	Size  int64  `json:"size"`
+	Local string `json:"local,omitempty"`
+	Taken string `json:"taken,omitempty"` // capture date (RFC 3339); empty if the metadata had none
+}
+
+// UnmarshalJSON also reads the first version's ledger (path -> size).
+func (l *Ledger) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*l = Ledger{}
+	for k, v := range raw {
+		var size int64
+		if json.Unmarshal(v, &size) == nil {
+			(*l)[k] = LedgerEntry{Size: size}
+			continue
+		}
+		var e LedgerEntry
+		if err := json.Unmarshal(v, &e); err != nil {
+			return err
+		}
+		(*l)[k] = e
+	}
+	return nil
+}
 
 func (p Paths) ledgerPath(udid string) string { return filepath.Join(p.State, udid, "imported.json") }
 
@@ -190,7 +220,7 @@ func ScanDCIM(root string) ([]MediaFile, error) {
 func Pending(files []MediaFile, l Ledger) []MediaFile {
 	var out []MediaFile
 	for _, f := range files {
-		if size, ok := l[f.Rel]; !ok || size != f.Size {
+		if e, ok := l[f.Rel]; !ok || e.Size != f.Size {
 			out = append(out, f)
 		}
 	}
@@ -312,10 +342,18 @@ func Import(run Runner, p Paths, udid, class string, progress func(done, total i
 		if progress != nil {
 			progress(i, len(todo), filepath.Base(f.Rel))
 		}
-		dst, already := Destination(dir, f)
+		// the year folder follows the capture date, not the file date (restored devices get new file dates)
+		src := filepath.Join(root, "DCIM", f.Rel)
+		taken, fromMeta := CaptureDate(src)
+		if taken.IsZero() {
+			taken = f.Mod
+		}
+		dated := f
+		dated.Mod = taken
+		dst, already := Destination(dir, dated)
 		if already {
 			res.Already++
-		} else if err := copyVerified(filepath.Join(root, "DCIM", f.Rel), dst, f.Size, f.Mod); err != nil {
+		} else if err := copyVerified(src, dst, f.Size, taken); err != nil {
 			res.Failed++
 			res.Error = err.Error()
 			if _, serr := os.Stat(filepath.Join(root, "DCIM")); serr != nil {
@@ -332,7 +370,11 @@ func Import(run Runner, p Paths, udid, class string, progress func(done, total i
 			res.Imported++
 			res.Bytes += f.Size
 		}
-		l[f.Rel] = f.Size
+		e := LedgerEntry{Size: f.Size, Local: dst}
+		if fromMeta {
+			e.Taken = taken.Format(time.RFC3339)
+		}
+		l[f.Rel] = e
 		if i%25 == 24 {
 			save()
 		}
@@ -343,7 +385,7 @@ func Import(run Runner, p Paths, udid, class string, progress func(done, total i
 	}
 	var pendingBytes int64
 	for _, f := range todo {
-		if size, ok := l[f.Rel]; !ok || size != f.Size {
+		if e, ok := l[f.Rel]; !ok || e.Size != f.Size {
 			pendingBytes += f.Size
 		}
 	}

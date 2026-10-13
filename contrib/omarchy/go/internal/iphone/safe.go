@@ -38,10 +38,41 @@ func UploadedPaths(ledger string) map[string]bool {
 	return out
 }
 
-// LocalCopy finds the imported copy of one camera-roll file (same name rule and size as Destination).
-func LocalCopy(dir string, f MediaFile) (string, bool) {
-	p, already := Destination(dir, f)
-	return p, already
+// LocalCopy finds the imported copy of one camera-roll file: where the ledger says it went (same size), else
+// a file with its name and size in any year folder (copies made before the ledger recorded places).
+func LocalCopy(dir string, f MediaFile, l Ledger) (string, bool) {
+	if e, ok := l[f.Rel]; ok && e.Local != "" {
+		if st, err := os.Stat(e.Local); err == nil && st.Size() == f.Size {
+			return e.Local, true
+		}
+	}
+	if p, already := Destination(dir, f); already {
+		return p, true
+	}
+	name := filepath.Base(f.Rel)
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	cands, _ := filepath.Glob(filepath.Join(dir, "*", stem+"*"+ext))
+	for _, c := range cands {
+		b := strings.TrimSuffix(filepath.Base(c), ext)
+		if b != stem && !strings.HasPrefix(b, stem+"-") {
+			continue
+		}
+		if st, err := os.Stat(c); err == nil && st.Size() == f.Size {
+			return c, true
+		}
+	}
+	return "", false
+}
+
+// takenOf is a file's capture date: the ledger's, else the device's file date.
+func takenOf(f MediaFile, l Ledger) time.Time {
+	if e, ok := l[f.Rel]; ok && e.Taken != "" {
+		if t, err := time.Parse(time.RFC3339, e.Taken); err == nil {
+			return t
+		}
+	}
+	return f.Mod
 }
 
 func fileHash(path string, limit int64) (string, error) {
@@ -59,27 +90,33 @@ func fileHash(path string, limit int64) (string, error) {
 
 // SafeReport is the result of the check.
 type SafeReport struct {
-	Time          string `json:"time"`
-	UDID          string `json:"udid"`
-	Total         int    `json:"total"`
-	Safe          int    `json:"safe"`
-	SafeBytes     int64  `json:"safeBytes"`
-	NotCopied     int    `json:"notCopied"`
-	NotUploaded   int    `json:"notUploaded"`
-	SafeUntil     string `json:"safeUntil,omitempty"`     // every photo taken up to this day is safe
-	OldestMissing string `json:"oldestMissing,omitempty"` // the oldest photo that is not safe yet
-	Verified      int    `json:"verified"`                // sample compared byte by byte
-	Mismatched    int    `json:"mismatched"`
-	ICloudPhotos  string `json:"icloudPhotos"` // on | off | unknown
-	Dir           string `json:"dir"`
+	Time          string      `json:"time"`
+	UDID          string      `json:"udid"`
+	Total         int         `json:"total"`
+	Safe          int         `json:"safe"`
+	SafeBytes     int64       `json:"safeBytes"`
+	NotCopied     int         `json:"notCopied"`
+	NotUploaded   int         `json:"notUploaded"`
+	SafeUntil     string      `json:"safeUntil,omitempty"`     // every photo taken up to this day is safe
+	OldestMissing string      `json:"oldestMissing,omitempty"` // the oldest photo that is not safe yet
+	Verified      int         `json:"verified"`                // sample compared byte by byte
+	Mismatched    int         `json:"mismatched"`
+	ICloudPhotos  string      `json:"icloudPhotos"` // on | off | unknown
+	Dir           string      `json:"dir"`
+	Largest       []LargeFile `json:"largest"` // the heaviest photos/videos and whether each is safe to delete
 }
 
 // CheckSafe compares the camera roll mounted at root with the local copies in dir and the Google Photos ledger.
-func CheckSafe(root, dir string, uploaded map[string]bool, sample int) (SafeReport, error) {
+func CheckSafe(root, dir string, uploaded map[string]bool, l Ledger, sample int) (SafeReport, error) {
 	r := SafeReport{Time: time.Now().Format(time.RFC3339), Dir: dir, ICloudPhotos: "unknown"}
 	files, err := ScanDCIM(root)
 	if err != nil {
 		return r, err
+	}
+	r.Largest = Largest(files, dir, uploaded, l, 40)
+	// order by when each was taken: that is the order of the Photos app, where the deleting happens
+	for i := range files {
+		files[i].Mod = takenOf(files[i], l)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].Mod.Before(files[j].Mod) })
 	r.Total = len(files)
@@ -87,7 +124,7 @@ func CheckSafe(root, dir string, uploaded map[string]bool, sample int) (SafeRepo
 	var safeFiles []MediaFile
 	var safeLocal []string
 	for _, f := range files {
-		local, copied := LocalCopy(dir, f)
+		local, copied := LocalCopy(dir, f, l)
 		switch {
 		case !copied:
 			r.NotCopied++
@@ -180,7 +217,7 @@ func Safe(run Runner, p Paths, udid, class string) (SafeReport, error) {
 		return SafeReport{}, err
 	}
 	ledger := filepath.Join(filepath.Dir(p.State), "gphotos-sync", "uploaded.jsonl")
-	r, err := CheckSafe(root, Folder(cfg, class), UploadedPaths(ledger), 30)
+	r, err := CheckSafe(root, Folder(cfg, class), UploadedPaths(ledger), p.LoadLedger(udid), 30)
 	if err != nil {
 		return r, err
 	}

@@ -67,6 +67,10 @@ Panel {
   property var wasRunning: []
 
   property string tab: "overview"
+  property string confirmDelete: ""
+  property bool showAllApps: false
+  readonly property var appSizes: perPhone && perPhone.apps && perPhone.apps.apps ? perPhone.apps : null
+  Timer { id: confirmTimer; interval: 4000; onTriggered: root.confirmDelete = "" }
   property string message: ""
   property bool messageIsError: false
   property var apps: []
@@ -216,9 +220,9 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
-        var tabs = ["overview", "photos", "files", "backup", "mirror", "connect"]
+        var tabs = ["overview", "photos", "space", "files", "backup", "mirror", "connect"]
         if (t === "r" || t === "R") root.refresh()
-        else if (t >= "1" && t <= "6") root.tab = tabs[Number(t) - 1]
+        else if (t >= "1" && t <= "7") root.tab = tabs[Number(t) - 1]
       }
 
       Flickable {
@@ -272,6 +276,7 @@ Panel {
             spacing: Style.space(4)
             Chip { label: "Overview"; on: root.tab === "overview"; onClicked: root.tab = "overview" }
             Chip { label: "Photos"; on: root.tab === "photos"; onClicked: root.tab = "photos" }
+            Chip { label: "Space"; on: root.tab === "space"; onClicked: root.tab = "space" }
             Chip { label: "Files"; on: root.tab === "files"; onClicked: root.tab = "files" }
             Chip { label: "Backup"; on: root.tab === "backup"; onClicked: root.tab = "backup" }
             Chip { label: "Mirror"; on: root.tab === "mirror"; onClicked: root.tab = "mirror" }
@@ -456,6 +461,94 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
+              }
+            }
+          }
+
+          // ============================================== Space
+          Column {
+            visible: root.tab === "space"
+            width: parent.width
+            spacing: Style.space(8)
+            Column {
+              visible: root.trusted && !!root.phone.storage
+              width: parent.width
+              spacing: Style.space(4)
+              InfoPair { label: root.kind + " storage"; value: root.trusted && root.phone.storage ? root.fmtBytes(root.phone.storage.free) + " free of " + root.fmtBytes(root.phone.storage.total) : "" }
+              Meter { width: parent.width; fraction: root.trusted && root.phone.storage ? 1 - root.phone.storage.free / root.phone.storage.total : 0 }
+            }
+
+            PanelSectionHeader { text: "APPS ON THE " + root.kind.toUpperCase() + " BY SIZE"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Text {
+              width: parent.width
+              text: !root.trusted ? "Connect and trust the device." : root.appSizes ? root.appSizes.apps.length + " apps · " + root.fmtBytes(root.appSizes.total) + " · checked " + root.ago(root.appSizes.time)
+                + "\nData = what the app keeps (downloads, caches, media). To free it: Settings › General › " + root.kind + " Storage › the app › Offload App (keeps the data) or Delete App; or clear downloads inside the app." : "Not checked yet."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Chip { visible: root.trusted; label: actionProcess.running ? "Checking…" : "Check app sizes"; onClicked: root.act(["app-sizes", root.phone.udid], "App sizes updated") }
+            Repeater {
+              model: root.appSizes ? root.appSizes.apps.slice(0, root.showAllApps ? 60 : 12) : []
+              Column {
+                required property var modelData
+                width: column.width
+                spacing: Style.space(2)
+                InfoPair { label: modelData.name; value: root.fmtBytes(modelData.total) + "  (app " + root.fmtBytes(modelData.app) + " · data " + root.fmtBytes(modelData.data) + ")" }
+                Meter { width: parent.width; alarm: false; fraction: root.appSizes.apps[0].total > 0 ? modelData.total / root.appSizes.apps[0].total : 0 }
+              }
+            }
+            Chip { visible: !!root.appSizes && root.appSizes.apps.length > 12; label: root.showAllApps ? "Show fewer" : "Show more apps"; onClicked: root.showAllApps = !root.showAllApps }
+
+            PanelSeparator { foreground: root.foreground }
+            PanelSectionHeader { text: "HEAVIEST PHOTOS AND VIDEOS"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Text {
+              width: parent.width
+              text: !root.safe ? "Run the check to list them (it also says which are safe to delete)."
+                : "✓ = on this PC and in Google Photos: safe to delete in the Photos app (Albums › Media Types › Videos, sorted by size helps). Checked " + root.ago(root.safe.time) + "."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Chip { visible: root.trusted && !root.isRunning("safe") && !root.isRunning("import"); label: "Check (sizes + what is safe)"; onClicked: root.startJob("safe") }
+            Repeater {
+              model: root.safe && root.safe.largest ? root.safe.largest.slice(0, 15) : []
+              ModelRow {
+                required property var modelData
+                width: parent.width
+                title: (modelData.safe ? "✓ " : "· ") + (modelData.video ? "󰕧 " : "󰋩 ") + modelData.rel.split("/").pop() + " · " + root.fmtBytes(modelData.size)
+                meta: modelData.date + " · " + (modelData.safe ? "safe to delete" : modelData.state === "not uploaded" ? "on this PC, not in Google Photos yet" : "not on this PC yet")
+                actions: modelData.local ? [{ icon: "󰈈", tip: "Look at the copy on this PC", run: function() { root.openPath(modelData.local) } }] : []
+              }
+            }
+
+            PanelSeparator { foreground: root.foreground }
+            PanelSectionHeader { text: "DEVICE BACKUPS ON THIS PC"; foreground: root.foreground; fontFamily: root.fontFamily }
+            Text {
+              width: parent.width
+              text: "Each one can be deleted from this PC once Google Drive has it (restore later from Drive). The next backup of that device copies everything again."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Text { visible: !root.info || !root.info.localBackups || root.info.localBackups.length === 0; text: "None."; color: root.dim; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall }
+            Repeater {
+              model: root.info && root.info.localBackups ? root.info.localBackups : []
+              ModelRow {
+                required property var modelData
+                width: parent.width
+                readonly property bool confirming: root.confirmDelete === modelData.udid
+                title: (modelData.name || modelData.udid.slice(0, 13)) + " · " + root.fmtBytes(modelData.bytes)
+                meta: confirming ? "Click again to delete it from this PC (" + root.fmtBytes(modelData.bytes) + ")"
+                  : (modelData.inDrive ? "in Google Drive (" + root.ago(modelData.driveTime) + ")" : modelData.whyNotDelete) + " · made " + root.ago(modelData.time)
+                actions: modelData.canDelete ? [{ icon: confirming ? "󰄬" : "󰆴", tip: confirming ? "Click again to delete" : "Delete local copy (Google Drive keeps it)",
+                  run: function() {
+                    if (confirming) { root.confirmDelete = ""; root.act(["backup-delete", modelData.udid], "Local backup deleted: " + root.fmtBytes(modelData.bytes) + " freed") }
+                    else { root.confirmDelete = modelData.udid; confirmTimer.restart() }
+                  } }] : []
               }
             }
           }
@@ -676,13 +769,14 @@ Panel {
   component Meter: Item {
     property real fraction: 0
     property bool invert: false   // battery: low is bad
+    property bool alarm: true     // false: a plain proportion (app sizes), never red
     implicitHeight: Style.space(6)
     Rectangle { anchors.fill: parent; radius: height / 2; color: Qt.alpha(root.foreground, 0.15) }
     Rectangle {
       width: parent.width * Math.max(0, Math.min(1, parent.fraction))
       height: parent.height
       radius: height / 2
-      color: (parent.invert ? parent.fraction < 0.15 : parent.fraction > 0.9) ? root.urgent : root.foreground
+      color: parent.alarm && (parent.invert ? parent.fraction < 0.15 : parent.fraction > 0.9) ? root.urgent : root.foreground
     }
   }
 

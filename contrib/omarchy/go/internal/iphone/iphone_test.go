@@ -1,6 +1,7 @@
 package iphone
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -514,14 +515,14 @@ func TestCheckSafe(t *testing.T) {
 	up[put(dir, "2024/IMG_1.HEIC", "aaaa", d(2024, 1, 5))] = true
 	up[put(dir, "2024/IMG_2.HEIC", "bbbb", d(2024, 3, 9))] = true
 	put(dir, "2025/IMG_3.HEIC", "cccc", d(2025, 6, 1))
-	r, err := CheckSafe(root, dir, up, 10)
+	r, err := CheckSafe(root, dir, up, Ledger{}, 10)
 	if err != nil || r.Total != 4 || r.Safe != 2 || r.NotUploaded != 1 || r.NotCopied != 1 || r.SafeUntil != "2025-05-31" ||
 		r.OldestMissing != "2025-06-01" || r.Verified != 2 || r.Mismatched != 0 {
 		t.Fatalf("%+v %v", r, err)
 	}
 	// a local copy with the right size but other content: nothing is declared safe
 	put(dir, "2024/IMG_1.HEIC", "zzzz", d(2024, 1, 5))
-	if r, _ := CheckSafe(root, dir, up, 10); r.Mismatched != 1 || r.SafeUntil != "" {
+	if r, _ := CheckSafe(root, dir, up, Ledger{}, 10); r.Mismatched != 1 || r.SafeUntil != "" {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -741,5 +742,206 @@ func TestMigrateStateMovesSingleDeviceFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(p.State, "last-backup.json")); err == nil {
 		t.Fatal("old file left")
+	}
+}
+
+func TestParseAppSizes(t *testing.T) {
+	apps, err := ParseAppSizes([]byte(`<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><array>
+		<dict><key>CFBundleIdentifier</key><string>com.nintendo.znma</string><key>CFBundleDisplayName</key><string>Switch</string>
+		<key>StaticDiskUsage</key><integer>63610880</integer><key>DynamicDiskUsage</key><integer>61440</integer></dict>
+		<dict><key>CFBundleIdentifier</key><string>net.whatsapp.WhatsApp</string><key>CFBundleName</key><string>WhatsApp</string>
+		<key>StaticDiskUsage</key><integer>300000000</integer><key>DynamicDiskUsage</key><integer>9000000000</integer></dict>
+		</array></plist>`))
+	if err != nil || len(apps) != 2 || apps[0].Name != "WhatsApp" || apps[0].Total != 9300000000 || apps[1].Name != "Switch" {
+		t.Fatalf("%+v %v", apps, err)
+	}
+}
+
+func TestAppSizesKeepsTheAnswer(t *testing.T) {
+	p := testPaths(t)
+	orig := browseApps
+	defer func() { browseApps = orig }()
+	browseApps = func(string) ([]byte, error) {
+		return []byte(`<plist version="1.0"><array><dict><key>CFBundleIdentifier</key><string>a.b</string><key>StaticDiskUsage</key><integer>5</integer></dict></array></plist>`), nil
+	}
+	if r, err := AppSizes(p, udid); err != nil || r["total"] != int64(5) {
+		t.Fatal(r, err)
+	}
+	var cached M
+	if !readJSON(p.devFile(udid, "apps.json"), &cached) || cached["total"] != 5.0 {
+		t.Fatal(cached)
+	}
+}
+
+func TestLargest(t *testing.T) {
+	dir := t.TempDir()
+	d := time.Date(2025, 5, 1, 12, 0, 0, 0, time.Local)
+	files := []MediaFile{{Rel: "100APPLE/IMG_1.MOV", Size: 900, Mod: d}, {Rel: "100APPLE/IMG_2.HEIC", Size: 10, Mod: d}, {Rel: "100APPLE/IMG_3.MOV", Size: 500, Mod: d}}
+	local := filepath.Join(dir, "2025", "IMG_1.MOV")
+	_ = os.MkdirAll(filepath.Dir(local), 0o755)
+	_ = os.WriteFile(local, make([]byte, 900), 0o644)
+	l := Largest(files, dir, map[string]bool{local: true}, Ledger{}, 2)
+	if len(l) != 2 || l[0].Rel != "100APPLE/IMG_1.MOV" || !l[0].Safe || !l[0].Video || l[1].State != "not copied" {
+		t.Fatalf("%+v", l)
+	}
+}
+
+func TestLocalBackupsAndDelete(t *testing.T) {
+	p := testPaths(t)
+	cfg := p.LoadConfig()
+	_ = os.MkdirAll(filepath.Join(cfg.BackupDir, udid), 0o755)
+	_ = os.WriteFile(filepath.Join(cfg.BackupDir, udid, "Status.plist"), []byte("x"), 0o644)
+	bt := time.Date(2026, 10, 12, 17, 33, 0, 0, time.UTC)
+	_ = writeJSON(p.devFile(udid, "last-backup.json"), M{"udid": udid, "ok": true, "time": bt.Format(time.RFC3339), "bytes": 45864700346})
+	// not in Drive yet: refused
+	if _, err := DeleteLocalBackup(p, udid); err == nil || !strings.Contains(err.Error(), "Google Drive") {
+		t.Fatal(err)
+	}
+	// an upload older than the backup does not count
+	_ = writeJSON(p.devFile(udid, "last-drive.json"), M{"ok": true, "time": bt.Add(-time.Hour).Format(time.RFC3339)})
+	if b := LocalBackups(p, cfg)[0]; b.CanDelete || b.Bytes != 45864700346 {
+		t.Fatalf("%+v", b)
+	}
+	_ = writeJSON(p.devFile(udid, "last-drive.json"), M{"ok": true, "time": bt.Add(2 * time.Hour).Format(time.RFC3339)})
+	freed, err := DeleteLocalBackup(p, udid)
+	if err != nil || freed != 45864700346 {
+		t.Fatal(freed, err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.BackupDir, udid)); err == nil {
+		t.Fatal("still there")
+	}
+	// the weekly automatic backup still counts from the backup's date: no immediate refill
+	cfg.AutoBackupDays = 7
+	if BackupDue(p, cfg, udid, bt.Add(24*time.Hour)) {
+		t.Fatal("deleting the local copy should not trigger a new backup right away")
+	}
+	if _, err := DeleteLocalBackup(p, "../../etc"); err == nil {
+		t.Fatal("bad id accepted")
+	}
+}
+
+func TestOnConnectStartsTheBackupDetached(t *testing.T) {
+	Notify = func(string, string) {}
+	var started []string
+	orig := StartJob
+	StartJob = func(job, u string) error { started = append(started, job+" "+u); return nil }
+	defer func() { StartJob = orig }()
+	p := testPaths(t)
+	_ = p.Set("autoImport", "false")
+	_ = p.Set("autoBackupDays", "7")
+	f := &fake{out: map[string]string{"ifuse": "", "fusermount3": ""}, fail: map[string]bool{}, hook: cameraRoll(map[string]string{})}
+	OnConnect(f.run, p, Device{UDID: udid, Trusted: true, Name: "iPad"})
+	if len(started) != 1 || started[0] != "backup "+udid {
+		t.Fatal(started)
+	}
+}
+
+// fakeMeta answers exiv2/ffprobe from a map: file base name -> capture date
+func fakeMeta(dates map[string]string) func() {
+	orig := metaRunner
+	metaRunner = func(name string, args ...string) ([]byte, error) {
+		d, ok := dates[filepath.Base(args[len(args)-1])]
+		if !ok {
+			return nil, errors.New("no metadata")
+		}
+		if name == "ffprobe" {
+			return []byte("TAG:com.apple.quicktime.creationdate=" + d + "T10:00:00-0500\n"), nil
+		}
+		return []byte(strings.ReplaceAll(d, "-", ":") + " 10:00:00\n"), nil
+	}
+	return func() { metaRunner = orig }
+}
+
+func TestLedgerReadsTheFirstFormat(t *testing.T) {
+	var l Ledger
+	if err := json.Unmarshal([]byte(`{"100APPLE/A.HEIC":1234,"100APPLE/B.MOV":{"size":9,"local":"/x/B.MOV","taken":"2023-01-02T10:00:00-05:00"}}`), &l); err != nil {
+		t.Fatal(err)
+	}
+	if l["100APPLE/A.HEIC"].Size != 1234 || l["100APPLE/B.MOV"].Local != "/x/B.MOV" {
+		t.Fatalf("%+v", l)
+	}
+}
+
+func TestImportUsesTheCaptureDate(t *testing.T) {
+	defer fakeMeta(map[string]string{"IMG_0001.HEIC": "2023-08-18", "IMG_0002.MOV": "2024-10-17"})()
+	p := testPaths(t)
+	// file dates say 2024-12-24 (cameraRoll), the metadata says 2023 / 2024
+	f := &fake{out: map[string]string{"ifuse": "", "fusermount3": ""}, fail: map[string]bool{},
+		hook: cameraRoll(map[string]string{"100APPLE/IMG_0001.HEIC": "one", "100APPLE/IMG_0002.MOV": "two", "100APPLE/IMG_0003.PNG": "shot"})}
+	if _, err := Import(f.run, p, udid, "iPhone", nil); err != nil {
+		t.Fatal(err)
+	}
+	dir := Folder(p.LoadConfig(), "iPhone")
+	for _, want := range []string{"2023/IMG_0001.HEIC", "2024/IMG_0002.MOV", "2024/IMG_0003.PNG"} {
+		if _, err := os.Stat(filepath.Join(dir, want)); err != nil {
+			t.Fatal(want, err)
+		}
+	}
+	e := p.LoadLedger(udid)["100APPLE/IMG_0001.HEIC"]
+	if e.Local != filepath.Join(dir, "2023", "IMG_0001.HEIC") || !strings.HasPrefix(e.Taken, "2023-08-18") {
+		t.Fatalf("%+v", e)
+	}
+	if st, _ := os.Stat(e.Local); st.ModTime().Year() != 2023 {
+		t.Fatal("the copy should carry the capture date")
+	}
+	if p.LoadLedger(udid)["100APPLE/IMG_0003.PNG"].Taken != "" {
+		t.Fatal("a screenshot without metadata has no capture date")
+	}
+}
+
+func TestReorganizeMovesByCaptureDateWithoutReuploading(t *testing.T) {
+	defer fakeMeta(map[string]string{"IMG_0856.MOV": "2023-12-24", "IMG_9.HEIC": "2023-03-03", "IMG_2816.MOV": "2024-06-27"})()
+	p := testPaths(t)
+	dir := Folder(p.LoadConfig(), "iPhone")
+	// the camera roll: file dates 2024-12-24 (cameraRoll), so the first version put everything in 2024/
+	roll := map[string]string{"100APPLE/IMG_0856.MOV": "video", "101APPLE/IMG_9.HEIC": "nine", "102APPLE/IMG_2816.MOV": "right year"}
+	f := &fake{out: map[string]string{"ifuse": "", "fusermount3": ""}, fail: map[string]bool{}, hook: cameraRoll(roll)}
+	put := func(rel, body string) string {
+		fp := filepath.Join(dir, rel)
+		_ = os.MkdirAll(filepath.Dir(fp), 0o755)
+		_ = os.WriteFile(fp, []byte(body), 0o644)
+		return fp
+	}
+	a := put("2024/IMG_0856.MOV", "video")
+	put("2024/IMG_9.HEIC", "nine")
+	put("2023/IMG_9.HEIC", "NINE") // another photo with the same name and size, already in 2023
+	put("2024/IMG_2816.MOV", "right year")
+	_ = writeJSON(p.ledgerPath(udid), map[string]int64{"100APPLE/IMG_0856.MOV": 5, "101APPLE/IMG_9.HEIC": 4, "102APPLE/IMG_2816.MOV": 10})
+	gl := filepath.Join(p.gphotosState(), "uploaded.jsonl")
+	_ = os.MkdirAll(filepath.Dir(gl), 0o755)
+	_ = os.WriteFile(gl, []byte(`{"k":"iphone:2024/IMG_0856.MOV","rel":"2024/IMG_0856.MOV","path":"`+a+`","src":"iphone","album":"iPhone 2024"}
+{"k":"camera:x.jpg","path":"/other/x.jpg","src":"camera"}
+`), 0o644)
+
+	dry, err := Reorganize(f.run, p, udid, "iPhone", true, nil)
+	if err != nil || dry.Moved != 2 {
+		t.Fatalf("%+v %v", dry, err)
+	}
+	if _, err := os.Stat(a); err != nil {
+		t.Fatal("dry run moved a file")
+	}
+	res, err := Reorganize(f.run, p, udid, "iPhone", false, nil)
+	if err != nil || res.Moved != 2 || res.Updated != 1 || res.Missing != 0 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "2023", "IMG_0856.MOV")); err != nil {
+		t.Fatal("not moved")
+	}
+	if body, _ := os.ReadFile(filepath.Join(dir, "2023", "IMG_9-1.HEIC")); string(body) != "nine" {
+		t.Fatal("a different photo with the same name was not kept apart")
+	}
+	if body, _ := os.ReadFile(filepath.Join(dir, "2023", "IMG_9.HEIC")); string(body) != "NINE" {
+		t.Fatal("the photo already there was touched")
+	}
+	glb, _ := os.ReadFile(gl)
+	if !strings.Contains(string(glb), `"k":"iphone:2023/IMG_0856.MOV"`) || !strings.Contains(string(glb), `"camera:x.jpg"`) {
+		t.Fatal(string(glb))
+	}
+	e := p.LoadLedger(udid)["100APPLE/IMG_0856.MOV"]
+	if e.Local != filepath.Join(dir, "2023", "IMG_0856.MOV") || !strings.HasPrefix(e.Taken, "2023-12-24") {
+		t.Fatalf("%+v", e)
+	}
+	if again, _ := Reorganize(f.run, p, udid, "iPhone", false, nil); again.Moved != 0 || again.Missing != 0 {
+		t.Fatalf("second run: %+v", again)
 	}
 }

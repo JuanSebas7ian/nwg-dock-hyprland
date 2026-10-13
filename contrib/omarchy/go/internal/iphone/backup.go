@@ -217,8 +217,16 @@ func OnConnect(run Runner, p Paths, d Device) {
 	}
 	cfg := p.LoadConfig()
 	name := deviceLabel(d)
+	// photos imported by the first version sit in the year of their file date: move them to the capture year once
+	if l := p.LoadLedger(d.UDID); len(l) > 0 && needsReorganize(l) && !p.locked(jobKey("import", d.UDID)) {
+		if res, err := Reorganize(run, p, d.UDID, d.Class, false, nil); err == nil && res.Moved > 0 {
+			Notify(name+": fotos reordenadas", fmt.Sprintf("%d fotos movidas a la carpeta del año en que se tomaron", res.Moved))
+		}
+	}
 	if cfg.AutoImport && !p.locked(jobKey("import", d.UDID)) {
-		if res, err := Import(run, p, d.UDID, d.Class, nil); err != nil {
+		if res, err := Import(run, p, d.UDID, d.Class, func(done, total int, name string) {
+			p.SaveProgress("import", d.UDID, fraction(done, total), fmt.Sprintf("%d of %d · %s", done, total, name))
+		}); err != nil {
 			Notify(name+": no se pudieron importar las fotos", err.Error())
 		} else if res.Imported > 0 || res.Failed > 0 {
 			msg := fmt.Sprintf("%d fotos y videos nuevos en %s", res.Imported, res.Dir)
@@ -233,20 +241,44 @@ func OnConnect(run Runner, p Paths, d Device) {
 		Unmount(run, p, d.UDID)
 	}
 	if BackupDue(p, cfg, d.UDID, time.Now()) {
-		Notify(name+": respaldo automático", "Empezó el respaldo del iPhone; no lo desconectes")
-		if err := Backup(p, d.UDID, nil); err != nil {
-			Notify(name+": el respaldo falló", err.Error())
+		// a detached job (backup, then the Google Drive upload): restarting this service must not kill it
+		if err := StartJob("backup", d.UDID); err != nil {
+			Notify(name+": no se pudo iniciar el respaldo", err.Error())
 		} else {
-			Notify(name+": respaldo listo", "Copia local en "+cfg.BackupDir)
-			if cfg.DriveBackup {
-				if err := DriveUpload(p, d.UDID, nil); err != nil {
-					Notify(name+": no se pudo subir a Google Drive", err.Error())
-				} else {
-					Notify(name+": respaldo en Google Drive", "Subido y cifrado (restic)")
-				}
-			}
+			Notify(name+": respaldo automático", "Empezó el respaldo; luego se sube a Google Drive. No lo desconectes")
 		}
 	}
+}
+
+// StartJob runs `omarchy-iphone <job> <udid>` as a transient user unit, independent of the bar and of this
+// service; the unit name carries the device so two devices run side by side. Tests replace it.
+var StartJob = func(job, udid string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	unit := "omarchy-iphone-" + job + "-" + udid[max(0, len(udid)-8):] + "-" + time.Now().Format("150405")
+	if b, err := exec.Command("systemd-run", "--user", "--collect", "--quiet", "--unit="+unit, exe, job, udid).CombinedOutput(); err != nil {
+		return fmt.Errorf("could not start %s: %s", job, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+// needsReorganize: ledger entries without a recorded place come from the first version.
+func needsReorganize(l Ledger) bool {
+	for _, e := range l {
+		if e.Local == "" {
+			return true
+		}
+	}
+	return false
+}
+
+func fraction(done, total int) float64 {
+	if total <= 0 {
+		return -1
+	}
+	return float64(done) / float64(total)
 }
 
 func deviceLabel(d Device) string {

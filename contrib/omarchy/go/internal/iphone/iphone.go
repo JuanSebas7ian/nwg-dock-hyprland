@@ -164,13 +164,40 @@ func JobsStatus(p Paths, udid string) M {
 		var prog M
 		if running && readJSON(p.devFile(udid, "progress-"+j+".json"), &prog) {
 			progress = prog
-		} else if !running && p.locked(j) && readJSON(filepath.Join(p.State, "progress-"+j+".json"), &prog) {
+		} else if !running && p.locked(j) && legacyOwner(p, j, udid) && readJSON(filepath.Join(p.State, "progress-"+j+".json"), &prog) {
 			// a job started by the first, single-device version (global lock) is still running
 			running, progress = true, prog
 		}
 		out[j] = M{"running": running, "progress": progress}
 	}
 	return out
+}
+
+// legacyOwner: whose job a global lock of the first version is: the lock holder's child process (restic,
+// idevicebackup2) names the device in its arguments.
+func legacyOwner(p Paths, job, udid string) bool {
+	b, err := os.ReadFile(filepath.Join(p.State, job+".lock"))
+	if err != nil {
+		return false
+	}
+	pid := strings.TrimSpace(string(b))
+	procs, _ := filepath.Glob("/proc/[0-9]*/stat")
+	for _, st := range procs {
+		raw, err := os.ReadFile(st)
+		if err != nil {
+			continue
+		}
+		// /proc/<pid>/stat: pid (comm) state ppid ...
+		f := strings.Fields(string(raw[strings.LastIndexByte(string(raw), ')')+1:]))
+		if len(f) < 2 || f[1] != pid {
+			continue
+		}
+		cmd, _ := os.ReadFile(filepath.Join(filepath.Dir(st), "cmdline"))
+		if strings.Contains(string(cmd), udid) {
+			return true
+		}
+	}
+	return false
 }
 
 // KnownDevices: every device with state here (connected now or not).
@@ -213,7 +240,9 @@ func PerDevice(p Paths, cfg Config) M {
 	for _, u := range KnownDevices(p) {
 		var dev Device
 		readJSON(p.devFile(u, "device.json"), &dev) // last known name/model, also when not connected now
-		out[u] = M{"device": dev, "jobs": JobsStatus(p, u), "backup": BackupStatus(p, cfg, u), "drive": DriveStatus(p, cfg, u), "photos": PhotoStatus(p, cfg, u)}
+		var apps M
+		readJSON(p.devFile(u, "apps.json"), &apps)
+		out[u] = M{"device": dev, "apps": apps, "jobs": JobsStatus(p, u), "backup": BackupStatus(p, cfg, u), "drive": DriveStatus(p, cfg, u), "photos": PhotoStatus(p, cfg, u)}
 	}
 	return out
 }
@@ -600,15 +629,16 @@ func Status(run Runner, p Paths, sysClassNet string) M {
 		devs = []Device{}
 	}
 	return M{
-		"devices":    devs,
-		"perDevice":  PerDevice(p, cfg),
-		"backupDir":  cfg.BackupDir,
-		"safe":       SafeStatus(p),
-		"tether":     Tether(run, sysClassNet),
-		"airplay":    AirPlay(run, cfg),
-		"kdeconnect": KDEConnect(run),
-		"mounts":     Mounts(p),
-		"gphotos":    GooglePhotosStatus(p, cfg),
-		"config":     cfg,
+		"devices":      devs,
+		"perDevice":    PerDevice(p, cfg),
+		"backupDir":    cfg.BackupDir,
+		"localBackups": LocalBackups(p, cfg),
+		"safe":         SafeStatus(p),
+		"tether":       Tether(run, sysClassNet),
+		"airplay":      AirPlay(run, cfg),
+		"kdeconnect":   KDEConnect(run),
+		"mounts":       Mounts(p),
+		"gphotos":      GooglePhotosStatus(p, cfg),
+		"config":       cfg,
 	}
 }
