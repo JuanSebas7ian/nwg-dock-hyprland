@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -452,8 +453,11 @@ func (s *Service) Tick() {
 	var d Data
 	have := google.ReadJSON(s.Cache, &d)
 	if s.Configured() && (!have || time.Now().Unix()-d.TS > SyncEvery) {
-		if nd, err := s.Sync(); err == nil {
+		nd, err := s.Sync()
+		if err == nil {
 			d, have = nd, true
+		} else {
+			s.autoReauth(err)
 		}
 	}
 	if !have {
@@ -480,4 +484,36 @@ func (s *Service) Tick() {
 		}
 	}
 	_ = google.WriteJSON(s.Notified, notified, true)
+}
+
+// ReauthEvery is the minimum time between automatic sign-in windows, so a refused
+// sign-in does not open the browser every minute.
+const ReauthEvery = 6 * 3600
+
+// autoReauth opens the Google sign-in by itself when Google withdrew the permission
+// (expired or revoked) and the OAuth client is already saved. It runs as a transient
+// user unit so it outlives this oneshot service.
+func (s *Service) autoReauth(err error) {
+	var ns *google.NeedsSetup
+	if !errors.As(err, &ns) {
+		return
+	}
+	var c google.Client
+	if !google.ReadJSON(s.Auth.ClientPath, &c) || c.ID == "" {
+		return
+	}
+	stamp := filepath.Join(filepath.Dir(s.Notified), "reauth.json")
+	var last struct{ TS int64 }
+	google.ReadJSON(stamp, &last)
+	if time.Now().Unix()-last.TS < ReauthEvery {
+		return
+	}
+	_ = google.WriteJSON(stamp, map[string]int64{"TS": time.Now().Unix()}, true)
+	exe, e := os.Executable()
+	if e != nil {
+		return
+	}
+	_ = exec.Command("notify-send", "-a", "Google Calendar", "-i", "x-office-calendar", "Google Calendar needs you to sign in again",
+		"Opening the Google sign-in in your browser.").Run()
+	_ = exec.Command("systemd-run", "--user", "--collect", "--quiet", "--unit=omarchy-gcal-reauth", exe, "reauth").Run()
 }

@@ -400,6 +400,13 @@ func TestConflicts(t *testing.T) {
 	s = healthy()
 	s.files["/sys/module/btusb/parameters/enable_autosuspend"] = "Y\n"
 	lv(t, scan(s, false)["CF06"], WARN)
+	// array parameter: the first slot took the value, the rest stay at their default
+	s = healthy()
+	s.files["/etc/modprobe.d/zz-array.conf"] = "options btusb reset=0x1d6c\n"
+	s.files["/sys/module/btusb/parameters/reset"] = "7532,-1,-1\n"
+	lv(t, scan(s, false)["CF06"], OK)
+	s.files["/sys/module/btusb/parameters/reset"] = "-1,7532,-1\n"
+	lv(t, scan(s, false)["CF06"], WARN)
 	s = healthy()
 	s.files["/proc/modules"] += "nouveau 16384 0 - Live 0x0\n"
 	lv(t, scan(s, false)["CF07"], FAIL)

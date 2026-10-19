@@ -642,7 +642,7 @@ func checkEffectiveParams(f *Facts) *Finding {
 		}
 		checked++
 		e := expected[k]
-		if !sameParamValue(e.v, actual) {
+		if !sameParamValue(e.v, actual) && !sameParamArray(e.v, actual) {
 			wrong = append(wrong, fmt.Sprintf("%s.%s: pedido %s (%s), en uso %s", k[0], k[1], e.v, e.src, strings.TrimSpace(actual)))
 		}
 	}
@@ -768,4 +768,19 @@ func ExitCode(levels []string) int {
 		}
 	}
 	return m
+}
+
+// sameParamArray handles array parameters (e.g. snd_usb_audio.vid, one slot per card):
+// sysfs prints every slot ("7532,-1,-1,…") while modprobe.d gives the first ones ("0x1d6c").
+func sameParamArray(want, actual string) bool {
+	got := strings.Split(strings.TrimSpace(actual), ",")
+	if len(got) < 2 {
+		return false
+	}
+	for i, w := range strings.Split(want, ",") {
+		if i >= len(got) || !sameParamValue(strings.TrimSpace(w), got[i]) {
+			return false
+		}
+	}
+	return true
 }

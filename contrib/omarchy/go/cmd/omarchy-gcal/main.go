@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -92,15 +93,34 @@ func setup(s *gcal.Service) int {
 	return rc
 }
 
+// reauth signs in again with the saved OAuth client: it opens the Google window and
+// needs no questions, so it can run from the timer or from a button.
+func reauth(s *gcal.Service) int {
+	err := s.Auth.SignIn(gcal.Scopes, "Listo: Google Calendar conectado. Puedes cerrar esta pestaña.")
+	if err == nil {
+		_, err = s.Sync()
+	}
+	if err != nil {
+		fmt.Println("ERROR:", err)
+		_ = exec.Command("notify-send", "-u", "critical", "-a", "Google Calendar", "Google Calendar sign-in failed", err.Error()).Run()
+		return 1
+	}
+	_ = exec.Command("notify-send", "-a", "Google Calendar", "-i", "x-office-calendar", "Google Calendar connected").Run()
+	return 0
+}
+
 func main() {
 	if len(os.Args) < 2 || os.Args[1] == "-h" || os.Args[1] == "--help" {
-		fmt.Println("usage: omarchy-gcal setup|status|sync|events [--max-age S]|add JSON|delete CAL ID [--series]|tick|logout")
+		fmt.Println("usage: omarchy-gcal setup|reauth|status|sync|events [--max-age S]|add JSON|delete CAL ID [--series]|tick|logout")
 		return
 	}
 	s := service()
 	cmd, args := os.Args[1], os.Args[2:]
 	if cmd == "setup" {
 		os.Exit(setup(s))
+	}
+	if cmd == "reauth" {
+		os.Exit(reauth(s))
 	}
 	var res map[string]any
 	var err error
