@@ -96,10 +96,10 @@ remove_all() {
       say "  quitado: $id"
     fi
   done
-  systemctl --user disable --now omarchy-gcal.timer >/dev/null 2>&1 || true
+  systemctl --user disable --now omarchy-gcal.timer omarchy-gdrive-heal.timer >/dev/null 2>&1 || true
   systemctl --user disable --now omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.path opencode-ollama-sync.timer >/dev/null 2>&1 || true
   systemctl --user stop gphotos-sync.service >/dev/null 2>&1 || true
-  for unit in omarchy-spotify-heal.service llama-router.service omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
+  for unit in omarchy-spotify-heal.service llama-router.service omarchy-gcal.service omarchy-gcal.timer omarchy-gdrive-heal.service omarchy-gdrive-heal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service gphotos-sync.service gphotos-sync.timer gphotos-sync.path opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
     [[ -e $UNITS/$unit ]] && backup "$UNITS/$unit" && rm -f "$UNITS/$unit"
   done
   systemctl --user disable --now omarchy-spotify-heal.service llama-router.service >/dev/null 2>&1 || true
@@ -207,7 +207,7 @@ say "Colectores de uso (Antigravity, opencode)"
 for c in "${COLLECTORS[@]}"; do
   install_file "$HERE/bin/$c" "$BIN/$c" 755 || say "  sin cambios: $BIN/$c"
 done
-for unit in omarchy-gcal.service omarchy-gcal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
+for unit in omarchy-gcal.service omarchy-gcal.timer omarchy-gdrive-heal.service omarchy-gdrive-heal.timer omarchy-agent-usage-extra.service omarchy-agent-usage-extra.timer omarchy-session.service omarchy-freeze-guard.service omarchy-memguard.service opencode-ollama-sync.service opencode-ollama-sync.path opencode-ollama-sync.timer; do
   install_file "$HERE/systemd/$unit" "$UNITS/$unit" 644 || say "  sin cambios: $UNITS/$unit"
 done
 
@@ -373,6 +373,7 @@ for id in "${CLONES[@]}"; do
 done
 systemctl --user daemon-reload
 systemctl --user enable --now omarchy-gcal.timer >/dev/null || warn "omarchy-gcal.timer no arrancó"
+systemctl --user enable --now omarchy-gdrive-heal.timer >/dev/null || warn "omarchy-gdrive-heal.timer no arrancó"
 omarchy restart shell >/dev/null 2>&1 || true
 
 cat <<EOF

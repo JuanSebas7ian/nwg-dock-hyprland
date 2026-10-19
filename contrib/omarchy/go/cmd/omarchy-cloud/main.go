@@ -1,7 +1,7 @@
 // omarchy-cloud: backend of the juansebas7ian.cloud bar widget. Prints JSON.
 //
 //	omarchy-cloud status                  Drive, iCloud, Google Photos and Dropbox in one object
-//	omarchy-cloud gdrive status|mount|unmount|refresh
+//	omarchy-cloud gdrive status|mount|unmount|refresh|heal|reauth
 //	omarchy-cloud icloud status|ls [DIR]|keep PATH|mount|unmount|photos-mount|photos-unmount|refresh
 package main
 
@@ -32,8 +32,12 @@ func main() {
 			out(d.SetMounted(a[1] == "mount"))
 		case "refresh":
 			out(d.Refresh())
+		case "heal":
+			out(d.Heal())
+		case "reauth":
+			out(d.Reauth())
 		default:
-			out(cloud.M{"error": "usage: omarchy-cloud gdrive status|mount|unmount|refresh"})
+			out(cloud.M{"error": "usage: omarchy-cloud gdrive status|mount|unmount|refresh|heal|reauth"})
 			os.Exit(2)
 		}
 	case "icloud":

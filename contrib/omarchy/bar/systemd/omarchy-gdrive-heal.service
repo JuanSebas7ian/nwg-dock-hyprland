@@ -1,0 +1,8 @@
+[Unit]
+Description=Google Drive: open the Google sign-in by itself when the permission was withdrawn (omarchy-cloud gdrive heal)
+After=graphical-session.target network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omarchy-cloud gdrive heal
+Nice=10

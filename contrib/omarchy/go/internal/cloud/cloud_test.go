@@ -147,3 +147,23 @@ func TestScanDropboxSkipsLinksAndKeepsNewest(t *testing.T) {
 		t.Fatal(total, rows)
 	}
 }
+
+func TestIsAuthError(t *testing.T) {
+	for in, want := range map[string]bool{
+		"Failed to create file system: couldn't fetch token: invalid_grant: Token has been expired or revoked.": true,
+		"googleapi: Error 401: Invalid Credentials, authError":                                                  true,
+		"dial tcp: lookup www.googleapis.com: no such host":                                                     false,
+		"context deadline exceeded":                                                                             false,
+		"":                                                                                                      false,
+	} {
+		if got := IsAuthError(in); got != want {
+			t.Errorf("IsAuthError(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestDueReauth(t *testing.T) {
+	if DueReauth(1000, 1000+ReauthEvery-1) || !DueReauth(1000, 1000+ReauthEvery) {
+		t.Error("throttle window is wrong")
+	}
+}
