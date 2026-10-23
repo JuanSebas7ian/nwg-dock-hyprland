@@ -95,6 +95,11 @@ func minus(a, b []string) []string {
 	return sortedKeys(r)
 }
 
+// removableNet are drivers of interfaces that live on a plugged device (phone tethering,
+// USB Ethernet): unplugging one is not a driver regression.
+var removableNet = map[string]bool{"ipheth": true, "rndis_host": true, "cdc_ether": true, "cdc_ncm": true, "cdc_eem": true,
+	"usbnet": true, "r8152": true, "ax88179_178a": true, "asix": true}
+
 // DiffStates: FAIL for regressions, INFO for expected changes.
 func DiffStates(old, nw State) []Change {
 	var out []Change
@@ -133,6 +138,8 @@ func DiffStates(old, nw State) []Change {
 		a, aok := old.Net[i]
 		b, bok := nw.Net[i]
 		switch {
+		case aok && !bok && removableNet[a]:
+			add(INFO, fmt.Sprintf("interfaz de red %s (%s) ya no está conectada", i, a))
 		case aok && !bok:
 			add(FAIL, fmt.Sprintf("interfaz de red %s (%s) desapareció", i, a))
 		case bok && !aok:

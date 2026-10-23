@@ -494,3 +494,17 @@ func TestHelpers(t *testing.T) {
 		t.Fatal("unclosed quote")
 	}
 }
+
+func TestDiffUnpluggedTetheringIsInfo(t *testing.T) {
+	old := State{Net: map[string]string{"enp11s0f3u2c4i2": "ipheth", "wlp7s0": "mt7925e"}}
+	nw := State{Net: map[string]string{"wlp7s0": "mt7925e"}}
+	got := DiffStates(old, nw)
+	if len(got) != 1 || got[0].Level != INFO {
+		t.Fatalf("an unplugged iPhone must be INFO, got %+v", got)
+	}
+	nw = State{Net: map[string]string{"enp11s0f3u2c4i2": "ipheth"}} // the built-in Wi-Fi vanishing is still a FAIL
+	got = DiffStates(old, nw)
+	if len(got) != 1 || got[0].Level != FAIL {
+		t.Fatalf("a vanished built-in interface must stay FAIL, got %+v", got)
+	}
+}
